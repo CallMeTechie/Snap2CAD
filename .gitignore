@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*_entzerrt.png
+*_entzerrt.jpg
+*_hoehenlehre.jpg
+.env
+data/
+runs/
+web/node_modules/
+web/static/vendor/

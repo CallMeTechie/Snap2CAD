@@ -1,0 +1,10 @@
+.git
+**/__pycache__
+**/*.pyc
+web/node_modules
+web/static/vendor
+.env
+data
+runs
+*.zip
+docs/preview_*.png

@@ -1,0 +1,6 @@
+reportlab>=4.0
+opencv-python>=4.7
+numpy
+pillow
+# optional fuer iPhone-Fotos (HEIC):
+# pillow-heif

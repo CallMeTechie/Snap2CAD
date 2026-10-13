@@ -1,0 +1,83 @@
+# Snap2CAD – Web-App mit CAD-Sandbox
+#   cp .env.example .env    # ANTHROPIC_API_KEY eintragen
+#   docker compose up -d --build
+#   docker compose logs app  # zeigt beim ersten Start das Admin-Passwort (falls nicht gesetzt)
+name: snap2cad
+
+x-image: &image
+  build: .
+  image: snap2cad:latest
+
+services:
+  app:
+    <<: *image
+    restart: unless-stopped
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-5-5}
+      ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:-}
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-auto}
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1,172.16.0.0/12}
+      DEFAULT_QUOTA: ${DEFAULT_QUOTA:-20}
+      MAX_AUTOFIX: ${MAX_AUTOFIX:-2}
+      MAX_CONCURRENT_JOBS: ${MAX_CONCURRENT_JOBS:-2}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-25}
+      SESSION_DAYS: ${SESSION_DAYS:-30}
+      SANDBOX_MODE: worker
+      SANDBOX_TIMEOUT: ${SANDBOX_TIMEOUT:-120}
+      SANDBOX_MEM_MB: ${SANDBOX_MEM_MB:-3072}
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-8000}:8000"
+    volumes:
+      - data:/data
+      - runs:/runs
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - sandbox
+
+  # Fuehrt den von Claude erzeugten Code aus: kein Netzwerk, keine Datenbank, keine Schluessel.
+  # Laeuft als root nur, um jeden Auftrag unter einer eigenen, unprivilegierten Kennung zu starten.
+  sandbox:
+    <<: *image
+    restart: unless-stopped
+    command: ["python", "-m", "app.sandbox_worker"]
+    user: "0:0"
+    network_mode: none
+    environment:
+      SANDBOX_TIMEOUT: ${SANDBOX_TIMEOUT:-120}
+      SANDBOX_MEM_MB: ${SANDBOX_MEM_MB:-3072}
+      SANDBOX_WORKERS: ${SANDBOX_WORKERS:-2}
+    volumes:
+      - runs:/runs
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: ${SANDBOX_CONTAINER_MEM:-6g}
+    cpus: ${SANDBOX_CPUS:-2}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time,sys; sys.exit(0 if time.time()-os.stat('/runs/.heartbeat').st_mtime < 30 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  data:
+  # Austausch App <-> Sandbox. tmpfs mit fester Groesse: ein Lauf kann die Platte nicht fuellen.
+  runs:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=${RUNS_TMPFS_SIZE:-2g},uid=10001,gid=10001,mode=0711"
