@@ -8,3 +8,6 @@ data/
 runs/
 web/node_modules/
 web/static/vendor/
+.pytest_cache/
+.ruff_cache/
+*.whl

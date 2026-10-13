@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+from contextlib import asynccontextmanager
 import json
 import shutil
 import sys
@@ -25,12 +26,9 @@ VERSION = "1.0.0"
 STATIC = Path(__file__).resolve().parent.parent / "static"
 UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
 
-app = FastAPI(title="Snap2CAD", version=VERSION, docs_url=None, redoc_url=None, openapi_url=None)
-
 
 # ------------------------------------------------------------------ Start
 
-@app.on_event("startup")
 def _startup():
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     (config.DATA_DIR / "photos").mkdir(exist_ok=True)
@@ -41,6 +39,15 @@ def _startup():
     jobs.startup()
     print(f"Snap2CAD {VERSION} · KI: {'Testmodus' if config.AI_FAKE else ('an' if config.ANTHROPIC_API_KEY else 'aus')}"
           f" · Modell {config.ANTHROPIC_MODEL} · Sandbox {config.SANDBOX_MODE}", flush=True)
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    _startup()
+    yield
+
+
+app = FastAPI(title="Snap2CAD", version=VERSION, docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 
 
 # ------------------------------------------------------------------ Middleware
@@ -906,7 +913,8 @@ def meas_patch(mid: int, body: MeasPatch, u: dict = Depends(auth.require_user)):
             fx, fy = _factors(p)
             sets["value"] = geom.compute(body.kind, d["points"], fx, fy)
         elif m["value"] is not None:
-            sets["value"] = m["value"] * (0.5 if body.kind == "radius" else 2.0) if body.kind in ("radius", "diameter") else m["value"]
+            factor = (0.5 if body.kind == "radius" else 2.0) if body.kind in ("radius", "diameter") else 1.0
+            sets["value"] = m["value"] * factor
     if body.points is not None:
         fx, fy = _factors(p)
         v = geom.compute(m["kind"], body.points[:8], fx, fy)
@@ -1035,7 +1043,8 @@ def _csv(pid: int) -> str:
         d = db.jload(m["data"], {}) or {}
         pts = " ".join(f"{p[0]:.2f}/{p[1]:.2f}" for p in d.get("points") or [])
         safe_txt = lambda t: ("'" + t) if t[:1] in ("=", "+", "-", "@", "\t", "\r") else t  # noqa: E731
-        cells = [f"M{m['seq']}", safe_txt(m["label"]), KIND_LABEL.get(m["kind"], m["kind"]), n(m["value"]), m["unit"], n(m["unc"]),
+        cells = [f"M{m['seq']}", safe_txt(m["label"]), KIND_LABEL.get(m["kind"], m["kind"]), n(m["value"]), m["unit"],
+                 n(m["unc"]),
                  n(m["caliper"]), "ja" if m["critical"] else "", safe_txt(m["fit"] or ""), m["source"], d.get("view", ""), pts]
         lines.append(";".join('"' + str(c).replace('"', '""') + '"' if any(x in str(c) for x in ';"\n') else str(c)
                               for c in cells))

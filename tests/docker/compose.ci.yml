@@ -1,0 +1,10 @@
+# Nur fuer die CI: Testmodus statt echter KI, festes Startpasswort, kurze Zeitlimits.
+services:
+  app:
+    environment:
+      AI_FAKE: "1"
+      ADMIN_INITIAL_PASSWORD: "Start-Passwort-1"
+      SANDBOX_TIMEOUT: "20"
+  sandbox:
+    environment:
+      SANDBOX_TIMEOUT: "20"

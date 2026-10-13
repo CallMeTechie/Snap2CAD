@@ -125,8 +125,8 @@ def compute_checks(result: dict, meta: dict, project_id: int | None) -> list[dic
     if isinstance(exp, list) and len(exp) == 3 and bb:
         try:
             e = [float(v) for v in exp]
-            dev = max(abs(a - b) for a, b in zip(bb, e))
-            dev_sorted = max(abs(a - b) for a, b in zip(sorted(bb), sorted(e)))
+            dev = max(abs(a - b) for a, b in zip(bb, e, strict=True))
+            dev_sorted = max(abs(a - b) for a, b in zip(sorted(bb), sorted(e), strict=True))
             lim = max(1.0, 0.03 * max(e))
             if dev <= 0.2:
                 st, det = "ok", f"Abweichung {_de(dev)} mm"

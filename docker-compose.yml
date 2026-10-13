@@ -1,12 +1,12 @@
 # Snap2CAD – Web-App mit CAD-Sandbox
 #   cp .env.example .env    # ANTHROPIC_API_KEY eintragen
-#   docker compose up -d --build
+#   docker compose up -d     # fertiges Image von ghcr.io  (oder: --build fuer lokalen Build)
 #   docker compose logs app  # zeigt beim ersten Start das Admin-Passwort (falls nicht gesetzt)
 name: snap2cad
 
 x-image: &image
   build: .
-  image: snap2cad:latest
+  image: ${SNAP2CAD_IMAGE:-ghcr.io/callmetechie/snap2cad:latest}
 
 services:
   app:

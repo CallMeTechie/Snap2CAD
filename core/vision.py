@@ -48,7 +48,7 @@ def detect(img: np.ndarray) -> dict[int, np.ndarray]:
     corners, ids, _ = _detector().detectMarkers(gray)
     if ids is None:
         return {}
-    return {int(i): c[0].astype(np.float32) for i, c in zip(ids.flatten(), corners)}
+    return {int(i): c[0].astype(np.float32) for i, c in zip(ids.flatten(), corners, strict=True)}
 
 
 def _square(cx: float, cy: float, s: float) -> np.ndarray:

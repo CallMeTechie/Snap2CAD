@@ -1,0 +1,17 @@
+# Nur Werkzeug-Konfiguration (kein installierbares Paket)
+
+[tool.ruff]
+line-length = 130
+target-version = "py312"
+extend-exclude = ["web/node_modules", "web/static/vendor"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B"]
+ignore = ["E402"]  # sys.path-Anpassung vor Importen ist gewollt
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.File", "fastapi.Form", "fastapi.Query"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

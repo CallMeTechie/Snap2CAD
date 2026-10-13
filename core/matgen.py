@@ -241,7 +241,8 @@ def strip_page(c, W, H, label):
     c.setFont("Helvetica", 7.5)
     c.setFillColor(MUTED)
     c.drawString(m * mm, (H - m - 10.5) * mm,
-                 "Ausschneiden, auf Karton kleben, an der blauen Linie falzen und direkt neben das Objekt stellen – alle drei Marker sichtbar.")
+                 "Ausschneiden, auf Karton kleben, an der blauen Linie falzen und direkt neben das Objekt "
+                 "stellen – alle drei Marker sichtbar.")
     foot = 36.0
     vlen = int((H - 2 * m - 18 - foot) // 10) * 10
     y_fold = m + foot + 2
@@ -254,7 +255,7 @@ def strip_page(c, W, H, label):
     c.setFont("Helvetica", 4.6)
     c.setFillColor(MUTED)
     c.drawString(m * mm, (m - 0.5) * mm,
-                 f"ArUco DICT_4X4_50 · Kante 18 mm · Markermitten über Falz: " +
+                 "ArUco DICT_4X4_50 · Kante 18 mm · Markermitten über Falz: " +
                  "  ".join(f"ID{k} {fmt(v)} mm" for k, v in {**a, **b}.items()) +
                  " · Markermitte horizontal = Streifenmitte")
     return {"vlen_mm": vlen, "centers_above_fold_mm": {**a, **b}}

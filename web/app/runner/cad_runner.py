@@ -35,7 +35,6 @@ os.chdir(RUNDIR)
 # 2) Bibliotheken vorab laden (danach wird Nachladen nativer Module blockiert)
 import math  # noqa: E402,F401
 
-import numpy as np  # noqa: E402
 import trimesh  # noqa: E402
 from build123d import *  # noqa: E402,F401,F403
 from build123d import BuildPart, export_step, export_stl, import_step  # noqa: E402
@@ -68,7 +67,7 @@ def _seccomp() -> bool:
     prog = [(ld, 0, 0, 4), (jeq, 1, 0, audit_arch), (ret, 0, 0, kill), (ld, 0, 0, 0)]
     checks = ([(jge, 0x40000000)] if arch == "x86_64" else []) + [(jeq, nr) for nr in nrs]
     deny_at = len(prog) + len(checks) + 1
-    for i, (op, k) in enumerate(checks):
+    for op, k in checks:
         prog.append((op, deny_at - (len(prog)) - 1, 0, k))
     prog += [(ret, 0, 0, allow), (ret, 0, 0, eperm)]
     arr = (Filter * len(prog))(*[Filter(*x) for x in prog])

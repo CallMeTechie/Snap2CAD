@@ -1,5 +1,8 @@
 # Snap2CAD – Bauteile per Foto vermessen und als STEP/STL nachbauen
 
+[![CI](https://github.com/CallMeTechie/Snap2CAD/actions/workflows/ci.yml/badge.svg)](https://github.com/CallMeTechie/Snap2CAD/actions/workflows/ci.yml)
+[![Image](https://img.shields.io/badge/image-ghcr.io%2Fcallmetechie%2Fsnap2cad-blue)](https://github.com/CallMeTechie/Snap2CAD/pkgs/container/snap2cad)
+
 **Snap2CAD** besteht aus einer druckbaren Messunterlage mit mm-Raster und ArUco-Markern. Du legst ein Bauteil darauf, fotografierst es mit dem Handy, und eine KI (oder das mitgelieferte Skript) entzerrt das Foto auf die Tischebene und misst die Konturen in Millimetern. Ein fertiger Prompt – oder die mitgelieferte Web-App mit Claude – führt anschließend vom Messergebnis zum parametrischen CAD-Modell mit **STEP- und STL-Export** für 3D-Druck oder CNC-Fräsen.
 
 > **English summary:** Snap2CAD is a printable measuring mat (A4/A3) with a 1 mm grid and ArUco markers. Photograph a part on it, and an AI with code execution (or the included script) rectifies the photo to true scale and measures it. A ready-made prompt – or the included self-hosted web app with Claude – then turns the measurements into a parametric CAD model exported as STEP and STL. The prompt and documentation are in German.
@@ -128,9 +131,11 @@ Alles aus diesem Repo als selbst gehostete Web-Oberfläche: Unterlage als PDF er
 ```bash
 git clone https://github.com/CallMeTechie/snap2cad.git && cd snap2cad
 cp .env.example .env          # ANTHROPIC_API_KEY eintragen, Rest nach Bedarf
-docker compose up -d --build
+docker compose up -d          # lädt das fertige Image ghcr.io/callmetechie/snap2cad:latest
 docker compose logs app       # beim ersten Start: Admin-Passwort (falls ADMIN_INITIAL_PASSWORD leer)
 ```
+
+Eigenen Build statt fertigem Image: `docker compose up -d --build`. Eine bestimmte Version: `SNAP2CAD_IMAGE=ghcr.io/callmetechie/snap2cad:1.0.0` in die `.env`. Updates: `docker compose pull && docker compose up -d`.
 
 Danach unter `http://localhost:8000` als `admin` anmelden. Beim ersten Login muss das Passwort geändert werden. Weitere Nutzer kommen nur per Einladungslink dazu (Benutzermenü → Benutzerverwaltung). Ohne `ANTHROPIC_API_KEY` funktionieren Unterlage, Fotos und Messen, nur die KI-Funktionen sind aus.
 
@@ -156,7 +161,24 @@ cd web && npm ci && sh scripts/vendor.sh      # three.js und Schriften nach stat
 DATA_DIR=./data RUNS_DIR=./runs SANDBOX_MODE=local AI_FAKE=1 uvicorn app.main:app --reload
 ```
 
+Tests:
+
+```bash
+pip install -r web/requirements.txt -r requirements-dev.txt
+ruff check . && pytest
+```
+
 `SANDBOX_MODE=local` führt den CAD-Code ohne Container-Trennung aus (nur Limits, seccomp und Audit-Hook) und ist nur für die Entwicklung gedacht. `AI_FAKE=1` liefert feste Testantworten statt echter API-Aufrufe.
+
+### CI und Releases
+
+Jeder Push und jeder Pull Request durchläuft [GitHub Actions](.github/workflows/ci.yml):
+
+1. **Lint:** Ruff, JavaScript-Syntax, Compose-Datei
+2. **Tests:** pytest – PDF-Erzeugung, Marker-Erkennung an synthetischen Fotos, Messgeometrie, Anmeldung und Rechte, kompletter CAD-Ablauf im KI-Testmodus, Sandbox-Abwehr
+3. **Docker:** Image bauen, Stack starten, End-to-End-Auftrag über den Sandbox-Container, Ausbruchstests im Container
+
+Erst wenn alles grün ist, wird das Image nach `ghcr.io/callmetechie/snap2cad` geschoben: `latest` und `sha-…` von `main`, Versionstags (`1.2.3`, `1.2`) bei einem Git-Tag `v1.2.3`. Pull Requests bauen und testen nur.
 
 ## Tipps aus der Praxis
 
