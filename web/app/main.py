@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 from contextlib import asynccontextmanager
 import json
+import os
 import shutil
 import sys
 import threading
@@ -22,7 +23,7 @@ from . import ai, auth, config, db, geom, jobs, sandbox
 sys.path.insert(0, str(config.ROOT))
 from core import matgen, vision  # noqa: E402
 
-VERSION = "1.0.0"
+VERSION = os.environ.get("SNAP2CAD_VERSION", "0.1.0")  # im Image vom Git-Tag gesetzt
 STATIC = Path(__file__).resolve().parent.parent / "static"
 UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
 

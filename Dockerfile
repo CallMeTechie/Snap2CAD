@@ -43,6 +43,10 @@ RUN python -m compileall -q /app/core /app/web/app \
  && python -c "import build123d, trimesh, shapely, cv2, reportlab, pypdfium2" \
  && chmod -R a+rX /app
 
+# Version zuletzt setzen, damit ein neuer Tag den Build-Cache nicht entwertet
+ARG SNAP2CAD_VERSION=0.1.0
+ENV SNAP2CAD_VERSION=${SNAP2CAD_VERSION}
+
 WORKDIR /app/web
 EXPOSE 8000
 USER 10001:10001

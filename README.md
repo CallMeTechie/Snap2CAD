@@ -135,7 +135,7 @@ docker compose up -d          # lädt das fertige Image ghcr.io/callmetechie/sna
 docker compose logs app       # beim ersten Start: Admin-Passwort (falls ADMIN_INITIAL_PASSWORD leer)
 ```
 
-Eigenen Build statt fertigem Image: `docker compose up -d --build`. Eine bestimmte Version: `SNAP2CAD_IMAGE=ghcr.io/callmetechie/snap2cad:1.0.0` in die `.env`. Updates: `docker compose pull && docker compose up -d`.
+Eigenen Build statt fertigem Image: `docker compose up -d --build`. Eine bestimmte Version: `SNAP2CAD_IMAGE=ghcr.io/callmetechie/snap2cad:0.1.0` in die `.env`. Updates: `docker compose pull && docker compose up -d`.
 
 Danach unter `http://localhost:8000` als `admin` anmelden. Beim ersten Login muss das Passwort geändert werden. Weitere Nutzer kommen nur per Einladungslink dazu (Benutzermenü → Benutzerverwaltung). Ohne `ANTHROPIC_API_KEY` funktionieren Unterlage, Fotos und Messen, nur die KI-Funktionen sind aus.
 
