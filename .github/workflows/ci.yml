@@ -10,6 +10,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # Trivy als Container, per Digest festgenagelt (v0.75.0). Bewusst nicht trivy-action: deren Tags
+  # wurden im Maerz 2026 kompromittiert (GHSA-69fq-xp46-6x23).
+  TRIVY: ghcr.io/aquasecurity/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -50,6 +55,7 @@ jobs:
           cache: pip
           cache-dependency-path: |
             web/requirements.txt
+            web/requirements-overrides.txt
             requirements-dev.txt
       - name: Systembibliotheken
         run: |
@@ -57,18 +63,41 @@ jobs:
           sudo apt-get install -y -q --no-install-recommends libgl1 libglib2.0-0t64 || \
           sudo apt-get install -y -q --no-install-recommends libgl1 libglib2.0-0
       - name: Abhaengigkeiten
-        run: pip install -r web/requirements.txt -r requirements-dev.txt
+        run: |
+          pip install -r web/requirements.txt -r requirements-dev.txt
+          pip install --no-deps -r web/requirements-overrides.txt
       - name: pytest
         run: pytest -v --durations=10
 
+  trivy-repo:
+    name: Trivy (Repo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Datum fuer DB-Cache
+        id: date
+        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ steps.date.outputs.day }}
+          restore-keys: trivy-db-
+      - name: Abhaengigkeiten, Secrets, Dockerfile
+        run: |
+          docker run --rm -v "$PWD:/src:ro" -w /src -v "$HOME/.cache/trivy:/root/.cache/trivy" "$TRIVY" \
+            fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --ignore-unfixed \
+            --ignorefile .trivyignore --skip-dirs web/node_modules --exit-code 1 .
+
   docker:
     name: Docker-Image
-    needs: [lint, test]
+    needs: [lint, test, trivy-repo]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
       contents: read
       packages: write
+      security-events: write
     steps:
       - uses: actions/checkout@v4
 
@@ -104,6 +133,35 @@ jobs:
           build-args: SNAP2CAD_VERSION=${{ env.APP_VERSION }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Datum fuer DB-Cache
+        id: date
+        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ steps.date.outputs.day }}
+          restore-keys: trivy-db-
+
+      - name: Trivy (Image) – Bericht fuer GitHub Security
+        if: always()
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$HOME/.cache/trivy:/root/.cache/trivy" \
+            -v "$PWD:/out" "$TRIVY" image --scanners vuln --format sarif --output /out/trivy-image.sarif snap2cad:ci
+
+      - name: Bericht hochladen
+        if: always() && hashFiles('trivy-image.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+      - name: Trivy (Image) – Freigabe nur ohne behebbare HIGH/CRITICAL
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$HOME/.cache/trivy:/root/.cache/trivy" \
+            -v "$PWD/.trivyignore:/.trivyignore:ro" "$TRIVY" image --scanners vuln --severity HIGH,CRITICAL \
+            --ignore-unfixed --ignorefile /.trivyignore --exit-code 1 snap2cad:ci
 
       - name: Stack starten
         env:

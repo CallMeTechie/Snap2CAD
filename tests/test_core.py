@@ -71,3 +71,17 @@ def test_gauge_detected(photo_gauge):
     assert g["rms_mm"] < 0.5
     out, (x0, x1, y0, y1) = vision.rectify_gauge(img, g)
     assert out.shape[0] == int((y1 - y0) * 10)
+
+
+@pytest.mark.parametrize("fmt,ok", [("JPEG", True), ("PNG", True), ("WEBP", True), ("GIF", False), ("TIFF", False),
+                                    ("BMP", False)])
+def test_upload_formats_restricted(fmt, ok):
+    """Nur Kamera-Formate werden dekodiert (kleinere Angriffsflaeche der Bild-Decoder)."""
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8)).save(buf, fmt)
+    if ok:
+        assert vision.load_image(buf.getvalue()).shape == (8, 8, 3)
+    else:
+        with pytest.raises(Exception):  # noqa: B017
+            vision.load_image(buf.getvalue())

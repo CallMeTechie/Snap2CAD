@@ -1,0 +1,3 @@
+# Bewusst akzeptierte Trivy-Befunde, eine ID pro Zeile, immer mit Begruendung und Datum.
+# Beispiel:
+# CVE-2099-12345  # betrifft nur Funktion X, die Snap2CAD nicht nutzt (2026-10-13, Marc)

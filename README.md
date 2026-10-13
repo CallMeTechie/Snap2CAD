@@ -156,7 +156,7 @@ Die Fotos, Maße und Beschreibungen eines CAD-Auftrags werden an die Anthropic-A
 ### Entwicklung ohne Docker
 
 ```bash
-pip install -r web/requirements.txt
+pip install -r web/requirements.txt && pip install --no-deps -r web/requirements-overrides.txt
 cd web && npm ci && sh scripts/vendor.sh      # three.js und Schriften nach static/vendor
 DATA_DIR=./data RUNS_DIR=./runs SANDBOX_MODE=local AI_FAKE=1 uvicorn app.main:app --reload
 ```
@@ -165,6 +165,7 @@ Tests:
 
 ```bash
 pip install -r web/requirements.txt -r requirements-dev.txt
+pip install --no-deps -r web/requirements-overrides.txt   # Sicherheitsupdates gegen zu enge Obergrenzen
 ruff check . && pytest
 ```
 
@@ -176,7 +177,10 @@ Jeder Push und jeder Pull Request durchläuft [GitHub Actions](.github/workflows
 
 1. **Lint:** Ruff, JavaScript-Syntax, Compose-Datei
 2. **Tests:** pytest – PDF-Erzeugung, Marker-Erkennung an synthetischen Fotos, Messgeometrie, Anmeldung und Rechte, kompletter CAD-Ablauf im KI-Testmodus, Sandbox-Abwehr
-3. **Docker:** Image bauen, Stack starten, End-to-End-Auftrag über den Sandbox-Container, Ausbruchstests im Container
+3. **Trivy (Repo):** Abhängigkeiten, versehentlich eingecheckte Secrets und Dockerfile-Fehlkonfigurationen
+4. **Docker:** Image bauen, **Trivy-Scan des Images** (Ergebnis zusätzlich im Reiter *Security* von GitHub), Stack starten, End-to-End-Auftrag über den Sandbox-Container, Ausbruchstests im Container
+
+Behebbare Lücken der Stufe HIGH oder CRITICAL stoppen die Pipeline. Bewusst akzeptierte Befunde stehen mit Begründung in [`.trivyignore`](.trivyignore). Trivy läuft als per Digest festgenageltes Container-Image, nicht über `trivy-action` (deren Tags wurden im März 2026 kompromittiert).
 
 Erst wenn alles grün ist, wird das Image nach `ghcr.io/callmetechie/snap2cad` geschoben: `latest` und `sha-…` von `main`, Versionstags (`1.2.3`, `1.2`) bei einem Git-Tag `v1.2.3`. Pull Requests bauen und testen nur.
 

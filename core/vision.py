@@ -18,6 +18,8 @@ except Exception:  # pragma: no cover
 from .matgen import FORMATS, layout
 
 PX_PER_MM = 10.0
+Image.init()  # alle Format-Plugins registrieren, damit die Auswahl unten aufgeloest werden kann
+UPLOAD_FORMATS = tuple(f for f in ("JPEG", "MPO", "PNG", "WEBP", "HEIF", "AVIF") if f in Image.OPEN)
 GAUGE_MARKER_MM = 18.0
 GAUGE_STRIPS = {"A": (10, 11, 14), "B": (12, 13, 15)}
 GAUGE_X_RANGE = (-100.0, 100.0)
@@ -38,7 +40,8 @@ def spec(fmt: str) -> dict:
 
 def load_image(data: bytes) -> np.ndarray:
     """Bild laden, EXIF-Drehung anwenden, als BGR zurueckgeben."""
-    im = Image.open(io.BytesIO(data))
+    # Nur Kamera-Formate dekodieren: verkleinert die Angriffsflaeche der Bild-Decoder deutlich.
+    im = Image.open(io.BytesIO(data), formats=UPLOAD_FORMATS)
     im = ImageOps.exif_transpose(im).convert("RGB")
     return cv2.cvtColor(np.asarray(im), cv2.COLOR_RGB2BGR)
 

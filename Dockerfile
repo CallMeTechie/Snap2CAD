@@ -24,8 +24,13 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libgomp1 libxrender1 libx11-6 libxext6 \
  && rm -rf /var/lib/apt/lists/*
 
-COPY web/requirements.txt /tmp/requirements.txt
-RUN pip install -r /tmp/requirements.txt && rm /tmp/requirements.txt
+COPY web/requirements.txt web/requirements-overrides.txt /tmp/
+RUN pip install -r /tmp/requirements.txt \
+ && pip install --no-deps -r /tmp/requirements-overrides.txt \
+ && rm /tmp/requirements*.txt \
+ # pip wird zur Laufzeit nicht gebraucht (und bringt eigene, veraltete Bibliotheken mit)
+ && python -m pip uninstall -y pip \
+ && rm -rf /usr/local/lib/python3.13/ensurepip
 
 # Benutzer: app (Web) und ein Kennungsbereich fuer Sandbox-Laeufe (ohne Login, ohne Home)
 RUN groupadd -g 10001 app && useradd -u 10001 -g 10001 -M -d /nonexistent -s /usr/sbin/nologin app \
