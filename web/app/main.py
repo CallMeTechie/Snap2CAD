@@ -1380,11 +1380,15 @@ class JobIn(BaseModel):
     setups: str = Field(default="", max_length=40)
     fits: list[dict] | None = None
     extra: str = Field(default="", max_length=2000)
+    part_id: int | None = None
 
 
 @app.post("/api/jobs")
 def job_create(body: JobIn, u: dict = Depends(auth.require_user)):
     project = _own_project(body.project_id, u) if body.project_id else None
+    if body.part_id is not None and (not project or not db.q1("SELECT id FROM parts WHERE id=? AND project_id=?",
+                                                              (body.part_id, project["id"]))):
+        raise HTTPException(400, "Teil gehört nicht zu diesem Projekt")
     if not project and not body.request.strip():
         raise HTTPException(400, "Ohne Projekt braucht der Auftrag eine Beschreibung.")
     name = body.name.strip() or (project["name"] if project else "CAD-Auftrag")
@@ -1392,7 +1396,8 @@ def job_create(body: JobIn, u: dict = Depends(auth.require_user)):
             for f in (body.fits or [])[:30] if isinstance(f, dict)]
     jid = jobs.create(u, project, name, body.request, {
         "process": body.process, "material": body.material.strip(), "tolerance": body.tolerance.strip(),
-        "photo_ids": body.photo_ids, "cutter_d": body.cutter_d, "setups": body.setups.strip(), "fits": fits,
+        "photo_ids": body.photo_ids, "part_id": body.part_id, "cutter_d": body.cutter_d, "setups": body.setups.strip(),
+        "fits": fits,
         "extra": body.extra.strip()})
     return jobs.job_public(db.q1("SELECT * FROM jobs WHERE id=?", (jid,)), True)
 

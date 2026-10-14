@@ -625,3 +625,19 @@ def ai_parts(photo_dir, res):
                     "source": "ki"})
     assign_holes(out, res["holes"])
     return out
+
+
+def cad_text(project_id, part_id=None):
+    """Hinweis fuer die CAD-KI, welche Teile es gibt und welches modelliert wird (Spec §5)."""
+    rows = db.q("SELECT * FROM parts WHERE project_id=? ORDER BY seq", (project_id,))
+    if not rows:
+        return ""
+    if part_id:
+        t = next((r for r in rows if r["id"] == part_id), None)
+        if not t:
+            return ""
+        pts = " ".join(f"({x:.1f}, {y:.1f})" for x, y in _data(t)["polygon"])
+        return (f"Modelliert wird nur Teil T{t['seq']} „{t['label']}“ ({ROLE_TEXT[t['role']]}). "
+                f"Umriss in der Draufsicht (mm): {pts}. Maße anderer Teile sind nicht enthalten.")
+    names = ", ".join(f"T{r['seq']} {r['label']} ({ROLE_TEXT[r['role']]})" for r in rows)
+    return f"Teile im Foto: {names}. Alle Teile als ein Körper modellieren."

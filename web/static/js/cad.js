@@ -26,6 +26,23 @@ export async function form(main) {
   const P = S.project, st = S.status || {};
   const meas = P.measurements.filter(m => m.accepted);
   const crit = meas.filter(m => m.critical);
+  const partsList = P.parts || [];
+  let partSel = "";
+  const partBox = partsList.length ? h("select", { id: "part", class: "input", onchange: e => { partSel = e.target.value; drawMeas(); } },
+    h("option", { value: "" }, "Alle Teile (ein Körper)"),
+    partsList.map(t => h("option", { value: String(t.id) }, `${t.id_label} · ${t.label}`))) : null;
+  const sentMeas = () => partSel ? meas.filter(m => m.part_id == null || m.part_id === Number(partSel)) : meas;
+  const measBox = h("div", { style: { display: "flex", flexDirection: "column", gap: "6px" } });
+  function drawMeas() {
+    const list = sentMeas();
+    clear(measBox, h("span", { class: "label" }, `Maßtabelle · ${list.length}`),
+      list.length ? h("table", { class: "t" }, h("thead", {}, h("tr", {}, h("th", {}, "ID"), h("th", {}, "Merkmal"), h("th", { style: { textAlign: "right" } }, "Wert"), h("th", { style: { textAlign: "right" } }, "±"))),
+        h("tbody", {}, list.map(m => h("tr", {}, h("td", { class: "mono" }, `M${m.seq}`), h("td", {}, m.label, m.critical ? " ★" : ""),
+          h("td", { class: "num" }, m.caliper != null ? `${m.kind === "diameter" ? "Ø " : ""}${num(m.caliper, 2)}` : fmtValue(m).replace(" mm", "")),
+          h("td", { class: "num" }, m.caliper != null ? "MS" : num(m.unc, 1))))))
+        : h("div", { class: "note warn" }, icon("warn"), h("span", {}, "Noch keine Maße. ", h("a", { href: "/messen" }, "Jetzt messen"), " – oder alles im Feld „Zweck und Funktion“ beschreiben.")),
+      list.length ? h("span", { class: "xs muted" }, "★ kritisch · MS = Messschieber-Wert") : null);
+  }
   let proc = "fdm";
   try { proc = localStorage.getItem("mu.proc") || "fdm"; } catch { /* */ }
   const name = h("input", { id: "name", class: "input", value: P.name, maxlength: 120, required: true });
@@ -83,13 +100,15 @@ export async function form(main) {
             project_id: P.id, name: name.value.trim(), request: zweck.value.trim(), process: proc, material: material.value.trim(),
             cutter_d: proc === "cnc" ? parseFloat(cutter.value.replace(",", ".")) || null : null, setups: proc === "cnc" ? setups.value : "",
             fits: fits.map(f => ({ id: `M${f.m.seq}`, fit: f.fit.value.trim(), depth: f.depth.value === "–" ? "" : f.depth.value })),
-            extra: extra.value.trim(), photo_ids: [...picked] } });
+            extra: extra.value.trim(), photo_ids: [...picked], part_id: partSel ? Number(partSel) : null } });
           refreshMe().catch(() => {});
           go(`/cad/${job.id}`);
         } catch (e) { fail(e); submit.disabled = false; }
       } },
       h("h2", { id: "f-h" }, "Auftrag"),
       h("div", { class: "field" }, h("label", { for: "name" }, "Bezeichnung"), name),
+      partBox ? h("div", { class: "field" }, h("label", { for: "part" }, "Modell für"), partBox,
+        h("span", { class: "hint" }, "Bei einem einzelnen Teil gehen nur dessen Maße und Maße ohne Teil in den Auftrag.")) : null,
       h("div", { class: "field" }, h("label", { for: "zweck" }, "Zweck und Funktion"), zweck,
         h("span", { class: "hint" }, "Je klarer die Funktion, desto besser trifft die KI Konstruktionsabsicht und Nennmaße.")),
       h("fieldset", {}, h("legend", {}, "Fertigung"), h("div", { class: "grid3" }, Object.keys(PROC).map(procRadio))),
@@ -106,13 +125,7 @@ export async function form(main) {
       h("aside", { class: "card", "aria-labelledby": "s-h" },
         h("h2", { id: "s-h" }, "Grundlage für das Modell"),
         h("div", { style: { display: "flex", flexDirection: "column", gap: "8px" } }, h("span", { class: "label" }, `Entzerrte Fotos · ${picked.size}`), photoFigs),
-        h("div", { style: { display: "flex", flexDirection: "column", gap: "6px" } }, h("span", { class: "label" }, `Maßtabelle · ${meas.length}`),
-          meas.length ? h("table", { class: "t" }, h("thead", {}, h("tr", {}, h("th", {}, "ID"), h("th", {}, "Merkmal"), h("th", { style: { textAlign: "right" } }, "Wert"), h("th", { style: { textAlign: "right" } }, "±"))),
-            h("tbody", {}, meas.map(m => h("tr", {}, h("td", { class: "mono" }, `M${m.seq}`), h("td", {}, m.label, m.critical ? " ★" : ""),
-              h("td", { class: "num" }, m.caliper != null ? `${m.kind === "diameter" ? "Ø " : ""}${num(m.caliper, 2)}` : fmtValue(m).replace(" mm", "")),
-              h("td", { class: "num" }, m.caliper != null ? "MS" : num(m.unc, 1))))))
-            : h("div", { class: "note warn" }, icon("warn"), h("span", {}, "Noch keine Maße. ", h("a", { href: "/messen" }, "Jetzt messen"), " – oder alles im Feld „Zweck und Funktion“ beschreiben.")),
-          meas.length ? h("span", { class: "xs muted" }, "★ kritisch · MS = Messschieber-Wert") : null),
+        measBox,
         h("dl", { class: "kv" },
           h("dt", {}, "Modell"), h("dd", { class: "mono small" }, st.ai_fake ? "Testmodus (AI_FAKE)" : `${st.model} · Server-Key`),
           h("dt", {}, "Regeln"), rules,
@@ -122,6 +135,7 @@ export async function form(main) {
         blocked ? h("div", { class: "note err" }, icon("warn"), h("span", {}, blocked)) : null,
         submit,
         h("a", { href: "/auftraege", class: "small", style: { textAlign: "center" } }, "Frühere Aufträge ansehen"))));
+  drawMeas();
   setProc(proc);
   zweck.focus();
 }

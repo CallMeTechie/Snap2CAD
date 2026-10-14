@@ -23,8 +23,9 @@ CAD_SYSTEM = """Du bist CAD-Konstrukteur. Du erzeugst aus Messwerten und entzerr
 Volumenmodell mit der Python-Bibliothek build123d. Einheit ist immer Millimeter.
 
 Eingaben
-- Eine Messtabelle (IDs M1, M2 …) mit Messwert, Unsicherheit, optionalem Schieblehren-Wert, Passung und
-  Kennzeichnung „kritisch“. Ein Schieblehren-Wert hat immer Vorrang vor dem Fotowert.
+- Eine Messtabelle (IDs M1, M2 …) mit Messwert, Unsicherheit, optionalem Messschieber-Wert, Nennmaß-Vorschlag,
+  Teil (T1, T2 …), Passung und Kennzeichnung „kritisch“. Ein Messschieber-Wert hat immer Vorrang vor dem Fotowert;
+  das Nennmaß ist nur ein Vorschlag, Regel 2 gilt weiter.
 - Entzerrte Fotos der Messunterlage (Draufsicht) und ggf. der Höhenlehre (Seitenansicht). Der Maßstab steht
   jeweils dabei. Ursprung der Draufsicht: linke untere Ecke des Rasters, x nach rechts, y nach oben.
 - Fertigungsverfahren, Material und Wünsche des Nutzers.

@@ -150,3 +150,26 @@ def test_tageslimit_ohne_ki(two):
     res = c.post(f"/api/photos/{phid}/edges", json={}, headers=H).json()
     assert "Tageslimit" in res["notice"] and [p["label"] for p in res["parts"]] == ["Teil"]
     assert c.post(f"/api/projects/{pid}/suggest", json={}, headers=H).status_code == 429
+
+
+def test_cad_auftrag_fuer_ein_teil(two, monkeypatch, user):
+    c, pid, phid = two
+    _ki(monkeypatch, KI_ZWEI)
+    q, pl = c.post(f"/api/photos/{phid}/edges", json={}, headers=H).json()["parts"]
+    from app import db, jobs
+    project = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
+    msg = jobs.build_initial_message(project, "Platte nachbauen", {"part_id": pl["id"], "name": "P"})
+    text = msg[0]["content"][0]["text"]
+    assert "Modelliert wird nur Teil T2 „Platte“ (montiertes Teil)" in text
+    assert "| Teil |" in text and "| Messschieber |" in text
+    alle = jobs.build_initial_message(project, "alles", {"name": "A"})[0]["content"][0]["text"]
+    assert "Teile im Foto: T1 Quader (Grundkörper), T2 Platte (montiertes Teil)" in alle
+    _, rows = jobs.measurement_table(pid, pl["id"])
+    assert rows and all(m["part_id"] != q["id"] for m in rows)
+    other = user.post("/api/projects", json={"name": "x"}, headers=H).json()["id"]
+    bad = c.post("/api/jobs", json={"project_id": other, "name": "x", "request": "x", "part_id": pl["id"]}, headers=H)
+    assert bad.status_code == 400
+    r = c.post("/api/jobs", json={"project_id": pid, "name": "P", "request": "Platte", "part_id": pl["id"]}, headers=H)
+    assert r.status_code == 200, r.text
+    t = json.loads(db.q1("SELECT messages FROM jobs WHERE id=?", (r.json()["id"],))["messages"])[0]["content"][0]["text"]
+    assert "Modelliert wird nur Teil T2" in t and "| T1 |" not in t
