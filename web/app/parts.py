@@ -9,7 +9,7 @@ import statistics
 
 from shapely.geometry import LinearRing, Point, Polygon
 
-from . import geom
+from . import db, geom
 
 RECT_TOL_DEG = 4.0
 EDGE_DIFF_MM = 1.0
@@ -341,3 +341,242 @@ def assign_holes(parts_list, holes):
         cands = [(_valid(p["polygon"]).area, i) for i, p in enumerate(parts_list) if _valid(p["polygon"]).contains(c)]
         if cands:
             parts_list[min(cands)[1]]["holes"].append({"c": hole["c"], "d": hole["d"]})
+
+
+# ------------------------------------------------------------------ Datenbank
+
+def default_unc(photo, view):
+    """Standard-Unsicherheit einer Fotomessung (vorher main._default_unc)."""
+    if not photo:
+        return 0.5
+    a = db.jload(photo["analysis"], {}) or {}
+    if view == "gauge" and a.get("gauge"):
+        return round((a["gauge"].get("rms_mm") or 0.3) * 2 + 0.3, 2)
+    return round((photo["max_err"] or 0.3) + 0.2, 2)
+
+
+def _data(row):
+    return db.jload(row["data"], {}) or {}
+
+
+def _next_seq(table, project_id):
+    return db.q1(f"SELECT COALESCE(MAX(seq),0)+1 s FROM {table} WHERE project_id=?", (project_id,))["s"]
+
+
+def create_part(project_id, photo_id, label, role, polygon, *, hidden_flags=None, holes=(), source="user", note=""):
+    poly, flags = _ccw(polygon, hidden_flags)
+    ids = list(range(1, len(poly) + 1))
+    hl = [{"id": i + 1, "c": h["c"], "d": h["d"]} for i, h in enumerate(holes)]
+    data = {"polygon": poly, "edge_ids": ids, "next_edge_id": len(ids) + 1,
+            "hidden": [e for e, f in zip(ids, flags or [False] * len(ids), strict=True) if f],
+            "holes": hl, "next_hole_id": len(hl) + 1, "dropped": [], "warn": None, "refs": [], "note": note}
+    return db.ex("""INSERT INTO parts(project_id,photo_id,seq,label,role,data,source,scale,created_at)
+                    VALUES (?,?,?,?,?,?,?,1.0,?)""",
+                 (project_id, photo_id, _next_seq("parts", project_id), (label or "Teil").strip()[:80] or "Teil",
+                  role if role in ROLE_TEXT else "body", db.jdump(data), source, db.now()))
+
+
+def set_polygon(part, polygon, *, hidden_flags=None, holes=None, redetect=False):
+    """Neues Polygon fuer ein Teil. redetect=True: aus einer neuen Erkennung (Kennungen uebertragen)."""
+    d = _data(part)
+    if redetect:
+        poly, flags = _ccw(polygon, hidden_flags)
+        ids, nxt = transfer_ids(d["polygon"], d["edge_ids"], poly, d["next_edge_id"])
+        d["hidden"] = [e for e, f in zip(ids, flags or [False] * len(ids), strict=True) if f]
+    else:
+        poly = [[round(float(x), 3), round(float(y), 3)] for x, y in polygon]
+        ids, nxt = update_edge_ids(d["polygon"], d["edge_ids"], poly, d["next_edge_id"])
+        old = {eid: e for e, eid in zip(edges_of(d["polygon"]), d["edge_ids"], strict=True)}
+        moved = {eid for e, eid in zip(edges_of(poly), ids, strict=True)
+                 if eid in old and not (_same(e[0], old[eid][0]) and _same(e[1], old[eid][1]))}
+        d["hidden"] = [e for e in d.get("hidden") or [] if e in ids and e not in moved]  # vom Nutzer gesetzt = sichtbar
+    d.update(polygon=poly, edge_ids=ids, next_edge_id=nxt)
+    if holes is not None:
+        d["holes"], d["next_hole_id"] = transfer_holes(d.get("holes") or [], holes, d.get("next_hole_id", 1))
+    db.ex("UPDATE parts SET data=? WHERE id=?", (db.jdump(d), part["id"]))
+
+
+def _auto_to_user(m):
+    d = _data(m)
+    d.pop("auto_key", None)
+    d.pop("auto_raw", None)
+    d.pop("part_fixed", None)
+    db.ex("UPDATE measurements SET source='user', data=? WHERE id=?", (db.jdump(d), m["id"]))
+
+
+def delete_part(part):
+    for m in db.q("SELECT * FROM measurements WHERE part_id=?", (part["id"],)):
+        if m["source"] == "auto" and m["caliper"] is None:
+            db.ex("DELETE FROM measurements WHERE id=?", (m["id"],))
+            continue
+        if m["source"] == "auto":
+            _auto_to_user(m)
+        d = _data(db.q1("SELECT data FROM measurements WHERE id=?", (m["id"],)))
+        d.pop("part_fixed", None)
+        db.ex("UPDATE measurements SET part_id=NULL, data=? WHERE id=?", (db.jdump(d), m["id"]))
+    db.ex("DELETE FROM parts WHERE id=?", (part["id"],))
+
+
+def delete_photo_parts(photo_id):
+    for part in db.q("SELECT * FROM parts WHERE photo_id=?", (photo_id,)):
+        delete_part(part)
+
+
+def drop_key(part_id, key):
+    part = db.q1("SELECT * FROM parts WHERE id=?", (part_id,))
+    if not part or not key:
+        return
+    d = _data(part)
+    if key not in d.setdefault("dropped", []):
+        d["dropped"].append(key)
+        db.ex("UPDATE parts SET data=? WHERE id=?", (db.jdump(d), part_id))
+
+
+def rename(part, label):
+    label = (label or "").strip()[:80] or "Teil"
+    old = part["label"]
+    db.ex("UPDATE parts SET label=? WHERE id=?", (label, part["id"]))
+    for m in db.q("SELECT id, label FROM measurements WHERE part_id=? AND source='auto'", (part["id"],)):
+        if m["label"].startswith(old + " "):
+            db.ex("UPDATE measurements SET label=? WHERE id=?", ((label + m["label"][len(old):])[:80], m["id"]))
+
+
+def reset_scale(part_id):
+    for m in db.q("SELECT id, data FROM measurements WHERE part_id=? AND caliper IS NOT NULL", (part_id,)):
+        d = _data(m)
+        d["ref"] = False
+        db.ex("UPDATE measurements SET data=? WHERE id=?", (db.jdump(d), m["id"]))
+
+
+def _sync_auto(part, photo, fx, fy):
+    """Auto-Masse eines Teils an sein Polygon anpassen (Spec §3)."""
+    d = _data(part)
+    want = {x["key"]: x for x in auto_dims(d, fx, fy) if x["key"] not in (d.get("dropped") or [])}
+    have = {}
+    for m in db.q("SELECT * FROM measurements WHERE part_id=? AND source='auto' ORDER BY id", (part["id"],)):
+        k = _data(m).get("auto_key")
+        if k in have:  # Doppel (z. B. aus einem frueheren Wettlauf) bereinigen
+            if m["caliper"] is None:
+                db.ex("DELETE FROM measurements WHERE id=?", (m["id"],))
+            else:
+                _auto_to_user(m)
+            continue
+        have[k] = m
+    for key, x in want.items():
+        m = have.get(key)
+        if m:
+            md = _data(m)
+            md.update(points=x["points"], auto_raw=x["raw"], warn=x["warn"])
+            db.ex("UPDATE measurements SET kind=?, data=? WHERE id=?", (x["kind"], db.jdump(md), m["id"]))
+        else:
+            md = {"view": "top", "points": x["points"], "auto_key": key, "auto_raw": x["raw"], "warn": x["warn"], "note": None}
+            db.ex("""INSERT INTO measurements(project_id,photo_id,part_id,seq,label,kind,value,unit,unc,data,critical,source,
+                     accepted,created_at) VALUES (?,?,?,?,?,?,?,'mm',?,?,0,'auto',1,?)""",
+                  (part["project_id"], part["photo_id"], part["id"], _next_seq("measurements", part["project_id"]),
+                   f"{part['label']} {x['name']}"[:80], x["kind"], x["raw"], default_unc(photo, "top"), db.jdump(md), db.now()))
+    for key, m in have.items():
+        if key in want:
+            continue
+        if m["caliper"] is None:
+            db.ex("DELETE FROM measurements WHERE id=?", (m["id"],))
+        else:
+            _auto_to_user(m)
+
+
+def _computed(m, d):
+    """Wird der Wert aus Punkten bzw. dem Teil-Polygon berechnet (und damit auch skaliert)?"""
+    return m["source"] == "auto" or (m["source"] != "manual" and not d.get("ai_value") and bool(d.get("points")))
+
+
+def refresh(project, fx, fy):
+    """Zuordnung, Auto-Masse, Massstab je Teil und alle berechneten Werte eines Projekts (Spec §3)."""
+    pid = project["id"]
+    photos = {p["id"]: p for p in db.q("SELECT * FROM photos WHERE project_id=?", (pid,))}
+    parts = db.q("SELECT * FROM parts WHERE project_id=? ORDER BY seq", (pid,))
+    for part in parts:
+        _sync_auto(part, photos.get(part["photo_id"]), fx, fy)
+    by_photo = {}
+    for part in parts:
+        by_photo.setdefault(part["photo_id"], []).append((part["id"], _data(part)["polygon"]))
+    rows = db.q("SELECT * FROM measurements WHERE project_id=? AND accepted=1", (pid,))
+    datas = {m["id"]: _data(m) for m in rows}
+    for m in rows:  # 1. Zuordnung
+        d = datas[m["id"]]
+        if m["source"] == "auto" or d.get("part_fixed"):
+            continue
+        new = None
+        if m["source"] != "manual" and d.get("view", "top") == "top" and m["kind"] != "height" and d.get("points") \
+                and m["photo_id"] in by_photo:
+            new = assign(d["points"], by_photo[m["photo_id"]])
+        if new != m["part_id"]:
+            db.ex("UPDATE measurements SET part_id=? WHERE id=?", (new, m["id"]))
+            m["part_id"] = new
+    raw = {}
+    for m in rows:  # 2. Fotowerte ohne Teil-Massstab
+        d = datas[m["id"]]
+        if m["source"] == "auto":
+            raw[m["id"]] = d.get("auto_raw")
+        elif _computed(m, d):
+            raw[m["id"]] = geom.compute(m["kind"], d["points"], fx, fy)
+    kmap, ref_warn = {}, {}
+    for part in parts:  # 3. Massstab je Teil
+        refs = [(m["id"], m["caliper"] / raw[m["id"]]) for m in rows
+                if m["part_id"] == part["id"] and m["caliper"] is not None and m["kind"] in SCALED_KINDS
+                and datas[m["id"]].get("ref") is not False and datas[m["id"]].get("view", "top") == "top" and raw.get(m["id"])]
+        k, good, bad, warn = scale_of(refs)
+        kmap[part["id"]] = k
+        for mid in bad:
+            ref_warn[mid] = "Abweichung zu groß – falsches Maß oder falsches Teil?"
+        pd = _data(db.q1("SELECT data FROM parts WHERE id=?", (part["id"],)))
+        pd.update(warn=warn, refs=good)
+        db.ex("UPDATE parts SET scale=?, data=? WHERE id=?", (k, db.jdump(pd), part["id"]))
+    for m in rows:  # 4. Werte, Hinweise, Nennmass
+        d = dict(datas[m["id"]])
+        r = raw.get(m["id"])
+        value = m["value"]
+        if _computed(m, d) and r is not None:
+            k = kmap.get(m["part_id"], 1.0) if m["kind"] in SCALED_KINDS and d.get("view", "top") == "top" else 1.0
+            value = round(r * k, 3)
+            d["raw"] = round(r, 3)
+        else:
+            d.pop("raw", None)
+        d["ref_warn"] = ref_warn.get(m["id"])
+        d["nominal"] = nominal(value, m["unc"], m["caliper"]) if m["kind"] in MM_KINDS else None
+        if value != m["value"] or d != datas[m["id"]]:
+            db.ex("UPDATE measurements SET value=?, data=? WHERE id=?", (value, db.jdump(d), m["id"]))
+
+
+def part_public(part):
+    d = _data(part)
+    poly = d["polygon"]
+    ms = db.q("SELECT id, seq, value, data FROM measurements WHERE part_id=?", (part["id"],))
+    by_key = {_data(x).get("auto_key"): x["value"] for x in ms}
+    seq = {x["id"]: x["seq"] for x in ms}
+    rect = is_rect(poly)
+    return {"id": part["id"], "seq": part["seq"], "id_label": f"T{part['seq']}", "photo_id": part["photo_id"],
+            "label": part["label"], "role": part["role"], "source": part["source"], "scale": part["scale"],
+            "polygon": poly, "edge_ids": d["edge_ids"], "hidden": d.get("hidden") or [], "holes": d.get("holes") or [],
+            "warn": d.get("warn"), "note": d.get("note") or "", "rect": rect,
+            "size": [by_key["L"], by_key["B"]] if rect and "L" in by_key and "B" in by_key else None,
+            "n_edges": len(poly), "refs": [f"M{seq[i]}" for i in d.get("refs") or [] if i in seq]}
+
+
+def public_list(project_id):
+    return [part_public(p) for p in db.q("SELECT * FROM parts WHERE project_id=? ORDER BY seq", (project_id,))]
+
+
+def replace_detected(project_id, photo_id, detected):
+    """Ergebnis einer Erkennung uebernehmen: Abgleich ueber IoU (Spec §2), sonst neu bzw. loeschen."""
+    old = db.q("SELECT * FROM parts WHERE photo_id=? AND source!='user' ORDER BY seq", (photo_id,))  # Handteile bleiben
+    m = match_parts([(o["id"], _data(o)["polygon"]) for o in old], [(i, x["polygon"]) for i, x in enumerate(detected)])
+    kept = set(m.values())
+    for o in old:
+        if o["id"] not in kept:
+            delete_part(o)
+    by_id = {o["id"]: o for o in old}
+    for i, x in enumerate(detected):
+        if i in m:
+            set_polygon(by_id[m[i]], x["polygon"], hidden_flags=x.get("hidden"), holes=x.get("holes") or [], redetect=True)
+        else:
+            create_part(project_id, photo_id, x["label"], x["role"], x["polygon"], hidden_flags=x.get("hidden"),
+                        holes=x.get("holes") or [], source=x.get("source", "auto"), note=x.get("note", ""))
