@@ -29,7 +29,7 @@ SETUP_SCRIPT = textwrap.dedent(r'''
     with TestClient(app, client=LAN) as c:
         me = c.get("/api/me").json()
         assert me["setup"] == {"required": True, "key_from_env": False, "key_optional": False, "allowed": True}, me
-        assert me["ai"] is False
+        assert set(me) == {"user", "setup"}, me  # ohne Anmeldung keine Version, kein Modell
         # vor der Einrichtung gibt es kein Konto, auch kein Standard-admin
         r = c.post("/api/auth/login", json={"username": "admin", "password": "irgendwas-langes-1"}, headers=H)
         assert r.status_code == 401, r.text
@@ -58,7 +58,7 @@ SETUP_SCRIPT = textwrap.dedent(r'''
         assert "setup" not in me and me["user"]["username"] == "werkstatt" and me["ai"] is True
         assert settings.api_key_source() == "db" and settings.api_key_hint() == "…0000"
         s = c.get("/api/admin/settings").json()
-        assert s["api_key"] == {"source": "db", "hint": "…0000"}
+        assert s["api_key"] == {"source": "db", "hint": "…0000", "encrypted": False, "secret_key_set": False}
         assert "gueltiger" not in c.get("/api/admin/settings").text  # Schluessel nie im Klartext zurueck
         # zweiter Versuch: bereits eingerichtet
         r = c.post("/api/setup", json={**body, "username": "zweiter"}, headers=H)
@@ -69,12 +69,22 @@ SETUP_SCRIPT = textwrap.dedent(r'''
     with TestClient(app, client=LAN) as c2:
         r = c2.post("/api/auth/login", json={"username": "w@beispiel.de", "password": body["password"]}, headers=H)
         assert r.status_code == 200, r.text
-        # Schluessel ersetzen: ungueltiger wird abgelehnt, alter bleibt
-        r = c2.put("/api/admin/settings", json={"api_key": "sk-ant-api03-falscher-testschluessel-000"}, headers=H)
+        # Schluessel ersetzen/entfernen nur mit Passwort
+        new = {"api_key": "sk-ant-api03-gueltiger-testschluessel-0000"}
+        r = c2.put("/api/admin/settings", json=new, headers=H)
+        assert r.status_code == 400 and "Passwort" in r.text, r.text
+        r = c2.put("/api/admin/settings", json={**new, "password": "falsches-passwort-123"}, headers=H)
+        assert r.status_code == 400 and "falsch" in r.text, r.text
+        assert c2.put("/api/admin/settings", json={"clear_api_key": True}, headers=H).status_code == 400
+        assert settings.api_key_source() == "db"
+        # ungueltiger Schluessel wird abgelehnt, alter bleibt
+        r = c2.put("/api/admin/settings", json={"api_key": "sk-ant-api03-falscher-testschluessel-000",
+                                                "password": body["password"]}, headers=H)
         assert r.status_code == 400 and settings.api_key_hint() == "…0000"
-        r = c2.put("/api/admin/settings", json={"clear_api_key": True}, headers=H)
+        r = c2.put("/api/admin/settings", json={"clear_api_key": True, "password": body["password"]}, headers=H)
         assert r.status_code == 200 and r.json()["api_key"]["source"] == "none"
         assert c2.get("/api/me").json()["ai"] is False
+        assert "confirm_failed" in [a["action"] for a in c2.get("/api/admin/audit").json()]
 
     from app import manage
     assert manage.main(["reset-link", "werkstatt"]) == 0
@@ -121,6 +131,7 @@ def test_setup_ip_rules():
 
 def test_admin_settings(admin, user):
     from app import settings
+    from conftest import ADMIN_PW
     assert user.get("/api/admin/settings").status_code == 403
     s = admin.get("/api/admin/settings").json()
     assert s["api_key"]["source"] == "none" and s["ai_fake"] is True
@@ -128,11 +139,14 @@ def test_admin_settings(admin, user):
     r = admin.put("/api/admin/settings", json={"api_key": "kein schluessel"}, headers=H)
     assert r.status_code == 400
     r = admin.put("/api/admin/settings", json={"api_key": "sk-ant-api03-testmodus-schluessel-abcd"}, headers=H)
-    assert r.status_code == 200 and r.json()["api_key"] == {"source": "db", "hint": "…abcd"}
+    assert r.status_code == 400 and "Passwort" in r.text  # ohne Passwortbestaetigung
+    r = admin.put("/api/admin/settings", json={"api_key": "sk-ant-api03-testmodus-schluessel-abcd", "password": ADMIN_PW},
+                  headers=H)
+    assert r.status_code == 200 and r.json()["api_key"]["source"] == "db" and r.json()["api_key"]["hint"] == "…abcd"
     r = admin.put("/api/admin/settings", json={"model": "claude-opus-5-5"}, headers=H)
     assert r.json()["model"]["value"] == "claude-opus-5-5" and admin.get("/api/me").json()["model"] == "claude-opus-5-5"
     assert admin.put("/api/admin/settings", json={"model": "bad model!"}, headers=H).status_code == 400
-    r = admin.put("/api/admin/settings", json={"model": "", "clear_api_key": True}, headers=H)
+    r = admin.put("/api/admin/settings", json={"model": "", "clear_api_key": True, "password": ADMIN_PW}, headers=H)
     assert r.json()["model"]["source"] == "default" and r.json()["api_key"]["source"] == "none"
     assert settings.api_key() == ""
 
@@ -149,7 +163,7 @@ def test_env_key_takes_precedence():
                            headers={"X-Requested-With": "fetch"})
                 assert r.status_code == 200, r.text
                 st = c.get("/api/admin/settings").json()
-                assert st["api_key"] == {"source": "env", "hint": "…wxyz"}, st
+                assert st["api_key"]["source"] == "env" and st["api_key"]["hint"] == "…wxyz", st
                 r = c.put("/api/admin/settings", json={"clear_api_key": True}, headers={"X-Requested-With": "fetch"})
                 assert r.status_code == 400
             print("ENV-OK")

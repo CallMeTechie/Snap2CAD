@@ -131,6 +131,7 @@ Alles aus diesem Repo als selbst gehostete Web-Oberfläche: Unterlage als PDF er
 ```bash
 git clone https://github.com/CallMeTechie/snap2cad.git && cd snap2cad
 cp .env.example .env          # optional anpassen (Port, Kontingente …)
+echo "SECRET_KEY=$(openssl rand -base64 48)" >> .env   # verschlüsselt den API-Schlüssel in der Datenbank
 docker compose up -d          # lädt das fertige Image ghcr.io/callmetechie/snap2cad:latest
 ```
 
@@ -139,7 +140,8 @@ Eigenen Build statt fertigem Image: `docker compose up -d --build`. Eine bestimm
 **Ersteinrichtung im Browser:** Beim ersten Aufruf von `http://localhost:8000` erscheint der Einrichtungsassistent. Dort legst du Benutzername und Passwort des Administrators fest und trägst den Anthropic-API-Schlüssel ein ([console.anthropic.com → API Keys](https://console.anthropic.com/settings/keys)). Der Schlüssel wird vor dem Speichern bei Anthropic geprüft. Erst wenn alles stimmt, wird das Admin-Konto angelegt. Es gibt kein Standardkonto und kein Passwort im Log.
 
 - Die Einrichtung ist nur aus privaten Netzen möglich (LAN, VPN, Tailscale, Docker). Wer sie bewusst über das Internet erledigen will, setzt vorübergehend `SETUP_ALLOW_PUBLIC=1`. Die Seite verschwindet, sobald das erste Konto existiert.
-- Schlüssel und Modell lassen sich später unter *Benutzerverwaltung → Einstellungen* ändern. Alternativ als `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` in der `.env`; dann hat die Umgebungsvariable Vorrang und ist in der Oberfläche gesperrt.
+- Schlüssel und Modell lassen sich später unter *Benutzerverwaltung → Einstellungen* ändern; Ersetzen oder Entfernen des Schlüssels verlangt das eigene Passwort. Alternativ als `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` in der `.env`; dann hat die Umgebungsvariable Vorrang und ist in der Oberfläche gesperrt.
+- Mit `SECRET_KEY` in der `.env` (mindestens 32 Zeichen) wird der in der App hinterlegte Schlüssel verschlüsselt gespeichert. Ein schon gespeicherter Schlüssel wird beim nächsten Start nachträglich verschlüsselt. Der `SECRET_KEY` gehört zur Sicherung dazu, aber getrennt vom Daten-Volume. Fehlt er oder ist er falsch, ist die KI aus und die Verwaltung bittet um einen neuen Schlüssel.
 - Für automatisierte Installationen (CI, Ansible) legt `ADMIN_INITIAL_PASSWORD` stattdessen ein Konto `admin` an, dessen Passwort beim ersten Login geändert werden muss.
 - Admin-Passwort vergessen: `docker compose exec app python -m app.manage reset-link <benutzername>` erzeugt einen einmaligen Link zum Setzen eines neuen Passworts (`… manage users` listet die Konten).
 
@@ -150,7 +152,7 @@ Der Port ist standardmäßig nur auf `127.0.0.1` gebunden. Für den Zugriff von 
 ### Sicherheit
 
 - **Konten:** Passwörter mit Argon2, mindestens 12 Zeichen, Prüfung gegen häufige Passwörter. Login-Sperre nach 5 Fehlversuchen für 15 Minuten. Sitzungen als HttpOnly-Cookie, CSRF-Schutz, strikte Content-Security-Policy. Einladungs- und Reset-Links sind einmalig und werden nur als Hash gespeichert. Protokoll aller sicherheitsrelevanten Ereignisse für Admins.
-- **Kosten:** Der API-Schlüssel bleibt auf dem Server und wird in der Oberfläche nie wieder vollständig angezeigt. Jeder Nutzer hat ein monatliches Kontingent an CAD-Läufen (`DEFAULT_QUOTA`, pro Nutzer änderbar).
+- **Kosten:** Der API-Schlüssel bleibt auf dem Server, wird in der Oberfläche nie wieder vollständig angezeigt und mit `SECRET_KEY` verschlüsselt gespeichert. Ohne Anmeldung verrät die App weder Version noch Modell. Jeder Nutzer hat ein monatliches Kontingent an CAD-Läufen (`DEFAULT_QUOTA`, pro Nutzer änderbar).
 - **Sandbox:** Von Claude erzeugter Code läuft nie im Web-Container, sondern im Dienst `sandbox`: ohne Netzwerk, ohne Datenbank und ohne API-Schlüssel, schreibgeschütztes Dateisystem, jeder Lauf unter einer eigenen Benutzerkennung, mit Zeit-, Speicher- und Prozesslimits, seccomp-Filter (kein Programmstart, keine Sockets) und Python-Audit-Hook.
 
 ### Daten

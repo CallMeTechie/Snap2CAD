@@ -316,7 +316,7 @@ route(/^\/login$/, async root => {
       h("span", { class: "muted" }, "Bauteile per Foto vermessen · CAD mit Claude")),
     form,
     h("p", { class: "hint", style: { textAlign: "center" } }, "Noch kein Konto? Die Registrierung ist nur über einen Einladungslink möglich."),
-    h("span", { class: "xs muted" }, `v${S.status?.version || ""} · selbst gehostet`)));
+    h("span", { class: "xs muted" }, "selbst gehostet")));
   user.focus();
 }, { public: true });
 
@@ -530,6 +530,7 @@ const ACTIONS = {
   user_changed: "Benutzer geändert", user_deleted: "Benutzer gelöscht", sessions_ended: "Sitzungen beendet",
   admin_created: "Admin angelegt", cad_create: "CAD-Auftrag", suggest: "Maßvorschläge",
   setup: "Ersteinrichtung", setup_denied: "Einrichtung abgelehnt", settings_changed: "Einstellungen geändert",
+  confirm_failed: "Passwortbestätigung falsch",
 };
 
 route(/^\/admin(?:\/(einladungen|protokoll|einstellungen))?$/, async (main, tab = "benutzer") => {
@@ -678,6 +679,7 @@ async function settingsTab(main) {
   const err = errBox();
   const key = pwInput("akey", "off", { required: false, maxlength: 400, spellcheck: "false", autocapitalize: "none", placeholder: "sk-ant-…" });
   key.wrap.querySelector("button").setAttribute("aria-label", "Schlüssel anzeigen");
+  const cpw = pwInput("acpw", "current-password", { required: false, maxlength: 300 });
   const save = async (body, btn, msg) => {
     showErr(err, ""); btn.disabled = true;
     const label = btn.textContent; btn.textContent = "Wird geprüft …";
@@ -685,7 +687,16 @@ async function settingsTab(main) {
     catch (e) { showErr(err, e.message); } finally { btn.disabled = false; btn.textContent = label; }
   };
   const keyBtn = h("button", { class: "btn primary", type: "submit" }, k.source === "none" ? "Schlüssel prüfen und speichern" : "Schlüssel ersetzen");
-  const status = k.source === "env"
+  const needPw = () => {
+    if (cpw.input.value) return true;
+    showErr(err, "Bitte zur Bestätigung dein Passwort eingeben."); cpw.input.focus(); return false;
+  };
+  const storage = k.source !== "db" ? null : k.encrypted
+    ? h("div", { class: "note ok" }, icon("check"), h("span", {}, "Verschlüsselt gespeichert (SECRET_KEY)."))
+    : h("div", { class: "note warn" }, icon("warn"), h("span", {}, "Unverschlüsselt in der Datenbank gespeichert. SECRET_KEY in der .env setzen (mindestens 32 Zeichen), dann wird der Schlüssel beim nächsten Start verschlüsselt."));
+  const status = k.source === "locked"
+    ? h("div", { class: "note err" }, icon("warn"), h("span", {}, "Der gespeicherte Schlüssel lässt sich nicht entschlüsseln – SECRET_KEY fehlt oder ist falsch. Richtigen SECRET_KEY setzen oder hier einen neuen Schlüssel eingeben."))
+    : k.source === "env"
     ? h("div", { class: "note info" }, icon("info"), h("span", {}, `Gesetzt über die Umgebungsvariable ANTHROPIC_API_KEY (${k.hint || "…"}). Ändern nur in der .env-Datei; ist sie leer, gilt der hier hinterlegte Schlüssel.`))
     : k.source === "db"
       ? h("div", { class: "note ok" }, icon("check"), h("span", {}, "Hinterlegt: ", h("span", { class: "mono" }, k.hint || "…")))
@@ -693,16 +704,20 @@ async function settingsTab(main) {
   const keyForm = h("form", { class: "card", style: { flex: "1 1 380px", maxWidth: "560px" }, "aria-labelledby": "k-h", onsubmit: ev => {
     ev.preventDefault();
     if (!key.input.value.trim()) { showErr(err, "Bitte einen API-Schlüssel eingeben."); key.input.focus(); return; }
-    save({ api_key: key.input.value.trim() }, keyBtn, "API-Schlüssel gespeichert");
-  } }, h("h2", { id: "k-h" }, "Anthropic-API-Schlüssel"), status,
+    if (!needPw()) return;
+    save({ api_key: key.input.value.trim(), password: cpw.input.value }, keyBtn, "API-Schlüssel gespeichert");
+  } }, h("h2", { id: "k-h" }, "Anthropic-API-Schlüssel"), status, storage,
   k.source === "env" ? null : [
     h("div", { class: "field" }, h("label", { for: "akey" }, k.source === "none" ? "Schlüssel" : "Neuer Schlüssel"), key.wrap,
       h("span", { class: "hint" }, "Anlegen unter ", h("a", { href: "https://console.anthropic.com/settings/keys", target: "_blank", rel: "noopener noreferrer" }, "console.anthropic.com → API Keys"),
         ". Wird vor dem Speichern geprüft und nie wieder vollständig angezeigt.")),
-    h("div", { class: "chips" }, keyBtn, k.source === "db" ? h("button", { class: "btn danger", type: "button", onclick: async ev => {
+    h("div", { class: "field" }, h("label", { for: "acpw" }, "Dein Passwort"), cpw.wrap,
+      h("span", { class: "hint" }, "Zur Bestätigung, bevor der Schlüssel ersetzt oder entfernt wird.")),
+    h("div", { class: "chips" }, keyBtn, k.source === "db" || k.source === "locked" ? h("button", { class: "btn danger", type: "button", onclick: async ev => {
       const btn = ev.currentTarget;
+      if (!needPw()) return;
       if (!await confirmDlg("API-Schlüssel entfernen?", "Maßvorschläge und CAD mit Claude sind danach deaktiviert, bis ein neuer Schlüssel hinterlegt ist.", "Entfernen", true)) return;
-      save({ clear_api_key: true }, btn, "API-Schlüssel entfernt");
+      save({ clear_api_key: true, password: cpw.input.value }, btn, "API-Schlüssel entfernt");
     } }, "Entfernen") : null)]);
   const mInp = h("input", { id: "amodel", class: "input mono", value: md.value, maxlength: 100, disabled: md.source === "env", spellcheck: "false", autocapitalize: "none" });
   const mBtn = h("button", { class: "btn primary", type: "submit", disabled: md.source === "env" }, "Modell speichern");

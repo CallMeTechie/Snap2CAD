@@ -339,6 +339,20 @@ def login(username: str, password: str, ip: str) -> dict:
     return u
 
 
+def confirm_password(u: dict, password: str, ip: str):
+    """Erneute Passwortabfrage vor heiklen Aenderungen (API-Schluessel). Fehlversuche zaehlen zur Login-Sperre."""
+    wait = LIMITER.locked_for(u["username"], ip)
+    if wait:
+        raise HTTPException(429, f"Zu viele Fehlversuche. Bitte in {max(1, wait // 60)} Minuten erneut versuchen.")
+    if not password:
+        raise HTTPException(400, "Bitte zur Bestätigung dein Passwort eingeben.")
+    if not verify_pw(u["pw_hash"], password):
+        LIMITER.fail(u["username"], ip)
+        db.audit("confirm_failed", "Passwortbestätigung falsch", user_id=u["id"], actor=u["username"], ip=ip)
+        raise HTTPException(400, "Das Passwort ist falsch.")
+    LIMITER.ok(u["username"], ip)
+
+
 def change_password(u: dict, current: str, new: str, ip: str, keep_token: str | None):
     if not verify_pw(u["pw_hash"], current):
         db.audit("pw_change_failed", "aktuelles Passwort falsch", user_id=u["id"], actor=u["username"], ip=ip)

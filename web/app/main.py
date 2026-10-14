@@ -34,12 +34,23 @@ def _startup():
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     (config.DATA_DIR / "photos").mkdir(exist_ok=True)
     (config.DATA_DIR / "jobs").mkdir(exist_ok=True)
+    settings.check_secret_key()
     db.conn()
+    if settings.encrypt_stored():
+        db.audit("settings_changed", "API-Schlüssel mit SECRET_KEY verschlüsselt", actor="system")
+        print("Gespeicherten API-Schlüssel mit SECRET_KEY verschlüsselt.", flush=True)
     auth.ensure_admin()
     auth.purge_expired()
     jobs.startup()
-    ki = "Testmodus" if config.AI_FAKE else {"env": "an (Umgebung)", "db": "an", "none": "aus"}[settings.api_key_source()]
+    ki = "Testmodus" if config.AI_FAKE else {"env": "an (Umgebung)", "db": "an", "none": "aus",
+                                             "locked": "aus (Schlüssel nicht entschlüsselbar)"}[settings.api_key_source()]
     print(f"Snap2CAD {VERSION} · KI: {ki} · Modell {settings.model()} · Sandbox {config.SANDBOX_MODE}", flush=True)
+    if settings.api_key_source() == "locked":
+        print("WARNUNG: Der gespeicherte API-Schlüssel lässt sich nicht entschlüsseln – SECRET_KEY fehlt oder ist"
+              " falsch. Richtigen SECRET_KEY setzen oder den Schlüssel in der Verwaltung neu eingeben.", flush=True)
+    elif settings.api_key_source() == "db" and not settings.api_key_encrypted():
+        print("Hinweis: Der API-Schlüssel liegt unverschlüsselt in der Datenbank. SECRET_KEY in der .env setzen,"
+              " dann wird er beim nächsten Start verschlüsselt.", flush=True)
     if auth.setup_required():
         print("Noch nicht eingerichtet: Snap2CAD im Browser öffnen – der Einrichtungsassistent legt das erste"
               " Admin-Konto an.", flush=True)
@@ -234,18 +245,25 @@ def _usage(user: dict) -> dict:
 @app.get("/api/me")
 def me(request: Request):
     u = auth.current_user(request)
+    if not u:
+        # ohne Anmeldung keine Angaben zu Version, Modell oder Sandbox
+        out = {"user": None}
+        if auth.setup_required():
+            out["setup"] = _setup_info(request)
+        return out
     out = {"version": VERSION, "ai": settings.ai_enabled(), "ai_fake": config.AI_FAKE, "model": settings.model(),
            "sandbox": sandbox.worker_alive(), "user": None, "max_upload_mb": config.MAX_UPLOAD_MB,
            "limits": {"timeout_s": config.SANDBOX_TIMEOUT, "mem_mb": config.SANDBOX_MEM_MB, "autofix": config.MAX_AUTOFIX,
                       "sandbox_mode": config.SANDBOX_MODE}}
-    if auth.setup_required():
-        out["setup"] = {"required": True, "key_from_env": settings.api_key_source() == "env",
-                        "key_optional": config.AI_FAKE or settings.api_key_source() == "env",
-                        "allowed": auth.setup_ip_allowed(auth.client_ip(request))}
-    if u:
-        out["user"] = auth.public_user(u)
-        out["usage"] = _usage(u)
+    out["user"] = auth.public_user(u)
+    out["usage"] = _usage(u)
     return out
+
+
+def _setup_info(request: Request) -> dict:
+    return {"required": True, "key_from_env": settings.api_key_source() == "env",
+            "key_optional": config.AI_FAKE or settings.api_key_source() == "env",
+            "allowed": auth.setup_ip_allowed(auth.client_ip(request))}
 
 
 class SetupIn(BaseModel):
@@ -585,7 +603,8 @@ def admin_status(a: dict = Depends(auth.require_admin)):
 
 
 def _settings_public() -> dict:
-    return {"api_key": {"source": settings.api_key_source(), "hint": settings.api_key_hint()},
+    return {"api_key": {"source": settings.api_key_source(), "hint": settings.api_key_hint(),
+                        "encrypted": settings.api_key_encrypted(), "secret_key_set": bool(config.SECRET_KEY)},
             "model": {"value": settings.model(), "source": settings.model_source(), "default": config.DEFAULT_MODEL},
             "ai_fake": config.AI_FAKE}
 
@@ -599,6 +618,7 @@ class SettingsIn(BaseModel):
     api_key: str | None = Field(default=None, max_length=400)
     clear_api_key: bool = False
     model: str | None = Field(default=None, max_length=100)
+    password: str | None = Field(default=None, max_length=300)
 
 
 @app.put("/api/admin/settings")
@@ -611,6 +631,8 @@ def admin_settings_put(body: SettingsIn, request: Request, a: dict = Depends(aut
                                  "kann hier nicht geändert werden.")
     if model is not None and settings.model_source() == "env":
         raise HTTPException(400, "Das Modell ist per Umgebungsvariable ANTHROPIC_MODEL festgelegt.")
+    if key or body.clear_api_key:
+        auth.confirm_password(a, body.password or "", ip)
     if model == config.DEFAULT_MODEL:
         model = ""
     # Pruefen, bevor irgendetwas gespeichert wird

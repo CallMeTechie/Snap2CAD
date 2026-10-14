@@ -19,6 +19,9 @@ DB_PATH = DATA_DIR / "snap2cad.db"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "").strip()
 DEFAULT_MODEL = "claude-sonnet-5-5"
+# Hauptschluessel fuer geheime Einstellungen in der Datenbank (API-Schluessel). Gehoert NICHT ins Daten-Volume.
+# Leer = Schluessel wird unverschluesselt gespeichert (wie bisher).
+SECRET_KEY = os.environ.get("SECRET_KEY", "").strip()
 AI_FAKE = os.environ.get("AI_FAKE", "") == "1"  # nur fuer Entwicklung/Tests
 
 # Nur fuer automatisierte Installationen: legt beim Start ein Konto "admin" mit diesem Startpasswort an.
