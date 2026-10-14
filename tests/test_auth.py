@@ -7,7 +7,8 @@ from conftest import ADMIN_PW, H
 def test_unauthenticated_is_rejected(app):
     c = TestClient(app)
     assert c.get("/api/projects").status_code == 401
-    assert c.get("/api/me").json()["user"] is None
+    me = c.get("/api/me").json()
+    assert me == {"user": None}, me  # keine Version, kein Modell, kein Sandbox-Status ohne Anmeldung
 
 
 def test_csrf_header_required(app, admin):
