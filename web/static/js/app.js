@@ -60,15 +60,13 @@ async function render() {
 }
 
 // ------------------------------------------------------------------ Kopfzeile
-const STEPS = [["/", "Unterlage"], ["/fotos", "Fotos prüfen"], ["/messen", "Messen"], ["/cad", "CAD mit Claude"]];
+const STEPS = [["/", "Unterlage"], ["/fotos", "Fotos prüfen"], ["/messen", "Messen"], ["/cad", "CAD-Modell"]];
 
 function statusPill() {
   const st = S.status || {};
-  let dot = "off", text = "KI nicht eingerichtet";
-  if (st.ai_fake) { dot = "warn"; text = "Testmodus (AI_FAKE)"; }
-  else if (st.ai) { dot = ""; text = "Claude verbunden · "; }
-  const pill = h("span", { class: "pill", title: st.sandbox ? "CAD-Sandbox läuft" : "CAD-Sandbox antwortet nicht" },
-    h("span", { class: `dot ${dot}` }), text, st.ai && !st.ai_fake ? h("span", { class: "mono" }, st.model) : null);
+  let pill = null;
+  if (st.ai_fake) pill = h("span", { class: "pill" }, h("span", { class: "dot warn" }), "Testmodus (AI_FAKE)");
+  else if (!st.ai) pill = h("span", { class: "pill" }, h("span", { class: "dot off" }), "KI nicht eingerichtet");
   const sb = st.sandbox ? null : h("span", { class: "pill" }, h("span", { class: "dot err" }), "Sandbox offline");
   return [pill, sb];
 }
@@ -131,8 +129,12 @@ export async function ensureProject(force = false) {
   rememberProject();
   return S.project;
 }
+let reloadSeq = 0;
 export async function reloadProject() {
-  S.project = await api(`/api/projects/${S.project.id}`);
+  // nur die juengste Antwort uebernehmen: mehrere Aenderungen kurz hintereinander laden parallel neu
+  const n = ++reloadSeq, id = S.project.id;
+  const p = await api(`/api/projects/${id}`);
+  if (n === reloadSeq && S.project?.id === id) S.project = p;
   return S.project;
 }
 export function rememberProject() {
@@ -226,7 +228,7 @@ route(/^\/setup$/, async root => {
   const st = S.status?.setup;
   if (!st?.required) { go(S.me ? "/" : "/login", true); return; }
   const page = h("div", { class: "auth-page" }, h("div", { class: "auth-brand" }, h("span", { class: "b" }, LOGO(), "Snap2CAD"),
-    h("span", { class: "muted" }, "Bauteile per Foto vermessen · CAD mit Claude")));
+    h("span", { class: "muted" }, "Bauteile per Foto vermessen und als CAD-Modell nachbauen")));
   clear(root, page);
   if (!st.allowed) {
     page.append(h("div", { class: "auth-card" }, h("h1", { style: { fontSize: "22px" } }, "Einrichtung gesperrt"),
@@ -269,7 +271,7 @@ route(/^\/setup$/, async root => {
     } finally { submit.disabled = false; submit.textContent = label; }
   } },
   h("div", { style: { display: "flex", flexDirection: "column", gap: "6px" } }, h("h1", { id: "s-h", style: { fontSize: "24px" } }, "Snap2CAD einrichten"),
-    h("p", { class: "lead" }, "Lege das Administrator-Konto an und verbinde Claude. Erst danach ist Snap2CAD nutzbar.")),
+    h("p", { class: "lead" }, "Lege das Administrator-Konto an und verbinde die KI. Erst danach ist Snap2CAD nutzbar.")),
   err,
   h("h2", { style: { fontSize: "16px", margin: "4px 0 0" } }, "1 · Administrator-Konto"),
   h("div", { class: "grid2" }, h("div", { class: "field" }, h("label", { for: "sdn" }, "Anzeigename"), dn),
@@ -278,7 +280,7 @@ route(/^\/setup$/, async root => {
     h("span", { class: "hint" }, "Damit kannst du dich auch per E-Mail anmelden.")),
   h("div", { class: "field" }, h("label", { for: "spw" }, "Passwort"), pw.wrap, strengthUI(pw.input, () => un.value)),
   h("div", { class: "field" }, h("label", { for: "spw2" }, "Passwort wiederholen"), pw2.wrap),
-  h("h2", { style: { fontSize: "16px", margin: "8px 0 0" } }, "2 · Claude verbinden"),
+  h("h2", { style: { fontSize: "16px", margin: "8px 0 0" } }, "2 · KI verbinden"),
   keyField,
   submit,
   h("p", { class: "hint", style: { textAlign: "center" } }, "Diese Seite erscheint nur, solange noch kein Konto existiert.")));
@@ -313,7 +315,7 @@ route(/^\/login$/, async root => {
   h("p", { class: "hint" }, "Passwort vergessen? Ein Administrator kann dir einen Link zum Zurücksetzen erstellen."));
   clear(root, h("div", { class: "auth-page" },
     h("div", { class: "auth-brand" }, h("span", { class: "b" }, LOGO(), "Snap2CAD"),
-      h("span", { class: "muted" }, "Bauteile per Foto vermessen · CAD mit Claude")),
+      h("span", { class: "muted" }, "Bauteile per Foto vermessen und als CAD-Modell nachbauen")),
     form,
     h("p", { class: "hint", style: { textAlign: "center" } }, "Noch kein Konto? Die Registrierung ist nur über einen Einladungslink möglich."),
     h("span", { class: "xs muted" }, "selbst gehostet")));
@@ -700,7 +702,7 @@ async function settingsTab(main) {
     ? h("div", { class: "note info" }, icon("info"), h("span", {}, `Gesetzt über die Umgebungsvariable ANTHROPIC_API_KEY (${k.hint || "…"}). Ändern nur in der .env-Datei; ist sie leer, gilt der hier hinterlegte Schlüssel.`))
     : k.source === "db"
       ? h("div", { class: "note ok" }, icon("check"), h("span", {}, "Hinterlegt: ", h("span", { class: "mono" }, k.hint || "…")))
-      : h("div", { class: "note warn" }, icon("warn"), h("span", {}, cfg.ai_fake ? "Kein Schlüssel hinterlegt – der Testmodus (AI_FAKE) ist aktiv." : "Kein Schlüssel hinterlegt – Maßvorschläge und CAD mit Claude sind deaktiviert."));
+      : h("div", { class: "note warn" }, icon("warn"), h("span", {}, cfg.ai_fake ? "Kein Schlüssel hinterlegt – der Testmodus (AI_FAKE) ist aktiv." : "Kein Schlüssel hinterlegt – KI-Funktionen sind deaktiviert."));
   const keyForm = h("form", { class: "card", style: { flex: "1 1 380px", maxWidth: "560px" }, "aria-labelledby": "k-h", onsubmit: ev => {
     ev.preventDefault();
     if (!key.input.value.trim()) { showErr(err, "Bitte einen API-Schlüssel eingeben."); key.input.focus(); return; }
@@ -716,14 +718,14 @@ async function settingsTab(main) {
     h("div", { class: "chips" }, keyBtn, k.source === "db" || k.source === "locked" ? h("button", { class: "btn danger", type: "button", onclick: async ev => {
       const btn = ev.currentTarget;
       if (!needPw()) return;
-      if (!await confirmDlg("API-Schlüssel entfernen?", "Maßvorschläge und CAD mit Claude sind danach deaktiviert, bis ein neuer Schlüssel hinterlegt ist.", "Entfernen", true)) return;
+      if (!await confirmDlg("API-Schlüssel entfernen?", "KI-Funktionen sind danach deaktiviert, bis ein neuer Schlüssel hinterlegt ist.", "Entfernen", true)) return;
       save({ clear_api_key: true, password: cpw.input.value }, btn, "API-Schlüssel entfernt");
     } }, "Entfernen") : null)]);
   const mInp = h("input", { id: "amodel", class: "input mono", value: md.value, maxlength: 100, disabled: md.source === "env", spellcheck: "false", autocapitalize: "none" });
   const mBtn = h("button", { class: "btn primary", type: "submit", disabled: md.source === "env" }, "Modell speichern");
   const modelForm = h("form", { class: "card", style: { flex: "1 1 300px", maxWidth: "460px" }, "aria-labelledby": "m-h", onsubmit: ev => {
     ev.preventDefault(); save({ model: mInp.value.trim() }, mBtn, "Modell gespeichert");
-  } }, h("h2", { id: "m-h" }, "Claude-Modell"),
+  } }, h("h2", { id: "m-h" }, "KI-Modell"),
   h("div", { class: "field" }, h("label", { for: "amodel" }, "Modell-ID"), mInp,
     h("span", { class: "hint" }, md.source === "env" ? "Festgelegt über die Umgebungsvariable ANTHROPIC_MODEL." : `Leer lassen für den Standard (${md.default}). Wird mit dem hinterlegten Schlüssel geprüft.`)),
   h("div", {}, mBtn));

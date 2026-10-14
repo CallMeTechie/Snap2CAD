@@ -18,10 +18,10 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import ai, auth, config, db, geom, jobs, sandbox, settings
+from . import ai, auth, config, db, geom, jobs, parts, sandbox, settings
 
 sys.path.insert(0, str(config.ROOT))
-from core import matgen, vision  # noqa: E402
+from core import edges, matgen, vision  # noqa: E402
 
 VERSION = os.environ.get("SNAP2CAD_VERSION", "0.1.0")  # im Image vom Git-Tag gesetzt
 STATIC = Path(__file__).resolve().parent.parent / "static"
@@ -179,6 +179,18 @@ def _own_meas(mid: int, user: dict) -> tuple[dict, dict]:
     return m, _own_project(m["project_id"], user)
 
 
+def _own_part(part_id: int, user: dict) -> tuple[dict, dict]:
+    t = db.q1("SELECT * FROM parts WHERE id=?", (part_id,))
+    if not t:
+        raise HTTPException(404, "Teil nicht gefunden")
+    return t, _own_project(t["project_id"], user)
+
+
+def _refresh(p: dict):
+    with db.atomic():
+        parts.refresh(p, *_factors(p))
+
+
 def _own_job(jid: int, user: dict) -> dict:
     j = db.q1("SELECT * FROM jobs WHERE id=?", (jid,))
     if not j or (j["user_id"] != user["id"] and user["role"] != "admin"):
@@ -226,18 +238,19 @@ def _meas_public(m: dict) -> dict:
     return out
 
 
-def _default_unc(photo: dict | None, view: str) -> float:
-    if not photo:
-        return 0.5
-    a = db.jload(photo["analysis"], {}) or {}
-    if view == "gauge" and a.get("gauge"):
-        return round((a["gauge"].get("rms_mm") or 0.3) * 2 + 0.3, 2)
-    return round((photo["max_err"] or 0.3) + 0.2, 2)
-
-
 def _usage(user: dict) -> dict:
     q = auth.quota_of(user)
     return {"quota": q, "used": auth.usage_this_month(user["id"])}
+
+
+AI_DAILY_LIMIT = 30
+_detect_lock = threading.Semaphore(1)  # nur um den OpenCV-Teil, nicht um den KI-Aufruf (Spec §7)
+
+
+def _ai_uses_today(u: dict) -> int:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return db.q1("SELECT COUNT(*) n FROM audit WHERE user_id=? AND action IN ('suggest','edges_ai') AND substr(ts,1,10)=?",
+                 (u["id"], today))["n"]
 
 
 # ------------------------------------------------------------------ Status & Auth
@@ -715,12 +728,6 @@ def mat_layout(format: str = "A4", u: dict = Depends(auth.require_user)):
     return vision.spec(format)
 
 
-@app.get("/api/prompt.md")
-def prompt_md(u: dict = Depends(auth.require_user)):
-    p = config.ROOT / "PROMPT.md"
-    if not p.is_file():
-        raise HTTPException(404, "PROMPT.md fehlt")
-    return FileResponse(p, media_type="text/markdown; charset=utf-8", filename="PROMPT.md")
 
 
 # ------------------------------------------------------------------ Projekte
@@ -737,6 +744,7 @@ def _project_public(p: dict, detail: bool = False) -> dict:
         out["measurements"] = [_meas_public(m) for m in
                                db.q("SELECT * FROM measurements WHERE project_id=? ORDER BY seq", (p["id"],))]
         out["grid_h"] = _grid_h(fmt)
+        out["parts"] = parts.public_list(p["id"])
     return out
 
 
@@ -780,16 +788,6 @@ class ProjectPatch(BaseModel):
     archived: bool | None = None
 
 
-def _recompute(project: dict):
-    fx, fy = _factors(project)
-    for m in db.q("SELECT * FROM measurements WHERE project_id=?", (project["id"],)):
-        d = db.jload(m["data"], {}) or {}
-        if d.get("points") and m["source"] != "manual" and not d.get("ai_value"):
-            v = geom.compute(m["kind"], d["points"], fx, fy)
-            if v is not None:
-                db.ex("UPDATE measurements SET value=? WHERE id=?", (v, m["id"]))
-
-
 @app.patch("/api/projects/{pid}")
 def project_patch(pid: int, body: ProjectPatch, u: dict = Depends(auth.require_user)):
     p = _own_project(pid, u)
@@ -799,18 +797,19 @@ def project_patch(pid: int, body: ProjectPatch, u: dict = Depends(auth.require_u
         if v is not None and not (0.9 * ref <= v <= 1.1 * ref):
             raise HTTPException(400, f"Kontrollwert {v:g} mm ist unplausibel (erwartet um {ref:g} mm).")
     _finite(body.ctrl_x, "Kontrollwert"); _finite(body.ctrl_y, "Kontrollwert")  # noqa: E702
-    if body.name is not None and body.name.strip():
-        db.ex("UPDATE projects SET name=? WHERE id=?", (body.name.strip(), pid))
-    if body.archived is not None:
-        db.ex("UPDATE projects SET archived=? WHERE id=?", (int(body.archived), pid))
-    if body.clear_ctrl:
-        db.ex("UPDATE projects SET ctrl_x=NULL, ctrl_y=NULL WHERE id=?", (pid,))
-    for k in ("ctrl_x", "ctrl_y"):
-        v = getattr(body, k)
-        if v is not None:
-            db.ex(f"UPDATE projects SET {k}=? WHERE id=?", (v, pid))
-    p = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
-    _recompute(p)
+    with db.atomic():
+        if body.name is not None and body.name.strip():
+            db.ex("UPDATE projects SET name=? WHERE id=?", (body.name.strip(), pid))
+        if body.archived is not None:
+            db.ex("UPDATE projects SET archived=? WHERE id=?", (int(body.archived), pid))
+        if body.clear_ctrl:
+            db.ex("UPDATE projects SET ctrl_x=NULL, ctrl_y=NULL WHERE id=?", (pid,))
+        for k in ("ctrl_x", "ctrl_y"):
+            v = getattr(body, k)
+            if v is not None:
+                db.ex(f"UPDATE projects SET {k}=? WHERE id=?", (v, pid))
+        p = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
+        _refresh(p)
     return _project_public(p, True)
 
 
@@ -893,22 +892,30 @@ class PhotoPatch(BaseModel):
 
 @app.patch("/api/photos/{phid}")
 def photo_patch(phid: int, body: PhotoPatch, u: dict = Depends(auth.require_user)):
-    ph, _ = _own_photo(phid, u)
+    ph, p = _own_photo(phid, u)
     if body.view in VIEWS:
         db.ex("UPDATE photos SET view=? WHERE id=?", (body.view, phid))
     if body.format is not None and body.format != ph["format"]:
         img = vision.load_image((_photo_dir(phid) / "orig.jpg").read_bytes())
         a = _analyze_store(phid, img, body.format if body.format in matgen.FORMATS else None)
-        db.ex("UPDATE photos SET format=?, status=?, max_err=?, analysis=? WHERE id=?",
-              (a.get("format"), a["status"], a.get("max_err_mm"), db.jdump(a), phid))
+        with db.atomic():
+            db.ex("UPDATE photos SET format=?, status=?, max_err=?, analysis=? WHERE id=?",
+                  (a.get("format"), a["status"], a.get("max_err_mm"), db.jdump(a), phid))
+            parts.delete_photo_parts(phid)
+            _refresh(p)
+        for n in ("edges.json", "edges_ki.jpg"):
+            (_photo_dir(phid) / n).unlink(missing_ok=True)
     return _photo_public(db.q1("SELECT * FROM photos WHERE id=?", (phid,)))
 
 
 @app.delete("/api/photos/{phid}")
 def photo_delete(phid: int, u: dict = Depends(auth.require_user)):
-    _own_photo(phid, u)
+    _, p = _own_photo(phid, u)
+    with db.atomic():
+        parts.delete_photo_parts(phid)
+        db.ex("DELETE FROM photos WHERE id=?", (phid,))
+        _refresh(p)
     shutil.rmtree(_photo_dir(phid), ignore_errors=True)
-    db.ex("DELETE FROM photos WHERE id=?", (phid,))
     return {"ok": True}
 
 
@@ -921,6 +928,71 @@ def photo_file(phid: int, kind: str, u: dict = Depends(auth.require_user)):
     if not p.is_file():
         raise HTTPException(404, "Datei nicht vorhanden")
     return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=600"})
+
+
+class EdgesIn(BaseModel):
+    use_ai: bool = True
+
+
+@app.post("/api/photos/{phid}/edges")
+def photo_edges(phid: int, body: EdgesIn, request: Request, u: dict = Depends(auth.require_user)):
+    ph, p = _own_photo(phid, u)
+    d = _photo_dir(phid)
+    rect = (db.jload(ph["analysis"], {}) or {}).get("rect")
+    if not rect or not (d / "rect.jpg").is_file() or ph["format"] not in matgen.FORMATS:
+        raise HTTPException(400, "Für dieses Foto gibt es keine entzerrte Draufsicht.")
+    img = cv2.imread(str(d / "rect.jpg"))
+    if img is None:
+        raise HTTPException(400, "Die Draufsicht ist nicht lesbar.")
+    if not _detect_lock.acquire(blocking=False):
+        raise HTTPException(429, "Kantenerkennung ist gerade belegt – bitte gleich erneut versuchen.")
+    try:
+        res = edges.detect(img, ph["format"])
+    finally:
+        _detect_lock.release()
+    if not res["outlines"]:
+        raise HTTPException(422, "Kein Objekt erkannt – Teil von Hand zeichnen.")
+
+    def inside(poly):
+        return all(-10 <= q[0] <= rect["w_mm"] + 10 and -10 <= q[1] <= rect["h_mm"] + 10 for q in poly)
+    notice, detected = "", []
+    if body.use_ai and settings.ai_enabled():
+        if u["role"] != "admin" and _ai_uses_today(u) >= AI_DAILY_LIMIT:
+            notice = f"Tageslimit für KI erreicht ({AI_DAILY_LIMIT}) – Teile nur aus dem Umriss."
+        else:
+            db.audit("edges_ai", f"Foto {phid}", user_id=u["id"], actor=u["username"], ip=auth.client_ip(request))
+            try:
+                detected = [x for x in parts.ai_parts(d, res) if inside(x["polygon"])]
+                if not detected:
+                    notice = "Die KI hat keine Teile erkannt – Teile nur aus dem Umriss."
+            except ai.AIError as e:
+                notice = f"KI-Zuordnung fehlgeschlagen: {e} – Teile nur aus dem Umriss."
+    with db.atomic():
+        cur = db.q1("SELECT format FROM photos WHERE id=?", (phid,))
+        if not cur or cur["format"] != ph["format"]:
+            raise HTTPException(409, "Das Foto wurde während der Erkennung geändert – bitte erneut erkennen.")
+        has_parts = bool(db.q1("SELECT 1 FROM parts WHERE photo_id=? AND source!='user'", (phid,)))
+        if not detected and has_parts:
+            # ohne KI-Ergebnis vorhandene Teile nicht durch den Gesamtumriss ersetzen (sonst zerfaellt z. B. Quader + Platte)
+            notice = notice.replace("Teile nur aus dem Umriss.", "vorhandene Teile bleiben unverändert.") if notice \
+                else "Ohne KI wurden nur die Kanten aktualisiert; vorhandene Teile bleiben unverändert."
+        else:
+            parts.replace_detected(p["id"], phid, detected or parts.outline_parts(res))
+        _refresh(p)
+        tmp = d / "edges.json.tmp"  # innerhalb von atomic: kein zweiter Lauf und kein Loeschen dazwischen
+        tmp.write_text(json.dumps(res), encoding="utf-8")
+        os.replace(tmp, d / "edges.json")
+    return {"parts": [t for t in parts.public_list(p["id"]) if t["photo_id"] == phid], "segments": res["segments"],
+            "notice": notice}
+
+
+@app.get("/api/photos/{phid}/edges.json")
+def photo_edges_get(phid: int, u: dict = Depends(auth.require_user)):
+    _own_photo(phid, u)
+    f = _photo_dir(phid) / "edges.json"
+    if not f.is_file():
+        raise HTTPException(404, "Noch keine Kanten erkannt")
+    return json.loads(f.read_text(encoding="utf-8"))
 
 
 # ------------------------------------------------------------------ Masse
@@ -970,6 +1042,8 @@ class MeasPatch(BaseModel):
     note: str | None = Field(default=None, max_length=300)
     accepted: bool | None = None
     kind: str | None = None
+    part_id: int | None = None
+    ref: bool | None = None
 
 
 KIND_LABEL = {"length": "Länge", "height": "Höhe", "diameter": "Durchmesser", "radius": "Radius",
@@ -1003,20 +1077,31 @@ def meas_create(pid: int, body: MeasIn, u: dict = Depends(auth.require_user)):
         value, source = body.value, "manual"
         if value is None:
             raise HTTPException(400, "Wert fehlt")
-    unc = body.unc if body.unc is not None else (_default_unc(photo, body.view) if source == "user" else 0.1)
-    seq = _next_seq(pid)
+    unc = body.unc if body.unc is not None else (parts.default_unc(photo, body.view) if source == "user" else 0.1)
     unit = "°" if body.kind == "angle" else "mm"
     data = {"view": body.view if body.view in ("top", "gauge") else "top", "points": pts, "note": body.note}
-    mid = db.ex("""INSERT INTO measurements(project_id,photo_id,seq,label,kind,value,unit,unc,data,critical,caliper,fit,
-                   source,accepted,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)""",
-                (pid, body.photo_id, seq, body.label.strip() or KIND_LABEL[body.kind], body.kind, value, unit, unc,
-                 db.jdump(data), int(body.critical), body.caliper, body.fit, source, db.now()))
+    with db.atomic():
+        seq = _next_seq(pid)
+        mid = db.ex("""INSERT INTO measurements(project_id,photo_id,seq,label,kind,value,unit,unc,data,critical,caliper,fit,
+                       source,accepted,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)""",
+                    (pid, body.photo_id, seq, body.label.strip() or KIND_LABEL[body.kind], body.kind, value, unit, unc,
+                     db.jdump(data), int(body.critical), body.caliper, body.fit, source, db.now()))
+        _refresh(p)
     return _meas_public(db.q1("SELECT * FROM measurements WHERE id=?", (mid,)))
 
 
 @app.patch("/api/measurements/{mid}")
 def meas_patch(mid: int, body: MeasPatch, u: dict = Depends(auth.require_user)):
-    m, p = _own_meas(mid, u)
+    _, p = _own_meas(mid, u)
+    with db.atomic():  # frisch lesen: kein verlorenes Update bei parallelem PATCH, 404 wenn inzwischen geloescht
+        m = db.q1("SELECT * FROM measurements WHERE id=?", (mid,))
+        if not m:
+            raise HTTPException(404, "Maß nicht gefunden")
+        return _meas_patch(m, p, body)
+
+
+def _meas_patch(m: dict, p: dict, body: MeasPatch):
+    mid = m["id"]
     body.points = _points(body.points)
     for v in (body.value, body.unc, body.caliper):
         _finite(v)
@@ -1052,14 +1137,35 @@ def meas_patch(mid: int, body: MeasPatch, u: dict = Depends(auth.require_user)):
         sets["value"] = body.value
         if m["source"] == "user":
             sets["source"] = "manual"
+    drop = None
+    if m["source"] == "auto" and (body.points is not None or body.value is not None or "kind" in sets):
+        key = d.pop("auto_key", None)
+        d.pop("auto_raw", None)
+        sets["source"] = "manual" if body.value is not None and body.points is None else "user"
+        drop = (m["part_id"], key) if m["part_id"] else None
+    if "part_id" in body.model_fields_set:
+        if m["source"] == "auto" and "source" not in sets:
+            raise HTTPException(400, "Automatische Maße gehören fest zu ihrem Teil.")
+        if body.part_id == -1:
+            d.pop("part_fixed", None)
+        else:
+            if body.part_id is not None and not db.q1("SELECT id FROM parts WHERE id=? AND project_id=?",
+                                                      (body.part_id, p["id"])):
+                raise HTTPException(400, "Teil gehört nicht zu diesem Projekt")
+            sets["part_id"] = body.part_id
+            d["part_fixed"] = True
+    if body.ref is not None:
+        d["ref"] = bool(body.ref)
     if body.unc is not None:
         sets["unc"] = max(0.0, body.unc)
     if body.critical is not None:
         sets["critical"] = int(body.critical)
     if body.clear_caliper:
         sets["caliper"] = None
+        d.pop("ref", None)
     elif body.caliper is not None:
         sets["caliper"] = body.caliper
+        d.pop("ref", None)
     if body.fit is not None:
         sets["fit"] = body.fit or None
     if body.note is not None:
@@ -1068,21 +1174,31 @@ def meas_patch(mid: int, body: MeasPatch, u: dict = Depends(auth.require_user)):
         sets["accepted"] = int(body.accepted)
     sets["data"] = db.jdump(d)
     cols = ", ".join(f"{k}=?" for k in sets)
-    db.ex(f"UPDATE measurements SET {cols} WHERE id=?", (*sets.values(), mid))
+    with db.atomic():
+        if drop:
+            parts.drop_key(*drop)  # erst hier: ein abgelehnter PATCH (400 oben) hinterlaesst nichts
+        db.ex(f"UPDATE measurements SET {cols} WHERE id=?", (*sets.values(), mid))
+        _refresh(p)
     return _meas_public(db.q1("SELECT * FROM measurements WHERE id=?", (mid,)))
 
 
 @app.delete("/api/measurements/{mid}")
 def meas_delete(mid: int, u: dict = Depends(auth.require_user)):
-    _own_meas(mid, u)
-    db.ex("DELETE FROM measurements WHERE id=?", (mid,))
+    m, p = _own_meas(mid, u)
+    with db.atomic():
+        if m["source"] == "auto" and m["part_id"]:
+            parts.drop_key(m["part_id"], (db.jload(m["data"], {}) or {}).get("auto_key"))
+        db.ex("DELETE FROM measurements WHERE id=?", (mid,))
+        _refresh(p)
     return {"ok": True}
 
 
 @app.post("/api/projects/{pid}/measurements/accept-all")
 def meas_accept_all(pid: int, u: dict = Depends(auth.require_user)):
-    _own_project(pid, u)
-    db.ex("UPDATE measurements SET accepted=1 WHERE project_id=? AND source='claude'", (pid,))
+    p = _own_project(pid, u)
+    with db.atomic():
+        db.ex("UPDATE measurements SET accepted=1 WHERE project_id=? AND source='claude'", (pid,))
+        _refresh(p)
     return {"ok": True}
 
 
@@ -1090,6 +1206,84 @@ def meas_accept_all(pid: int, u: dict = Depends(auth.require_user)):
 def meas_discard(pid: int, u: dict = Depends(auth.require_user)):
     _own_project(pid, u)
     db.ex("DELETE FROM measurements WHERE project_id=? AND source='claude' AND accepted=0", (pid,))
+    return {"ok": True}
+
+
+class PartIn(BaseModel):
+    photo_id: int
+    label: str = Field(default="", max_length=80)
+    role: str = "body"
+    polygon: list[list[float]] = Field(min_length=3, max_length=64)
+
+
+class PartPatch(BaseModel):
+    label: str | None = Field(default=None, max_length=80)
+    role: str | None = None
+    polygon: list[list[float]] | None = Field(default=None, min_length=3, max_length=64)
+    reset_scale: bool = False
+
+
+MAX_PARTS_PER_PHOTO = 12
+
+
+def _polygon(pts: list, photo: dict) -> list:
+    import math
+    a = db.jload(photo["analysis"], {}) or {}
+    r = a.get("rect")
+    if not r:
+        raise HTTPException(400, "Für dieses Foto gibt es keine entzerrte Draufsicht.")
+    if not 3 <= len(pts) <= 64:
+        raise HTTPException(400, "Ein Teil braucht 3 bis 64 Eckpunkte.")
+    for q in pts:
+        if len(q) != 2 or not all(math.isfinite(v) for v in q) \
+                or not (-10 <= q[0] <= r["w_mm"] + 10 and -10 <= q[1] <= r["h_mm"] + 10):
+            raise HTTPException(400, "Eckpunkt außerhalb der Messfläche")
+    return [[float(q[0]), float(q[1])] for q in pts]
+
+
+@app.post("/api/projects/{pid}/parts")
+def part_create(pid: int, body: PartIn, u: dict = Depends(auth.require_user)):
+    p = _own_project(pid, u)
+    ph, pp = _own_photo(body.photo_id, u)
+    if pp["id"] != pid:
+        raise HTTPException(400, "Foto gehört zu einem anderen Projekt")
+    poly = _polygon(body.polygon, ph)
+    with db.atomic():
+        if db.q1("SELECT COUNT(*) n FROM parts WHERE photo_id=?", (ph["id"],))["n"] >= MAX_PARTS_PER_PHOTO:
+            raise HTTPException(400, f"Höchstens {MAX_PARTS_PER_PHOTO} Teile je Foto.")
+        tid = parts.create_part(pid, ph["id"], body.label, body.role, poly)
+        _refresh(p)
+    return parts.part_public(db.q1("SELECT * FROM parts WHERE id=?", (tid,)))
+
+
+@app.patch("/api/parts/{part_id}")
+def part_patch(part_id: int, body: PartPatch, u: dict = Depends(auth.require_user)):
+    t, p = _own_part(part_id, u)
+    poly = None
+    if body.polygon is not None:
+        poly = _polygon(body.polygon, db.q1("SELECT * FROM photos WHERE id=?", (t["photo_id"],)))
+    with db.atomic():
+        t = db.q1("SELECT * FROM parts WHERE id=?", (part_id,))  # frisch lesen: kein Wettlauf mit parallelem PATCH
+        if not t:
+            raise HTTPException(404, "Teil nicht gefunden")
+        if poly is not None:
+            parts.set_polygon(t, poly)
+        if body.label is not None:
+            parts.rename(t, body.label)
+        if body.role in parts.ROLE_TEXT:
+            db.ex("UPDATE parts SET role=? WHERE id=?", (body.role, part_id))
+        if body.reset_scale:
+            parts.reset_scale(part_id)
+        _refresh(p)
+    return parts.part_public(db.q1("SELECT * FROM parts WHERE id=?", (part_id,)))
+
+
+@app.delete("/api/parts/{part_id}")
+def part_delete(part_id: int, u: dict = Depends(auth.require_user)):
+    t, p = _own_part(part_id, u)
+    with db.atomic():
+        parts.delete_part(t)
+        _refresh(p)
     return {"ok": True}
 
 
@@ -1102,12 +1296,9 @@ class SuggestIn(BaseModel):
 def meas_suggest(pid: int, body: SuggestIn, request: Request, u: dict = Depends(auth.require_user)):
     p = _own_project(pid, u)
     if not settings.ai_enabled():
-        raise HTTPException(503, "KI ist nicht eingerichtet: Anthropic-API-Schlüssel fehlt (Verwaltung → Einstellungen).")
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    n = db.q1("SELECT COUNT(*) n FROM audit WHERE user_id=? AND action='suggest' AND substr(ts,1,10)=?",
-              (u["id"], today))["n"]
-    if u["role"] != "admin" and n >= 30:
-        raise HTTPException(429, "Tageslimit für Maßvorschläge erreicht (30).")
+        raise HTTPException(503, "KI ist nicht eingerichtet (Verwaltung → Einstellungen).")
+    if u["role"] != "admin" and _ai_uses_today(u) >= AI_DAILY_LIMIT:
+        raise HTTPException(429, f"Tageslimit für KI-Funktionen erreicht ({AI_DAILY_LIMIT}).")
     photos = db.q("SELECT * FROM photos WHERE project_id=? ORDER BY id", (pid,))
     if body.photo_id:
         photos = [ph for ph in photos if ph["id"] == body.photo_id] + [ph for ph in photos if ph["id"] != body.photo_id]
@@ -1139,20 +1330,25 @@ def meas_suggest(pid: int, body: SuggestIn, request: Request, u: dict = Depends(
         raise HTTPException(502, str(e)) from None
     fx, fy = _factors(p)
     f = (fx + fy) / 2
-    db.ex("DELETE FROM measurements WHERE project_id=? AND source='claude' AND accepted=0", (pid,))
     out = []
-    for it in items:
-        seq = _next_seq(pid)
-        kind = it["kind"] if it["kind"] in geom.KINDS else "length"
-        value = it["value"] if kind == "angle" else round(it["value"] * f, 3)
-        data = {"view": it["view"], "points": it["points"] or [], "reason": it["reason"], "unsure": it["unsure"],
-                "ai_value": True}
-        mid = db.ex("""INSERT INTO measurements(project_id,photo_id,seq,label,kind,value,unit,unc,data,source,accepted,
-                       reason,created_at) VALUES (?,?,?,?,?,?,?,?,?,'claude',0,?,?)""",
-                    (pid, used_photo["id"], seq, it["label"], kind, value, it["unit"], it["unc"], db.jdump(data),
-                     it["reason"], db.now()))
+    with db.atomic():  # M-Nummern gemeinsam mit parallelen Auto-Massen vergeben
+        db.ex("DELETE FROM measurements WHERE project_id=? AND source='claude' AND accepted=0", (pid,))
+        mids = [_suggest_insert(pid, used_photo["id"], it, f) for it in items]
+    for mid in mids:
         out.append(_meas_public(db.q1("SELECT * FROM measurements WHERE id=?", (mid,))))
     return {"suggestions": out, "usage": usage}
+
+
+def _suggest_insert(pid: int, photo_id: int, it: dict, f: float) -> int:
+    seq = _next_seq(pid)
+    kind = it["kind"] if it["kind"] in geom.KINDS else "length"
+    value = it["value"] if kind == "angle" else round(it["value"] * f, 3)
+    data = {"view": it["view"], "points": it["points"] or [], "reason": it["reason"], "unsure": it["unsure"],
+            "ai_value": True}
+    return db.ex("""INSERT INTO measurements(project_id,photo_id,seq,label,kind,value,unit,unc,data,source,accepted,
+                   reason,created_at) VALUES (?,?,?,?,?,?,?,?,?,'claude',0,?,?)""",
+                 (pid, photo_id, seq, it["label"], kind, value, it["unit"], it["unc"], db.jdump(data),
+                  it["reason"], db.now()))
 
 
 def _csv(pid: int) -> str:
@@ -1161,14 +1357,17 @@ def _csv(pid: int) -> str:
     def n(v):
         return "" if v is None else f"{v:.3f}".rstrip("0").rstrip(".").replace(".", ",")
 
-    lines = ["ID;Bezeichnung;Art;Wert;Einheit;Unsicherheit;Schieblehre;kritisch;Passung;Quelle;Ansicht;Punkte (mm)"]
+    lines = ["ID;Bezeichnung;Art;Wert;Einheit;Unsicherheit;Messschieber;kritisch;Passung;Quelle;Ansicht;Punkte (mm);Teil;Nennmaß"]
+    seq = {t["id"]: t["seq"] for t in db.q("SELECT id, seq FROM parts WHERE project_id=?", (pid,))}
     for m in rows:
         d = db.jload(m["data"], {}) or {}
         pts = " ".join(f"{p[0]:.2f}/{p[1]:.2f}" for p in d.get("points") or [])
         safe_txt = lambda t: ("'" + t) if t[:1] in ("=", "+", "-", "@", "\t", "\r") else t  # noqa: E731
         cells = [f"M{m['seq']}", safe_txt(m["label"]), KIND_LABEL.get(m["kind"], m["kind"]), n(m["value"]), m["unit"],
                  n(m["unc"]),
-                 n(m["caliper"]), "ja" if m["critical"] else "", safe_txt(m["fit"] or ""), m["source"], d.get("view", ""), pts]
+                 n(m["caliper"]), "ja" if m["critical"] else "", safe_txt(m["fit"] or ""),
+                 jobs.SOURCE_LABEL.get(m["source"], m["source"]), d.get("view", ""), pts,
+                 f"T{seq[m['part_id']]}" if m["part_id"] in seq else "", n(d.get("nominal"))]
         lines.append(";".join('"' + str(c).replace('"', '""') + '"' if any(x in str(c) for x in ';"\n') else str(c)
                               for c in cells))
     return "﻿" + "\r\n".join(lines) + "\r\n"
@@ -1196,11 +1395,15 @@ class JobIn(BaseModel):
     setups: str = Field(default="", max_length=40)
     fits: list[dict] | None = None
     extra: str = Field(default="", max_length=2000)
+    part_id: int | None = None
 
 
 @app.post("/api/jobs")
 def job_create(body: JobIn, u: dict = Depends(auth.require_user)):
     project = _own_project(body.project_id, u) if body.project_id else None
+    if body.part_id is not None and (not project or not db.q1("SELECT id FROM parts WHERE id=? AND project_id=?",
+                                                              (body.part_id, project["id"]))):
+        raise HTTPException(400, "Teil gehört nicht zu diesem Projekt")
     if not project and not body.request.strip():
         raise HTTPException(400, "Ohne Projekt braucht der Auftrag eine Beschreibung.")
     name = body.name.strip() or (project["name"] if project else "CAD-Auftrag")
@@ -1208,7 +1411,8 @@ def job_create(body: JobIn, u: dict = Depends(auth.require_user)):
             for f in (body.fits or [])[:30] if isinstance(f, dict)]
     jid = jobs.create(u, project, name, body.request, {
         "process": body.process, "material": body.material.strip(), "tolerance": body.tolerance.strip(),
-        "photo_ids": body.photo_ids, "cutter_d": body.cutter_d, "setups": body.setups.strip(), "fits": fits,
+        "photo_ids": body.photo_ids, "part_id": body.part_id, "cutter_d": body.cutter_d, "setups": body.setups.strip(),
+        "fits": fits,
         "extra": body.extra.strip()})
     return jobs.job_public(db.q1("SELECT * FROM jobs WHERE id=?", (jid,)), True)
 
@@ -1296,7 +1500,7 @@ def _bundle(j: dict, ver: int) -> Response:
         if j["project_id"]:
             z.writestr(f"{base}_Masse.csv", _csv(j["project_id"]))
         info = {"auftrag": j["name"], "version": ver, "erstellt": v["created_at"], "anfrage": db.jload(j["request"], {}),
-                "claude": meta, "pruefung": checks, "ergebnis": result}
+                "ki": meta, "pruefung": checks, "ergebnis": result}
         z.writestr(f"{base}_info.json", json.dumps(info, ensure_ascii=False, indent=2))
         lines = [f"{j['name']} – Version {ver}", "=" * 40, "", meta.get("summary", ""), ""]
         if result.get("bbox"):

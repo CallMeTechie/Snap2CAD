@@ -40,7 +40,7 @@ WORKDIR /app
 COPY core ./core
 COPY generator ./generator
 COPY tools ./tools
-COPY PROMPT.md README.md LICENSE* ./
+COPY README.md LICENSE* ./
 COPY web/app ./web/app
 COPY web/static ./web/static
 COPY --from=vendor /w/static/vendor ./web/static/vendor

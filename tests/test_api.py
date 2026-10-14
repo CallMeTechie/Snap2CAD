@@ -33,7 +33,7 @@ def test_mat_pdf_and_preview(admin):
     r = admin.get("/api/mat/preview.png?format=A4&page=1")
     assert r.status_code == 200 and r.content[:8] == b"\x89PNG\r\n\x1a\n"
     assert admin.get("/api/mat.pdf?format=A5").status_code == 400
-    assert admin.get("/api/prompt.md").status_code == 200
+    assert admin.get("/api/prompt.md").status_code == 404
 
 
 def test_photo_analysis(project):

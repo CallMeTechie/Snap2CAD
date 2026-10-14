@@ -1,4 +1,4 @@
-"""CAD-Auftraege: Claude -> Code -> Sandbox -> Pruefung -> ggf. Selbstkorrektur."""
+"""CAD-Auftraege: KI -> Code -> Sandbox -> Pruefung -> ggf. Selbstkorrektur."""
 from __future__ import annotations
 
 import shutil
@@ -10,6 +10,7 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from . import ai, auth, config, db, sandbox, settings
+from .parts import cad_text
 
 _pool = ThreadPoolExecutor(max_workers=max(1, config.MAX_CONCURRENT_JOBS), thread_name_prefix="job")
 _cancel: dict[int, threading.Event] = {}
@@ -21,6 +22,7 @@ PROCESSES = {
     "cnc": "CNC-Fräsen 3-Achs",
     "other": "nicht festgelegt",
 }
+SOURCE_LABEL = {"claude": "KI", "auto": "automatisch"}
 
 
 def job_dir(job_id: int) -> Path:
@@ -47,24 +49,29 @@ def _fmt(v, nd=2):
     return "–" if v is None else f"{v:.{nd}f}".rstrip("0").rstrip(".")
 
 
-def measurement_table(project_id: int) -> tuple[str, list[dict]]:
+def measurement_table(project_id: int, part_id: int | None = None) -> tuple[str, list[dict]]:
     rows = db.q("SELECT * FROM measurements WHERE project_id=? AND accepted=1 ORDER BY seq", (project_id,))
-    lines = ["| ID | Bezeichnung | Art | Wert | ± | Schieblehre | kritisch | Passung | Quelle | Ansicht/Punkte (mm) |",
-             "|---|---|---|---|---|---|---|---|---|---|"]
+    if part_id is not None:
+        rows = [m for m in rows if m["part_id"] in (part_id, None)]
+    seq = {t["id"]: t["seq"] for t in db.q("SELECT id, seq FROM parts WHERE project_id=?", (project_id,))}
+    lines = ["| ID | Bezeichnung | Teil | Art | Wert | ± | Messschieber | Nennmaß | kritisch | Passung | Quelle "
+             "| Ansicht/Punkte (mm) |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for m in rows:
         d = db.jload(m["data"], {}) or {}
         pts = d.get("points") or []
         where = d.get("view", "")
         if pts:
             where += " " + " ".join(f"({p[0]:.1f}, {p[1]:.1f})" for p in pts[:3])
-        lines.append(f"| M{m['seq']} | {m['label']} | {m['kind']} | {_fmt(m['value'])} {m['unit']} | "
-                     f"{_fmt(m['unc'])} | {_fmt(m['caliper'])} | {'ja' if m['critical'] else ''} | "
-                     f"{m['fit'] or ''} | {m['source']} | {where.strip()} |")
+        teil = f"T{seq[m['part_id']]}" if m["part_id"] in seq else ""
+        lines.append(f"| M{m['seq']} | {m['label']} | {teil} | {m['kind']} | {_fmt(m['value'])} {m['unit']} | "
+                     f"{_fmt(m['unc'])} | {_fmt(m['caliper'])} | {_fmt(d.get('nominal'))} | {'ja' if m['critical'] else ''} | "
+                     f"{m['fit'] or ''} | {SOURCE_LABEL.get(m['source'], m['source'])} | {where.strip()} |")
     return "\n".join(lines), rows
 
 
 def build_initial_message(project: dict, request_text: str, options: dict) -> list[dict]:
-    table, rows = measurement_table(project["id"])
+    table, rows = measurement_table(project["id"], options.get("part_id"))
     proc = PROCESSES.get(options.get("process"), options.get("process") or "nicht festgelegt")
     fx = (project.get("ctrl_x") or 100) / 100
     parts = [f"# Auftrag: {options.get('name') or 'Bauteil'}",
@@ -72,6 +79,9 @@ def build_initial_message(project: dict, request_text: str, options: dict) -> li
              f"Korrekturfaktoren aus dem Kontrollmaß sind bereits in den Werten enthalten (X {fx:.4f}).",
              "", "## Messwerte", table if rows else "(keine Messwerte – nur aus den Fotos ableiten)",
              "", "## Wunsch des Nutzers", request_text.strip() or "Bauteil möglichst originalgetreu nachbilden."]
+    teile = cad_text(project["id"], options.get("part_id"))
+    if teile:
+        parts[parts.index("## Messwerte") + 1:parts.index("## Messwerte") + 1] = [teile]
     if options.get("process") == "cnc":
         if options.get("cutter_d"):
             parts.append(f"Kleinster Fräser: Ø {options['cutter_d']:g} mm → Innenradien ≥ {options['cutter_d'] / 2 + 0.2:g} mm")
@@ -187,7 +197,7 @@ def _check_quota(user: dict):
 
 def _check_ready():
     if not settings.ai_enabled():
-        raise HTTPException(503, "KI ist nicht eingerichtet: Anthropic-API-Schlüssel fehlt (Verwaltung → Einstellungen).")
+        raise HTTPException(503, "KI ist nicht eingerichtet (Verwaltung → Einstellungen).")
     if not sandbox.worker_alive():
         raise HTTPException(503, "Die CAD-Sandbox läuft nicht (Dienst „sandbox“ prüfen).")
 
@@ -303,7 +313,7 @@ def _run(job_id: int, trigger: str, request_text: str, ev: threading.Event):
             raise ai.Cancelled()
         if not db.q1("SELECT id FROM jobs WHERE id=?", (job_id,)):
             return  # Auftrag wurde geloescht
-        log(job_id, "Claude erstellt das Modell …" if trigger != "autofix" else "Claude korrigiert den Code …")
+        log(job_id, "KI erstellt das Modell …" if trigger != "autofix" else "KI korrigiert den Code …")
         text, usage = ai.call(ai.CAD_SYSTEM, msgs, cancel=ev,
                               on_progress=lambda n: None)
         msgs.append({"role": "assistant", "content": [{"type": "text", "text": text}]})

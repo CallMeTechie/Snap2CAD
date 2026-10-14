@@ -2,12 +2,13 @@
 import { api, h, clear, icon, num, parseNum, toast, fail, dialog, confirmDlg } from "./lib.js";
 import { S, ensureProject, reloadProject, projectPicker, onLeave } from "./app.js";
 import { VIEW_LABEL } from "./photos.js";
+import { createPartsLayer, partsPanel, partColor, segDist } from "./edges.js";
 
 const KIND = { length: "Strecke", height: "Höhe", diameter: "Durchmesser", radius: "Radius", angle: "Winkel", point: "Punkt" };
 const NEED = { length: 2, height: 2, diameter: 3, radius: 3, angle: 3, point: 1 };
 const TOOLS = [
   ["pan", "Verschieben", "V", "pan"], ["length", "Strecke", "L", "line"], ["circle", "Kreis aus 3 Punkten", "C", "circle"],
-  ["point", "Punkt mit Koordinate", "P", "point"], ["angle", "Winkel", "A", "angle"],
+  ["point", "Punkt mit Koordinate", "P", "point"], ["angle", "Winkel", "A", "angle"], ["edges", "Kanten", "E", "edges"],
 ];
 const BLUE = "#1F6FB2", ORANGE = "#C2410C", DARK = "#17212B";
 
@@ -70,7 +71,10 @@ export default async function (main) {
   const listBox = h("ul", { class: "mlist" });
   const countEl = h("span", { class: "muted", style: { fontWeight: 400 } });
   const suggBox = h("section", { class: "sugg", "aria-labelledby": "ki-h", hidden: true });
-  const suggBtn = h("button", { class: "btn claude sm", onclick: suggest, disabled: !S.status?.ai, title: S.status?.ai ? "" : "KI nicht eingerichtet" }, icon("sparkle", 16), "Claude vorschlagen");
+  const suggBtn = h("button", { class: "btn claude sm", onclick: suggest, disabled: !S.status?.ai, title: S.status?.ai ? "" : "KI nicht eingerichtet" }, icon("sparkle", 16), "KI-Vorschläge");
+  const edgeBtn = h("button", { class: "btn sm", onclick: detectEdges, title: "Kanten und Teile auf diesem Foto erkennen" }, icon("edges", 16), "Kanten erkennen");
+  const partsBox = h("div");
+  let edgeDrag = false;
 
   const picker = projectPicker(() => { selId = null; init(); });
   const refreshPicker = (() => { let t; return () => { clearTimeout(t); t = setTimeout(() => picker.refresh(), 800); }; })();
@@ -79,6 +83,7 @@ export default async function (main) {
       h("div", { class: "toolbar", "aria-label": "Werkzeuge" },
         h("label", { class: "grp" }, h("span", { class: "small muted" }, "Foto"), photoSel),
         h("div", { class: "grp", role: "toolbar" }, Object.values(toolBtns)),
+        edgeBtn,
         h("label", { class: "check small" }, snapCb, "Kantenfang"),
         h("label", { class: "check small" }, loupeCb, "Lupe"),
         h("div", { class: "grp" },
@@ -89,6 +94,7 @@ export default async function (main) {
     h("aside", { class: "mside", "aria-labelledby": "m-h" },
       h("div", { class: "scroll" },
         h("div", { style: { display: "flex", flexDirection: "column", gap: "10px" } }, picker),
+        partsBox,
         h("div", { class: "card-head" }, h("h2", { id: "m-h" }, "Messungen ", countEl),
           h("div", { class: "chips" }, h("button", { class: "btn sm", onclick: manual }, icon("plus", 16), "Manuell"), suggBtn)),
         listBox, suggBox,
@@ -98,6 +104,11 @@ export default async function (main) {
         h("a", { class: "btn", href: `/api/projects/${S.project.id}/measurements.csv`, download: "", id: "csv" }, icon("download", 16), "CSV exportieren"),
         h("a", { class: "btn primary", href: "/cad", style: { marginLeft: "auto" } }, "An CAD übergeben", icon("right")))));
   const ctx = canvas.getContext("2d");
+  const layer = createPartsLayer({
+    ctx: () => ctx, scr: (ix, iy) => scr(ix, iy), toPX: (X, Y) => src.toPX(X, Y), cursorMM: () => cursor?.mm || null,
+    photoId: () => (src && src.view === "top" ? src.photo.id : null), active: () => tool === "edges",
+    redraw: () => { dirty = true; }, changed: () => { renderList(); dirty = true; }, selectPart: () => renderList(),
+  });
 
   // ---------------------------------------------------------------- Quellen
   function buildSources() {
@@ -115,17 +126,20 @@ export default async function (main) {
   photoSel.addEventListener("change", () => loadSource(sources.find(x => x.key === photoSel.value)));
 
   async function loadSource(x, keepView = false) {
-    src = x; pts = []; pixels = null;
-    if (!x) { img = null; dirty = true; return; }
+    src = x; pts = []; pixels = null; img = null;  // kein Messen auf dem alten Bild, solange das neue laedt
+    layer.reset();
+    renderList();
+    if (!x) { dirty = true; return; }
     photoSel.value = x.key;
     const im = new Image();
     im.decoding = "async";
     im.src = x.url;
-    try { await im.decode(); } catch { toast("Bild konnte nicht geladen werden", "err"); return; }
+    try { await im.decode(); } catch { if (src === x) dirty = true; toast("Bild konnte nicht geladen werden", "err"); return; }
     if (src !== x) return;
     img = im;
     if (!keepView) fit();
     setTool(tool);
+    if (x.view === "top") api(`/api/photos/${x.photo.id}/edges.json`).then(r => { if (src === x) layer.setSegments(r.segments); }).catch(() => {});
     // Pixel fuer Kantenfang im Hintergrund vorbereiten
     setTimeout(() => {
       if (src !== x) return;
@@ -248,11 +262,12 @@ export default async function (main) {
     if (!img) { ctx.fillStyle = "#5A6672"; ctx.font = "15px 'IBM Plex Sans', sans-serif"; ctx.textAlign = "center"; ctx.fillText(sources.length ? "Bild wird geladen …" : "", W / 2, H / 2); return; }
     ctx.imageSmoothingEnabled = s < 3; ctx.imageSmoothingQuality = "high";
     ctx.drawImage(img, tx, ty, img.naturalWidth * s, img.naturalHeight * s);
+    layer.draw();
     for (const m of shown()) {
       const isS = m.source === "claude" && !m.accepted;
       shape(m.kind, m.data.points, isS ? ORANGE : BLUE, { sel: m.id === selId, dash: isS, text: `${isS ? "K" : "M"}${m.seq} ${shortVal(m)}` });
     }
-    if (tool !== "pan" && pts.length) {
+    if (tool !== "pan" && tool !== "edges" && pts.length) {
       const k = toolKind();
       const live = cursor ? [...pts, cursor.mm] : pts;
       const v = compute(k, live, ...fac());
@@ -301,9 +316,11 @@ export default async function (main) {
     height: "Höhe: Fußpunkt auf der Tischkante (0) und Oberkante setzen · Shift = senkrecht",
     circle: "Kreis: 3 Punkte auf dem Rand setzen · Backspace = letzten Punkt zurück",
     point: "Punkt: Klick setzt eine Koordinate (Ursprung unten links)",
+    edges: "Kanten: Teil anklicken · Eckpunkt ziehen · Griff + an der Kantenmitte = Punkt einfügen · Entf = Punkt löschen · Esc = abbrechen",
     angle: "Winkel: Punkt auf Schenkel 1, Scheitel, Punkt auf Schenkel 2",
   };
   function setTool(k) {
+    if (k !== "edges") layer.cancel();
     tool = k; pts = []; hint.hidden = false;
     for (const [t, b] of Object.entries(toolBtns)) b.setAttribute("aria-pressed", String(t === k));
     hint.textContent = HINTS[k === "length" && src?.view === "gauge" ? "height" : k];
@@ -345,8 +362,10 @@ export default async function (main) {
     if (pointers.size === 2) {
       const [a, b] = [...pointers.values()];
       pinch = { d: Math.hypot(a[0] - b[0], a[1] - b[1]), s, cx: (a[0] + b[0]) / 2, cy: (a[1] + b[1]) / 2, tx, ty };
+      if (edgeDrag) { edgeDrag = false; layer.cancel(); }
       dragStart = null; return;
     }
+    if (tool === "edges" && e.button === 0) { updateCursor(e); if (layer.down(...evPos(e))) { edgeDrag = true; return; } }
     dragStart = { x: e.clientX, y: e.clientY, tx, ty, moved: false, btn: e.button };
     if (tool === "pan" || e.button !== 0) stage.style.cursor = "grabbing";
   });
@@ -359,6 +378,7 @@ export default async function (main) {
       tx = cx - (pinch.cx - pinch.tx) * ns / pinch.s; ty = cy - (pinch.cy - pinch.ty) * ns / pinch.s; s = ns;
       dirty = true; upStatus(); return;
     }
+    if (edgeDrag) { updateCursor(e); layer.move(...evPos(e)); return; }
     if (dragStart) {
       const dx = e.clientX - dragStart.x, dy = e.clientY - dragStart.y;
       if (dragStart.moved || Math.hypot(dx, dy) > 5) {
@@ -371,6 +391,7 @@ export default async function (main) {
   const endPointer = e => {
     pointers.delete(e.pointerId);
     if (pointers.size < 2) pinch = null;
+    if (edgeDrag) { edgeDrag = false; if (e.type === "pointercancel") layer.cancel(); else layer.up(); return; }
     const d = dragStart; dragStart = null;
     stage.style.cursor = tool === "pan" ? "grab" : "crosshair";
     if (!d || d.moved || d.btn !== 0 || e.type === "pointercancel") return;
@@ -399,6 +420,7 @@ export default async function (main) {
   }
   async function click(e) {
     if (!img || !cursor) return;
+    if (tool === "edges") { layer.click(...evPos(e)); return; }
     if (tool === "pan") { const m = hit(...evPos(e)); select(m ? m.id : null); return; }
     pts.push(cursor.mm);
     const k = toolKind();
@@ -410,20 +432,19 @@ export default async function (main) {
     if (busy) return; busy = true;
     try {
       const m = await api(`/api/projects/${S.project.id}/measurements`, { method: "POST", body: { photo_id: src.photo.id, kind: k, view: src.view, points } });
-      S.project.measurements.push(m);
+      await reloadProject();
       selId = m.id; renderList(true);
     } catch (er) { fail(er); } finally { busy = false; dirty = true; }
-  }
-  function segDist(p, a, b) {
-    const dx = b[0] - a[0], dy = b[1] - a[1], l = dx * dx + dy * dy;
-    let t = l ? ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l : 0; t = Math.max(0, Math.min(1, t));
-    return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy);
   }
 
   const onKey = e => {
     if (e.target.closest("input,textarea,select,[contenteditable]") || e.metaKey || e.ctrlKey || e.altKey) return;
     const k = e.key.toLowerCase();
-    const map = { v: "pan", l: "length", c: "circle", p: "point", a: "angle" };
+    if (tool === "edges") {
+      if (layer.key(e)) { e.preventDefault(); return; }
+      if (k === "delete" || k === "backspace" || k === "enter") return;
+    }
+    const map = { v: "pan", l: "length", c: "circle", p: "point", a: "angle", e: "edges" };
     if (map[k]) { setTool(map[k]); e.preventDefault(); }
     else if (k === "escape") { pts = []; dirty = true; }
     else if (k === "backspace" && pts.length) { pts.pop(); dirty = true; e.preventDefault(); }
@@ -450,19 +471,20 @@ export default async function (main) {
   }
   async function patch(m, body) {
     try {
-      const n = await api(`/api/measurements/${m.id}`, { method: "PATCH", body });
-      Object.assign(m, n); renderList(); dirty = true;
+      await api(`/api/measurements/${m.id}`, { method: "PATCH", body });
+      await reloadProject(); renderList(); dirty = true;
     } catch (e) { fail(e); }
   }
   async function del(m) {
     try {
       await api(`/api/measurements/${m.id}`, { method: "DELETE" });
-      S.project.measurements = S.project.measurements.filter(x => x.id !== m.id);
+      await reloadProject();
       if (selId === m.id) selId = null;
       renderList(); dirty = true;
     } catch (e) { fail(e); }
   }
   function sourceText(m) {
+    if (m.source === "auto") { const t = (S.project.parts || []).find(p => p.id === m.part_id); return `${KIND[m.kind]} · automatisch aus ${t ? t.id_label : "Teil"}`; }
     const ph = S.project.photos.find(p => p.id === m.photo_id);
     if (m.source === "manual") return `${KIND[m.kind]} · manuell eingegeben`;
     const v = m.data?.view === "gauge" ? "Höhenlehre" : VIEW_LABEL[ph?.view] || "Draufsicht";
@@ -484,6 +506,16 @@ export default async function (main) {
     if (val) val.addEventListener("change", () => { const v = parseNum(val.value); if (v != null && !Number.isNaN(v)) patch(m, { value: v }); });
     const kindSw = (m.kind === "diameter" || m.kind === "radius") && m.data?.points?.length ? h("div", { class: "seg" },
       ["diameter", "radius"].map(k => h("button", { type: "button", "aria-pressed": String(m.kind === k), onclick: () => patch(m, { kind: k }) }, KIND[k]))) : null;
+    const allParts = S.project.parts || [];
+    const own = allParts.find(p => p.id === m.part_id);
+    const autoOk = m.source !== "manual" && (m.data?.view || "top") === "top" && m.kind !== "height";
+    const partSel = m.source === "auto" ? null : h("select", { class: "input", "aria-label": "Teil", onchange: e => {
+      const v = e.target.value; patch(m, { part_id: v === "auto" ? -1 : v === "none" ? null : Number(v) }); } },
+      autoOk ? h("option", { value: "auto", selected: !m.data?.part_fixed }, "automatisch") : null,
+      allParts.map(p => h("option", { value: String(p.id), selected: !!m.data?.part_fixed && m.part_id === p.id }, `${p.id_label} · ${p.label}`)),
+      h("option", { value: "none", selected: (!!m.data?.part_fixed || !autoOk) && m.part_id == null }, "keins"));
+    const refBox = m.caliper != null && own && ["length", "diameter", "radius"].includes(m.kind)
+      ? h("label", { class: "check small" }, h("input", { type: "checkbox", checked: m.data?.ref !== false, onchange: e => patch(m, { ref: e.target.checked }) }), `Als Referenz für ${own.id_label}`) : null;
     const panel = h("div", { class: "medit", onclick: e => e.stopPropagation() },
       h("div", { class: "field" }, h("label", {}, "Bezeichnung"), lbl),
       kindSw,
@@ -491,15 +523,22 @@ export default async function (main) {
         val ? h("div", { class: "field" }, h("label", {}, "Wert"), h("span", { class: "unit" }, val, h("span", {}, m.unit))) : null,
         h("div", { class: "field" }, h("label", {}, "Unsicherheit ±"), h("span", { class: "unit" }, unc, h("span", {}, m.unit))),
         h("div", { class: "field" }, h("label", {}, "Messschieber"), h("span", { class: "unit" }, cal, h("span", {}, "mm")))),
+      own && m.caliper == null && ["length", "diameter", "radius"].includes(m.kind) ? h("span", { class: "xs muted" }, `Messschieber-Wert wird zur Referenz für ${own.id_label} – alle Maße des Teils werden angepasst`) : null,
+      refBox,
+      partSel ? h("div", { class: "field" }, h("label", {}, "Teil"), partSel) : h("span", { class: "xs muted" }, `Gehört automatisch zu ${own ? own.id_label : "einem Teil"}`),
       h("div", { class: "grid2" }, h("div", { class: "field" }, h("label", {}, "Passung"), fitIn), h("div", { class: "field" }, h("label", {}, "Notiz"), note)),
       h("div", { class: "chips", style: { justifyContent: "space-between" } },
         h("label", { class: "check small" }, h("input", { type: "checkbox", checked: !!m.critical, onchange: e => patch(m, { critical: e.target.checked }) }), "Kritisches Maß (für Passungen)"),
         h("button", { class: "btn sm danger", onclick: () => del(m) }, icon("trash", 14), "Löschen")),
       m.caliper != null ? h("span", { class: "xs", style: { color: "var(--ok)" } }, "Messschieber-Wert wird für CAD verwendet") : null,
-      m.source === "claude" && m.reason ? h("span", { class: "xs muted" }, `Claude: ${m.reason}`) : null);
+      m.source === "claude" && m.reason ? h("span", { class: "xs muted" }, `KI: ${m.reason}`) : null);
     return { panel, focus: () => { lbl.focus(); lbl.select(); } };
   }
   function renderList(focusNew = false) {
+    clear(partsBox, partsPanel({ photoId: src && src.view === "top" ? src.photo.id : null, selected: layer.selected,
+      onSelect: id => { if (id) setTool("edges"); layer.select(id); }, onNew: () => { setTool("edges"); layer.startNew(); },
+      onChanged: () => { renderList(); dirty = true; } }));
+    const partOf = m => (S.project.parts || []).find(p => p.id === m.part_id);
     const acc = S.project.measurements.filter(m => m.accepted);
     const sugg = S.project.measurements.filter(m => !m.accepted);
     countEl.textContent = `(${acc.length})`;
@@ -512,9 +551,13 @@ export default async function (main) {
       return h("li", { class: "mitem", "aria-current": String(sel), tabindex: 0, onclick: () => select(sel ? null : m.id), onkeydown: e => { if (e.key === "Enter" && e.target === e.currentTarget) select(sel ? null : m.id); } },
         h("span", { class: "mid" }, `M${m.seq}`),
         h("span", { style: { fontWeight: 500, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, m.label,
-          m.critical ? h("span", { class: "crit" }, "kritisch") : null, m.source === "claude" ? h("span", { class: "src-claude" }, "Claude") : null),
-        h("span", { class: "mval" }, m.caliper != null ? h("span", { title: `Foto: ${fmtValue(m)}` }, `${m.kind === "diameter" ? "Ø " : ""}${num(m.caliper, 2)} mm`) : fmtValue(m)),
+          m.critical ? h("span", { class: "crit" }, "kritisch") : null, m.source === "claude" ? h("span", { class: "src-claude" }, "KI") : null,
+          partOf(m) ? h("span", { class: "src-part", style: { background: partColor(partOf(m)) } }, partOf(m).id_label) : null),
+        h("span", { class: "mval", title: m.data?.raw != null && Math.abs(m.data.raw - m.value) > 0.004 ? `Foto ${num(m.data.raw, 2)} mm × ${num(partOf(m)?.scale ?? 1, 3)}` : "" },
+          m.caliper != null ? h("span", { title: `Foto: ${fmtValue(m)}` }, `${m.kind === "diameter" ? "Ø " : ""}${num(m.caliper, 2)} mm`) : fmtValue(m),
+          m.data?.nominal != null && Math.abs(m.data.nominal - (m.caliper ?? m.value)) > 0.004 ? h("span", { class: "xs muted" }, ` ≈ ${num(m.data.nominal, m.data.nominal % 1 ? 1 : 0)}`) : null),
         h("span", { class: "msub" }, sourceText(m)),
+        m.data?.ref_warn || m.data?.warn ? h("span", { class: "msub", style: { color: "var(--warn)" } }, m.data.ref_warn || m.data.warn) : null,
         h("span", { class: "munc" }, m.caliper != null ? "MS" : m.kind === "point" ? "" : `±${num(m.unc, 1)}`),
         ed ? ed.panel : null);
     }) : h("li", { class: "empty small", style: { padding: "20px" } }, sources.length ? "Noch keine Messungen. Werkzeug wählen und Punkte im Bild setzen." : "Keine auswertbaren Fotos."));
@@ -523,7 +566,7 @@ export default async function (main) {
     suggBox.hidden = !sugg.length;
     if (sugg.length) {
       clear(suggBox,
-        h("div", { class: "card-head" }, h("h3", { id: "ki-h", style: { color: "var(--claude)" } }, "Vorschläge von Claude ", h("span", { style: { fontWeight: 400 } }, `(${sugg.length})`)),
+        h("div", { class: "card-head" }, h("h3", { id: "ki-h", style: { color: "var(--claude)" } }, "KI-Vorschläge ", h("span", { style: { fontWeight: 400 } }, `(${sugg.length})`)),
           h("span", { class: "xs muted" }, "aus Fotos geschätzt · noch nicht übernommen")),
         sugg.map(m => h("div", { class: "sitem", "aria-current": String(m.id === selId), onclick: () => select(m.id) },
           h("span", { class: "mid k" }, `K${m.seq}`),
@@ -536,7 +579,7 @@ export default async function (main) {
         h("div", { class: "chips" },
           h("button", { class: "btn sm", onclick: async () => { try { await api(`/api/projects/${S.project.id}/measurements/accept-all`, { method: "POST" }); await reloadProject(); renderList(); dirty = true; } catch (e) { fail(e); } } }, "Alle übernehmen"),
           h("button", { class: "btn sm ghost", onclick: async () => { try { await api(`/api/projects/${S.project.id}/measurements/discard-suggestions`, { method: "POST" }); await reloadProject(); renderList(); dirty = true; } catch (e) { fail(e); } } }, "Alle verwerfen")),
-        h("span", { class: "xs muted" }, "Claude bekommt die entzerrten Fotos und deine Messungen. Übernommene Vorschläge erscheinen als normale Messung mit Herkunft „Claude“."));
+        h("span", { class: "xs muted" }, "Die KI bekommt die entzerrten Fotos und deine Messungen. Übernommene Vorschläge erscheinen als normale Messung mit Herkunft „KI“."));
     }
   }
 
@@ -558,20 +601,35 @@ export default async function (main) {
       return { label: lbl.value, kind: kind.value, value: v, unc: Number.isNaN(u) ? null : u, critical: crit.checked };
     } }] });
     if (!r) return;
-    try { const m = await api(`/api/projects/${S.project.id}/measurements`, { method: "POST", body: r }); S.project.measurements.push(m); selId = m.id; renderList(); } catch (e) { fail(e); }
+    try { const m = await api(`/api/projects/${S.project.id}/measurements`, { method: "POST", body: r }); await reloadProject(); selId = m.id; renderList(); } catch (e) { fail(e); }
+  }
+
+  async function detectEdges() {
+    if (!src || src.view !== "top") { toast("Kanten lassen sich nur auf einer Draufsicht erkennen", "err"); return; }
+    if ((S.project.parts || []).some(p => p.photo_id === src.photo.id) &&
+      !await confirmDlg("Kanten neu erkennen?", "Teile dieses Fotos werden neu erkannt. Wiedergefundene Teile behalten Bezeichnung und Messschieber-Referenzen.", "Neu erkennen")) return;
+    const old = [...edgeBtn.childNodes], phid = src.photo.id;
+    clear(edgeBtn, h("span", { class: "spin" }), "Kanten werden erkannt …"); edgeBtn.disabled = true;
+    try {
+      const r = await api(`/api/photos/${phid}/edges`, { method: "POST", body: { use_ai: true } });
+      await reloadProject();
+      if (src?.photo.id === phid) { layer.setSegments(r.segments); setTool("edges"); }
+      renderList(); dirty = true;
+      toast(r.notice || `${r.parts.length} Teil${r.parts.length === 1 ? "" : "e"} erkannt`, r.notice ? "" : "ok");
+    } catch (e) { fail(e); } finally { clear(edgeBtn, ...old); edgeBtn.disabled = false; }
   }
 
   async function suggest() {
     if (!src) { toast("Erst ein auswertbares Foto hochladen", "err"); return; }
     const old = [...suggBtn.childNodes];
-    clear(suggBtn, h("span", { class: "spin" }), "Claude analysiert …");
+    clear(suggBtn, h("span", { class: "spin" }), "KI analysiert …");
     suggBtn.disabled = true;
     try {
       await api(`/api/projects/${S.project.id}/suggest`, { method: "POST", body: { photo_id: src.photo.id } });
       await reloadProject();
       renderList(); dirty = true;
       const n = S.project.measurements.filter(m => !m.accepted).length;
-      toast(n ? `${n} Vorschläge von Claude` : "Claude hat keine weiteren Maße gefunden", n ? "ok" : "");
+      toast(n ? `${n} KI-Vorschläge` : "Die KI hat keine weiteren Maße gefunden", n ? "ok" : "");
     } catch (e) { fail(e); } finally { clear(suggBtn, ...old); suggBtn.disabled = !S.status?.ai; }
   }
 

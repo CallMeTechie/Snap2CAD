@@ -1,4 +1,4 @@
-// Schritt 4: CAD mit Claude – Auftrag, Fortschritt, Ergebnis
+// Schritt 4: CAD-Modell – Auftrag, Fortschritt, Ergebnis
 import { api, h, clear, icon, num, bytes, toast, fail, mmss, dt, confirmDlg, copyText } from "./lib.js";
 import { S, ensureProject, go, onLeave, refreshMe, jobBadge } from "./app.js";
 import { fmtValue } from "./measure.js";
@@ -26,6 +26,23 @@ export async function form(main) {
   const P = S.project, st = S.status || {};
   const meas = P.measurements.filter(m => m.accepted);
   const crit = meas.filter(m => m.critical);
+  const partsList = P.parts || [];
+  let partSel = "";
+  const partBox = partsList.length ? h("select", { id: "part", class: "input", onchange: e => { partSel = e.target.value; drawMeas(); } },
+    h("option", { value: "" }, "Alle Teile (ein Körper)"),
+    partsList.map(t => h("option", { value: String(t.id) }, `${t.id_label} · ${t.label}`))) : null;
+  const sentMeas = () => partSel ? meas.filter(m => m.part_id == null || m.part_id === Number(partSel)) : meas;
+  const measBox = h("div", { style: { display: "flex", flexDirection: "column", gap: "6px" } });
+  function drawMeas() {
+    const list = sentMeas();
+    clear(measBox, h("span", { class: "label" }, `Maßtabelle · ${list.length}`),
+      list.length ? h("table", { class: "t" }, h("thead", {}, h("tr", {}, h("th", {}, "ID"), h("th", {}, "Merkmal"), h("th", { style: { textAlign: "right" } }, "Wert"), h("th", { style: { textAlign: "right" } }, "±"))),
+        h("tbody", {}, list.map(m => h("tr", {}, h("td", { class: "mono" }, `M${m.seq}`), h("td", {}, m.label, m.critical ? " ★" : ""),
+          h("td", { class: "num" }, m.caliper != null ? `${m.kind === "diameter" ? "Ø " : ""}${num(m.caliper, 2)}` : fmtValue(m).replace(" mm", "")),
+          h("td", { class: "num" }, m.caliper != null ? "MS" : num(m.unc, 1))))))
+        : h("div", { class: "note warn" }, icon("warn"), h("span", {}, "Noch keine Maße. ", h("a", { href: "/messen" }, "Jetzt messen"), " – oder alles im Feld „Zweck und Funktion“ beschreiben.")),
+      list.length ? h("span", { class: "xs muted" }, "★ kritisch · MS = Messschieber-Wert") : null);
+  }
   let proc = "fdm";
   try { proc = localStorage.getItem("mu.proc") || "fdm"; } catch { /* */ }
   const name = h("input", { id: "name", class: "input", value: P.name, maxlength: 120, required: true });
@@ -62,17 +79,17 @@ export async function form(main) {
       h("img", { src: `/api/photos/${p.id}/${p.files.includes("rect") ? "rect" : "gauge"}.jpg`, alt: p.filename, style: { opacity: picked.has(p.id) ? 1 : 0.35 } }),
       h("span", { class: "check xs", style: { minHeight: "auto" } }, h("input", { type: "checkbox", checked: picked.has(p.id), onchange: e => { e.target.checked ? picked.add(p.id) : picked.delete(p.id); drawPhotos(); } }),
         `${p.filename.replace(/\.\w+$/, "")} · ${({ top: "Draufsicht", tilted: "Gekippt", gauge: "Höhenlehre", overview: "Übersicht" })[p.view]}${p.files.includes("gauge") ? " + Höhe" : ""}`))))
-    : h("p", { class: "hint" }, "Keine entzerrten Fotos – Claude arbeitet dann nur mit Maßen und Beschreibung."));
+    : h("p", { class: "hint" }, "Keine entzerrten Fotos – das Modell entsteht dann nur aus Maßen und Beschreibung."));
   drawPhotos();
   const rules = h("dd", {}, RULES[proc]);
   const us = st.usage || {};
-  const blocked = !st.ai ? "KI ist nicht eingerichtet (ANTHROPIC_API_KEY fehlt)." : !st.sandbox ? "Die CAD-Sandbox läuft nicht." :
+  const blocked = !st.ai ? "KI ist nicht eingerichtet (Verwaltung → Einstellungen)." : !st.sandbox ? "Die CAD-Sandbox läuft nicht." :
     (us.quota != null && us.used >= us.quota) ? `Monatskontingent erreicht (${us.used} / ${us.quota}).` : "";
   const submit = h("button", { class: "btn primary big wide", type: "submit", form: "cadform", disabled: !!blocked }, icon("cube"), "CAD-Modell erzeugen");
 
   main.append(
-    h("div", { class: "head" }, h("div", { class: "t" }, h("h1", {}, "CAD-Modell mit Claude"),
-      h("p", { class: "lead" }, "Claude schreibt aus Maßen und Fotos ein parametrisches build123d-Modell. Der Code läuft abgeschottet auf dem Server und liefert STEP und STL.")),
+    h("div", { class: "head" }, h("div", { class: "t" }, h("h1", {}, "CAD-Modell erzeugen"),
+      h("p", { class: "lead" }, "Aus Maßen und Fotos entsteht ein parametrisches build123d-Modell. Der Code läuft abgeschottet auf dem Server und liefert STEP und STL.")),
     flow(0)),
     h("div", { class: "cad-layout" },
       h("form", { id: "cadform", class: "card", "aria-labelledby": "f-h", onsubmit: async ev => {
@@ -83,15 +100,17 @@ export async function form(main) {
             project_id: P.id, name: name.value.trim(), request: zweck.value.trim(), process: proc, material: material.value.trim(),
             cutter_d: proc === "cnc" ? parseFloat(cutter.value.replace(",", ".")) || null : null, setups: proc === "cnc" ? setups.value : "",
             fits: fits.map(f => ({ id: `M${f.m.seq}`, fit: f.fit.value.trim(), depth: f.depth.value === "–" ? "" : f.depth.value })),
-            extra: extra.value.trim(), photo_ids: [...picked] } });
+            extra: extra.value.trim(), photo_ids: [...picked], part_id: partSel ? Number(partSel) : null } });
           refreshMe().catch(() => {});
           go(`/cad/${job.id}`);
         } catch (e) { fail(e); submit.disabled = false; }
       } },
       h("h2", { id: "f-h" }, "Auftrag"),
       h("div", { class: "field" }, h("label", { for: "name" }, "Bezeichnung"), name),
+      partBox ? h("div", { class: "field" }, h("label", { for: "part" }, "Modell für"), partBox,
+        h("span", { class: "hint" }, "Bei einem einzelnen Teil gehen nur dessen Maße und Maße ohne Teil in den Auftrag.")) : null,
       h("div", { class: "field" }, h("label", { for: "zweck" }, "Zweck und Funktion"), zweck,
-        h("span", { class: "hint" }, "Je klarer die Funktion, desto besser trifft Claude Konstruktionsabsicht und Nennmaße.")),
+        h("span", { class: "hint" }, "Je klarer die Funktion, desto besser trifft die KI Konstruktionsabsicht und Nennmaße.")),
       h("fieldset", {}, h("legend", {}, "Fertigung"), h("div", { class: "grid3" }, Object.keys(PROC).map(procRadio))),
       cncBox,
       crit.length ? h("fieldset", {}, h("legend", {}, "Passungen aus kritischen Maßen"),
@@ -104,25 +123,19 @@ export async function form(main) {
         : h("p", { class: "hint" }, "Tipp: Maße unter „Messen“ als kritisch markieren, dann lassen sich hier Passungen festlegen."),
       h("div", { class: "field" }, h("label", { for: "extra" }, "Zusatzwünsche ", h("span", { class: "muted", style: { fontWeight: 400 } }, "(optional)")), extra)),
       h("aside", { class: "card", "aria-labelledby": "s-h" },
-        h("h2", { id: "s-h" }, "Wird an Claude gesendet"),
+        h("h2", { id: "s-h" }, "Grundlage für das Modell"),
         h("div", { style: { display: "flex", flexDirection: "column", gap: "8px" } }, h("span", { class: "label" }, `Entzerrte Fotos · ${picked.size}`), photoFigs),
-        h("div", { style: { display: "flex", flexDirection: "column", gap: "6px" } }, h("span", { class: "label" }, `Maßtabelle · ${meas.length}`),
-          meas.length ? h("table", { class: "t" }, h("thead", {}, h("tr", {}, h("th", {}, "ID"), h("th", {}, "Merkmal"), h("th", { style: { textAlign: "right" } }, "Wert"), h("th", { style: { textAlign: "right" } }, "±"))),
-            h("tbody", {}, meas.map(m => h("tr", {}, h("td", { class: "mono" }, `M${m.seq}`), h("td", {}, m.label, m.critical ? " ★" : ""),
-              h("td", { class: "num" }, m.caliper != null ? `${m.kind === "diameter" ? "Ø " : ""}${num(m.caliper, 2)}` : fmtValue(m).replace(" mm", "")),
-              h("td", { class: "num" }, m.caliper != null ? "MS" : num(m.unc, 1))))))
-            : h("div", { class: "note warn" }, icon("warn"), h("span", {}, "Noch keine Maße. ", h("a", { href: "/messen" }, "Jetzt messen"), " – oder alles im Feld „Zweck und Funktion“ beschreiben.")),
-          meas.length ? h("span", { class: "xs muted" }, "★ kritisch · MS = Messschieber-Wert") : null),
+        measBox,
         h("dl", { class: "kv" },
           h("dt", {}, "Modell"), h("dd", { class: "mono small" }, st.ai_fake ? "Testmodus (AI_FAKE)" : `${st.model} · Server-Key`),
           h("dt", {}, "Regeln"), rules,
           h("dt", {}, "Sandbox"), h("dd", {}, `kein Netz · max. ${st.limits?.timeout_s ?? 120} s · ${num((st.limits?.mem_mb ?? 3072) / 1024, 1)} GB · eigener Benutzer`),
           h("dt", {}, "Korrektur"), h("dd", {}, `bei Fehler bis zu ${st.limits?.autofix ?? 2} automatische Versuche`),
           h("dt", {}, "Kontingent"), h("dd", {}, us.quota == null ? `${us.used ?? 0} Läufe diesen Monat (unbegrenzt)` : `${us.used} von ${us.quota} Läufen diesen Monat`)),
-        h("p", { class: "xs muted" }, "Fotos, Maße und Beschreibung werden an die Anthropic-API übertragen."),
         blocked ? h("div", { class: "note err" }, icon("warn"), h("span", {}, blocked)) : null,
         submit,
         h("a", { href: "/auftraege", class: "small", style: { textAlign: "center" } }, "Frühere Aufträge ansehen"))));
+  drawMeas();
   setProc(proc);
   zweck.focus();
 }
@@ -234,7 +247,7 @@ export async function job(main, id) {
         J.current_version ? ` Die letzte gültige Version ist v${J.current_version}.` : "")) : null;
 
     // Tabs
-    const tabs = [["3d", "3D-Ansicht", ok], ["code", `Code`, !!V?.code], ["claude", "Claude-Antwort", !!V?.claude_text], ["foto", "Foto-Abgleich", ok && V.files["outline.json"] > 2]];
+    const tabs = [["3d", "3D-Ansicht", ok], ["code", `Code`, !!V?.code], ["claude", "KI-Antwort", !!V?.claude_text], ["foto", "Foto-Abgleich", ok && V.files["outline.json"] > 2]];
     if (!tabs.find(t => t[0] === tab && t[2])) tab = (tabs.find(t => t[2]) || ["code"])[0];
     const panel = h("div", { style: { display: "flex", flexDirection: "column", gap: "16px" } });
     const tabBar = h("div", { class: "seg", role: "tablist", "aria-label": "Ansicht" }, tabs.filter(t => t[2]).map(([k, t]) =>
@@ -251,7 +264,7 @@ export async function job(main, id) {
         V.files["model.py"] ? h("a", { class: "btn sm", href: `/api/jobs/${id}/v/${V.version}/model.py?download=1` }, icon("download", 14), "model.py") : null));
     else if (tab === "claude" && V) clear(panel, h("pre", { class: "codebox", style: { whiteSpace: "pre-wrap" } }, V.claude_text),
       V.usage?.input_tokens ? h("span", { class: "xs muted" }, `${num(V.usage.input_tokens, 0)} Token Eingabe · ${num(V.usage.output_tokens, 0)} Token Ausgabe · ${V.usage.model || ""}`) : null);
-    else if (tab === "foto" && ok) drawOverlay(panel, V);
+    else if (tab === "foto" && ok) drawOverlay(panel, V).catch(e => clear(panel, h("div", { class: "note err" }, icon("warn"), h("span", {}, `Foto-Abgleich nicht verfügbar: ${e.message}`))));
 
     // rechte Spalte
     if (V && ok) {
@@ -278,7 +291,7 @@ export async function job(main, id) {
     }
     const meta = V?.meta || {};
     if (meta.summary || meta.assumptions?.length || meta.check_before_manufacturing?.length) {
-      right.append(h("section", { class: "card", "aria-labelledby": "as-h", style: { gap: "12px" } }, h("h2", { id: "as-h" }, "Annahmen von Claude"),
+      right.append(h("section", { class: "card", "aria-labelledby": "as-h", style: { gap: "12px" } }, h("h2", { id: "as-h" }, "Annahmen der KI"),
         meta.summary ? h("p", { class: "small" }, meta.summary) : null,
         meta.assumptions?.length ? h("ul", { class: "ul" }, meta.assumptions.map(a => h("li", {}, String(a)))) : null,
         meta.check_before_manufacturing?.length ? h("div", { class: "note warn", style: { flexDirection: "column", gap: "4px" } }, h("strong", {}, "Vor der Fertigung:"),

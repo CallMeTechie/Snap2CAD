@@ -94,6 +94,7 @@ export const ICONS = {
   circle: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="4" r="1.6" fill="currentColor"/><circle cx="5" cy="15" r="1.6" fill="currentColor"/><circle cx="19" cy="15" r="1.6" fill="currentColor"/>',
   point: '<path d="M12 3v6M12 15v6M3 12h6M15 12h6"/><circle cx="12" cy="12" r="2"/>',
   angle: '<path d="M4 20h16"/><path d="M4 20L16 5"/><path d="M10 20a6 6 0 0 0-2-4.5"/>',
+  edges: '<path d="M4 18L7 5l11 2 2 11z"/><circle cx="4" cy="18" r="1.6" fill="currentColor"/><circle cx="7" cy="5" r="1.6" fill="currentColor"/><circle cx="18" cy="7" r="1.6" fill="currentColor"/><circle cx="20" cy="18" r="1.6" fill="currentColor"/>',
   sparkle: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 3v4M17 5h4"/>',
   plus: '<path d="M12 5v14M5 12h14"/>', minus: '<path d="M5 12h14"/>', trash: '<path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13"/><path d="M9 7V4h6v3"/>',
   fit: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>', full: '<path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/>',

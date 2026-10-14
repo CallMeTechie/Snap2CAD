@@ -49,4 +49,4 @@ LOGIN_MAX_FAILS = 5
 LOGIN_LOCK_MINUTES = 15
 
 RUNNER = Path(__file__).resolve().parent / "runner" / "cad_runner.py"
-ROOT = Path(__file__).resolve().parents[2]  # Repo-/Image-Wurzel (enthaelt core/, PROMPT.md)
+ROOT = Path(__file__).resolve().parents[2]  # Repo-/Image-Wurzel (enthaelt core/)
