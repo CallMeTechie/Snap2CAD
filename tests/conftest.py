@@ -96,14 +96,35 @@ def _render_page(fmt: str, page: int, px_per_mm: float = 6.0):
     return cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
 
 
-def synthetic_photo(fmt: str = "A4", page: int = 0, tilt: float = 0.06, blur: bool = True) -> bytes:
-    """Gerendertes Blatt perspektivisch verzerrt auf grauem Grund – wie ein leicht schraeges Handyfoto."""
+def synthetic_photo(fmt: str = "A4", page: int = 0, tilt: float = 0.06, blur: bool = True,
+                    objects: list[dict] | None = None) -> bytes:
+    """Gerendertes Blatt perspektivisch verzerrt auf grauem Grund – wie ein leicht schraeges Handyfoto.
+
+    objects: Objekte in mm der Rasterflaeche (Ursprung unten links), z. B. {"rect": [x, y, w, h], "gray": 150}
+    oder {"circle": [cx, cy, d], "gray": 235}. None = ein dunkles Rechteck mittig (bisheriges Verhalten)."""
     import cv2
     import numpy as np
-    sheet = _render_page(fmt, page)
+
+    from core import matgen
+    px = 6.0
+    sheet = _render_page(fmt, page, px)
     h, w = sheet.shape[:2]
-    if page == 0:  # ein dunkles "Bauteil" mittig auflegen
+    if page == 0 and objects is None:  # ein dunkles "Bauteil" mittig auflegen
         cv2.rectangle(sheet, (int(w * 0.35), int(h * 0.42)), (int(w * 0.65), int(h * 0.56)), (40, 42, 45), -1)
+    elif page == 0:
+        ox, oy = matgen.layout(fmt)["grid_origin_on_page_mm"]
+        page_h = h / px
+
+        def P(x, y):
+            return int(round((x + ox) * px)), int(round((page_h - (y + oy)) * px))
+        for o in objects:
+            g = (o["gray"],) * 3
+            if "rect" in o:
+                x, y, rw, rh = o["rect"]
+                cv2.rectangle(sheet, P(x, y + rh), P(x + rw, y), g, -1)
+            if "circle" in o:
+                cx, cy, d = o["circle"]
+                cv2.circle(sheet, P(cx, cy), int(round(d / 2 * px)), g, -1, cv2.LINE_AA)
     W, H_ = int(w * 1.3), int(h * 1.2)
     dx, dy = w * tilt, h * tilt * 0.5
     src = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
