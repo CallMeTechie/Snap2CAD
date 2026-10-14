@@ -126,14 +126,15 @@ export default async function (main) {
   photoSel.addEventListener("change", () => loadSource(sources.find(x => x.key === photoSel.value)));
 
   async function loadSource(x, keepView = false) {
-    src = x; pts = []; pixels = null;
+    src = x; pts = []; pixels = null; img = null;  // kein Messen auf dem alten Bild, solange das neue laedt
     layer.reset();
-    if (!x) { img = null; dirty = true; return; }
+    renderList();
+    if (!x) { dirty = true; return; }
     photoSel.value = x.key;
     const im = new Image();
     im.decoding = "async";
     im.src = x.url;
-    try { await im.decode(); } catch { toast("Bild konnte nicht geladen werden", "err"); return; }
+    try { await im.decode(); } catch { if (src === x) dirty = true; toast("Bild konnte nicht geladen werden", "err"); return; }
     if (src !== x) return;
     img = im;
     if (!keepView) fit();

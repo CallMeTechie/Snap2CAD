@@ -612,6 +612,17 @@ def candidate_text(res):
     return "\n".join(lines)
 
 
+def plausible(poly, outlines, min_area=25.0):
+    """KI-Teil nur uebernehmen, wenn es Flaeche hat und mindestens zur Haelfte im erkannten Objekt liegt."""
+    P = _valid(poly)
+    if P.is_empty or P.area < min_area or not outlines:
+        return False
+    U = _valid(outlines[0]["polygon"])
+    for o in outlines[1:]:
+        U = U.union(_valid(o["polygon"]))
+    return P.intersection(U).area >= 0.5 * P.area
+
+
 def ai_parts(photo_dir, res):
     """Teile per KI zuordnen und auf die Kandidaten einrasten. Leere Liste = KI hat nichts Brauchbares geliefert."""
     img = candidate_image(photo_dir, res)
@@ -621,6 +632,8 @@ def ai_parts(photo_dir, res):
     out = []
     for it in ai.parse_parts(text):
         poly, hidden = snap_polygon(it["polygon"], res["segments"], it["edges"])
+        if not plausible(poly, res["outlines"]):
+            continue
         out.append({"label": it["label"], "role": it["role"], "polygon": poly, "hidden": hidden, "note": it["note"],
                     "source": "ki"})
     assign_holes(out, res["holes"])

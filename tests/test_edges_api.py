@@ -173,3 +173,15 @@ def test_cad_auftrag_fuer_ein_teil(two, monkeypatch, user):
     assert r.status_code == 200, r.text
     t = json.loads(db.q1("SELECT messages FROM jobs WHERE id=?", (r.json()["id"],))["messages"])[0]["content"][0]["text"]
     assert "Modelliert wird nur Teil T2" in t and "| T1 |" not in t
+
+
+def test_ki_entartetes_polygon_laesst_teile(two, monkeypatch):
+    """Final-Review #1: Ein KI-Polygon ohne Flaeche bzw. fern vom Objekt darf vorhandene Teile nicht ersetzen."""
+    c, pid, phid = two
+    _ki(monkeypatch, KI_ZWEI)
+    first = c.post(f"/api/photos/{phid}/edges", json={}, headers=H).json()["parts"]
+    for junk in ([[1, 1], [2, 2], [3, 3]], [[60, 80], [60, 80], [60, 80]], [[5, 200], [20, 200], [20, 215], [5, 215]]):
+        _ki(monkeypatch, json.dumps([{"label": "x", "polygon": junk}]))
+        res = c.post(f"/api/photos/{phid}/edges", json={}, headers=H).json()
+        assert [p["id"] for p in res["parts"]] == [p["id"] for p in first], junk
+        assert "keine Teile" in res["notice"]

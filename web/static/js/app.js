@@ -129,8 +129,12 @@ export async function ensureProject(force = false) {
   rememberProject();
   return S.project;
 }
+let reloadSeq = 0;
 export async function reloadProject() {
-  S.project = await api(`/api/projects/${S.project.id}`);
+  // nur die juengste Antwort uebernehmen: mehrere Aenderungen kurz hintereinander laden parallel neu
+  const n = ++reloadSeq, id = S.project.id;
+  const p = await api(`/api/projects/${id}`);
+  if (n === reloadSeq && S.project?.id === id) S.project = p;
   return S.project;
 }
 export function rememberProject() {

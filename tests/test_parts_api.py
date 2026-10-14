@@ -207,3 +207,19 @@ def test_parallel_keine_doppelten_auto_masse(proj):
     parts.refresh(project, 1.0, 1.0)
     keys = [m["data"].get("auto_key") for m in _p(c, pid)["measurements"] if m["source"] == "auto"]
     assert len(keys) == len(set(keys)) == 5
+
+
+def test_patch_auf_parallel_geloeschte_messung(proj, monkeypatch):
+    """Final-Review #2: meas_patch liest die Zeile in der Transaktion neu; ist sie weg, 404 statt 500."""
+    from app import db, main
+    c, pid, phid = proj
+    m = c.post(f"/api/projects/{pid}/measurements", json={"kind": "height", "value": 5.0}, headers=H).json()
+    orig = main._own_meas
+
+    def own_then_gone(mid, u):
+        res = orig(mid, u)
+        db.ex("DELETE FROM measurements WHERE id=?", (mid,))  # paralleler Loeschvorgang zwischen Pruefung und Schreiben
+        return res
+    monkeypatch.setattr(main, "_own_meas", own_then_gone)
+    r = c.patch(f"/api/measurements/{m['id']}", json={"label": "neu"}, headers=H)
+    assert r.status_code == 404

@@ -264,7 +264,7 @@ export async function job(main, id) {
         V.files["model.py"] ? h("a", { class: "btn sm", href: `/api/jobs/${id}/v/${V.version}/model.py?download=1` }, icon("download", 14), "model.py") : null));
     else if (tab === "claude" && V) clear(panel, h("pre", { class: "codebox", style: { whiteSpace: "pre-wrap" } }, V.claude_text),
       V.usage?.input_tokens ? h("span", { class: "xs muted" }, `${num(V.usage.input_tokens, 0)} Token Eingabe · ${num(V.usage.output_tokens, 0)} Token Ausgabe · ${V.usage.model || ""}`) : null);
-    else if (tab === "foto" && ok) drawOverlay(panel, V);
+    else if (tab === "foto" && ok) drawOverlay(panel, V).catch(e => clear(panel, h("div", { class: "note err" }, icon("warn"), h("span", {}, `Foto-Abgleich nicht verfügbar: ${e.message}`))));
 
     // rechte Spalte
     if (V && ok) {

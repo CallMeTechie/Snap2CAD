@@ -130,7 +130,7 @@ export function createPartsLayer(env) {
     try {
       const p = await api(`/api/projects/${S.project.id}/parts`, { method: "POST", body: { photo_id: env.photoId(), label: "", role: "body", polygon } });
       await reloadProject(); sel = p.id; env.changed();
-    } catch (e) { fail(e); env.redraw(); }
+    } catch (e) { drawing = polygon; fail(e); env.redraw(); }  // Gezeichnetes nicht verlieren
   }
 
   // Zeiger: down() liefert true, wenn die Ebene das Ziehen uebernimmt (Eckpunkt oder Griff „+“)

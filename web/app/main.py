@@ -797,18 +797,19 @@ def project_patch(pid: int, body: ProjectPatch, u: dict = Depends(auth.require_u
         if v is not None and not (0.9 * ref <= v <= 1.1 * ref):
             raise HTTPException(400, f"Kontrollwert {v:g} mm ist unplausibel (erwartet um {ref:g} mm).")
     _finite(body.ctrl_x, "Kontrollwert"); _finite(body.ctrl_y, "Kontrollwert")  # noqa: E702
-    if body.name is not None and body.name.strip():
-        db.ex("UPDATE projects SET name=? WHERE id=?", (body.name.strip(), pid))
-    if body.archived is not None:
-        db.ex("UPDATE projects SET archived=? WHERE id=?", (int(body.archived), pid))
-    if body.clear_ctrl:
-        db.ex("UPDATE projects SET ctrl_x=NULL, ctrl_y=NULL WHERE id=?", (pid,))
-    for k in ("ctrl_x", "ctrl_y"):
-        v = getattr(body, k)
-        if v is not None:
-            db.ex(f"UPDATE projects SET {k}=? WHERE id=?", (v, pid))
-    p = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
-    parts.refresh(p, *_factors(p))
+    with db.atomic():
+        if body.name is not None and body.name.strip():
+            db.ex("UPDATE projects SET name=? WHERE id=?", (body.name.strip(), pid))
+        if body.archived is not None:
+            db.ex("UPDATE projects SET archived=? WHERE id=?", (int(body.archived), pid))
+        if body.clear_ctrl:
+            db.ex("UPDATE projects SET ctrl_x=NULL, ctrl_y=NULL WHERE id=?", (pid,))
+        for k in ("ctrl_x", "ctrl_y"):
+            v = getattr(body, k)
+            if v is not None:
+                db.ex(f"UPDATE projects SET {k}=? WHERE id=?", (v, pid))
+        p = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
+        _refresh(p)
     return _project_public(p, True)
 
 
@@ -1091,7 +1092,16 @@ def meas_create(pid: int, body: MeasIn, u: dict = Depends(auth.require_user)):
 
 @app.patch("/api/measurements/{mid}")
 def meas_patch(mid: int, body: MeasPatch, u: dict = Depends(auth.require_user)):
-    m, p = _own_meas(mid, u)
+    _, p = _own_meas(mid, u)
+    with db.atomic():  # frisch lesen: kein verlorenes Update bei parallelem PATCH, 404 wenn inzwischen geloescht
+        m = db.q1("SELECT * FROM measurements WHERE id=?", (mid,))
+        if not m:
+            raise HTTPException(404, "Maß nicht gefunden")
+        return _meas_patch(m, p, body)
+
+
+def _meas_patch(m: dict, p: dict, body: MeasPatch):
+    mid = m["id"]
     body.points = _points(body.points)
     for v in (body.value, body.unc, body.caliper):
         _finite(v)
@@ -1320,20 +1330,25 @@ def meas_suggest(pid: int, body: SuggestIn, request: Request, u: dict = Depends(
         raise HTTPException(502, str(e)) from None
     fx, fy = _factors(p)
     f = (fx + fy) / 2
-    db.ex("DELETE FROM measurements WHERE project_id=? AND source='claude' AND accepted=0", (pid,))
     out = []
-    for it in items:
-        seq = _next_seq(pid)
-        kind = it["kind"] if it["kind"] in geom.KINDS else "length"
-        value = it["value"] if kind == "angle" else round(it["value"] * f, 3)
-        data = {"view": it["view"], "points": it["points"] or [], "reason": it["reason"], "unsure": it["unsure"],
-                "ai_value": True}
-        mid = db.ex("""INSERT INTO measurements(project_id,photo_id,seq,label,kind,value,unit,unc,data,source,accepted,
-                       reason,created_at) VALUES (?,?,?,?,?,?,?,?,?,'claude',0,?,?)""",
-                    (pid, used_photo["id"], seq, it["label"], kind, value, it["unit"], it["unc"], db.jdump(data),
-                     it["reason"], db.now()))
+    with db.atomic():  # M-Nummern gemeinsam mit parallelen Auto-Massen vergeben
+        db.ex("DELETE FROM measurements WHERE project_id=? AND source='claude' AND accepted=0", (pid,))
+        mids = [_suggest_insert(pid, used_photo["id"], it, f) for it in items]
+    for mid in mids:
         out.append(_meas_public(db.q1("SELECT * FROM measurements WHERE id=?", (mid,))))
     return {"suggestions": out, "usage": usage}
+
+
+def _suggest_insert(pid: int, photo_id: int, it: dict, f: float) -> int:
+    seq = _next_seq(pid)
+    kind = it["kind"] if it["kind"] in geom.KINDS else "length"
+    value = it["value"] if kind == "angle" else round(it["value"] * f, 3)
+    data = {"view": it["view"], "points": it["points"] or [], "reason": it["reason"], "unsure": it["unsure"],
+            "ai_value": True}
+    return db.ex("""INSERT INTO measurements(project_id,photo_id,seq,label,kind,value,unit,unc,data,source,accepted,
+                   reason,created_at) VALUES (?,?,?,?,?,?,?,?,?,'claude',0,?,?)""",
+                 (pid, photo_id, seq, it["label"], kind, value, it["unit"], it["unc"], db.jdump(data),
+                  it["reason"], db.now()))
 
 
 def _csv(pid: int) -> str:
