@@ -1,4 +1,4 @@
-"""CAD-Auftraege: Claude -> Code -> Sandbox -> Pruefung -> ggf. Selbstkorrektur."""
+"""CAD-Auftraege: KI -> Code -> Sandbox -> Pruefung -> ggf. Selbstkorrektur."""
 from __future__ import annotations
 
 import shutil
@@ -21,6 +21,7 @@ PROCESSES = {
     "cnc": "CNC-Fräsen 3-Achs",
     "other": "nicht festgelegt",
 }
+SOURCE_LABEL = {"claude": "KI", "auto": "automatisch"}
 
 
 def job_dir(job_id: int) -> Path:
@@ -49,7 +50,7 @@ def _fmt(v, nd=2):
 
 def measurement_table(project_id: int) -> tuple[str, list[dict]]:
     rows = db.q("SELECT * FROM measurements WHERE project_id=? AND accepted=1 ORDER BY seq", (project_id,))
-    lines = ["| ID | Bezeichnung | Art | Wert | ± | Schieblehre | kritisch | Passung | Quelle | Ansicht/Punkte (mm) |",
+    lines = ["| ID | Bezeichnung | Art | Wert | ± | Messschieber | kritisch | Passung | Quelle | Ansicht/Punkte (mm) |",
              "|---|---|---|---|---|---|---|---|---|---|"]
     for m in rows:
         d = db.jload(m["data"], {}) or {}
@@ -59,7 +60,7 @@ def measurement_table(project_id: int) -> tuple[str, list[dict]]:
             where += " " + " ".join(f"({p[0]:.1f}, {p[1]:.1f})" for p in pts[:3])
         lines.append(f"| M{m['seq']} | {m['label']} | {m['kind']} | {_fmt(m['value'])} {m['unit']} | "
                      f"{_fmt(m['unc'])} | {_fmt(m['caliper'])} | {'ja' if m['critical'] else ''} | "
-                     f"{m['fit'] or ''} | {m['source']} | {where.strip()} |")
+                     f"{m['fit'] or ''} | {SOURCE_LABEL.get(m['source'], m['source'])} | {where.strip()} |")
     return "\n".join(lines), rows
 
 
@@ -187,7 +188,7 @@ def _check_quota(user: dict):
 
 def _check_ready():
     if not settings.ai_enabled():
-        raise HTTPException(503, "KI ist nicht eingerichtet: Anthropic-API-Schlüssel fehlt (Verwaltung → Einstellungen).")
+        raise HTTPException(503, "KI ist nicht eingerichtet (Verwaltung → Einstellungen).")
     if not sandbox.worker_alive():
         raise HTTPException(503, "Die CAD-Sandbox läuft nicht (Dienst „sandbox“ prüfen).")
 
@@ -303,7 +304,7 @@ def _run(job_id: int, trigger: str, request_text: str, ev: threading.Event):
             raise ai.Cancelled()
         if not db.q1("SELECT id FROM jobs WHERE id=?", (job_id,)):
             return  # Auftrag wurde geloescht
-        log(job_id, "Claude erstellt das Modell …" if trigger != "autofix" else "Claude korrigiert den Code …")
+        log(job_id, "KI erstellt das Modell …" if trigger != "autofix" else "KI korrigiert den Code …")
         text, usage = ai.call(ai.CAD_SYSTEM, msgs, cancel=ev,
                               on_progress=lambda n: None)
         msgs.append({"role": "assistant", "content": [{"type": "text", "text": text}]})

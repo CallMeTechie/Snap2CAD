@@ -36,6 +36,11 @@ try:
 except urllib.error.HTTPError as e:
     assert e.code == 409, e.code
 assert call("GET", "/api/mat.pdf?format=A4")[:4] == b"%PDF"
+try:
+    call("GET", "/api/prompt.md")
+    raise AssertionError("/api/prompt.md darf es nicht mehr geben")
+except urllib.error.HTTPError as e:
+    assert e.code == 404, e.code
 html = opener.open(BASE + "/", timeout=30).read()
 assert b"Snap2CAD" in html
 pid = call("POST", "/api/projects", {"name": "CI"})["id"]

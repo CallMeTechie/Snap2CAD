@@ -715,12 +715,6 @@ def mat_layout(format: str = "A4", u: dict = Depends(auth.require_user)):
     return vision.spec(format)
 
 
-@app.get("/api/prompt.md")
-def prompt_md(u: dict = Depends(auth.require_user)):
-    p = config.ROOT / "PROMPT.md"
-    if not p.is_file():
-        raise HTTPException(404, "PROMPT.md fehlt")
-    return FileResponse(p, media_type="text/markdown; charset=utf-8", filename="PROMPT.md")
 
 
 # ------------------------------------------------------------------ Projekte
@@ -1102,7 +1096,7 @@ class SuggestIn(BaseModel):
 def meas_suggest(pid: int, body: SuggestIn, request: Request, u: dict = Depends(auth.require_user)):
     p = _own_project(pid, u)
     if not settings.ai_enabled():
-        raise HTTPException(503, "KI ist nicht eingerichtet: Anthropic-API-Schlüssel fehlt (Verwaltung → Einstellungen).")
+        raise HTTPException(503, "KI ist nicht eingerichtet (Verwaltung → Einstellungen).")
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     n = db.q1("SELECT COUNT(*) n FROM audit WHERE user_id=? AND action='suggest' AND substr(ts,1,10)=?",
               (u["id"], today))["n"]
@@ -1161,14 +1155,15 @@ def _csv(pid: int) -> str:
     def n(v):
         return "" if v is None else f"{v:.3f}".rstrip("0").rstrip(".").replace(".", ",")
 
-    lines = ["ID;Bezeichnung;Art;Wert;Einheit;Unsicherheit;Schieblehre;kritisch;Passung;Quelle;Ansicht;Punkte (mm)"]
+    lines = ["ID;Bezeichnung;Art;Wert;Einheit;Unsicherheit;Messschieber;kritisch;Passung;Quelle;Ansicht;Punkte (mm)"]
     for m in rows:
         d = db.jload(m["data"], {}) or {}
         pts = " ".join(f"{p[0]:.2f}/{p[1]:.2f}" for p in d.get("points") or [])
         safe_txt = lambda t: ("'" + t) if t[:1] in ("=", "+", "-", "@", "\t", "\r") else t  # noqa: E731
         cells = [f"M{m['seq']}", safe_txt(m["label"]), KIND_LABEL.get(m["kind"], m["kind"]), n(m["value"]), m["unit"],
                  n(m["unc"]),
-                 n(m["caliper"]), "ja" if m["critical"] else "", safe_txt(m["fit"] or ""), m["source"], d.get("view", ""), pts]
+                 n(m["caliper"]), "ja" if m["critical"] else "", safe_txt(m["fit"] or ""),
+                 jobs.SOURCE_LABEL.get(m["source"], m["source"]), d.get("view", ""), pts]
         lines.append(";".join('"' + str(c).replace('"', '""') + '"' if any(x in str(c) for x in ';"\n') else str(c)
                               for c in cells))
     return "﻿" + "\r\n".join(lines) + "\r\n"
@@ -1296,7 +1291,7 @@ def _bundle(j: dict, ver: int) -> Response:
         if j["project_id"]:
             z.writestr(f"{base}_Masse.csv", _csv(j["project_id"]))
         info = {"auftrag": j["name"], "version": ver, "erstellt": v["created_at"], "anfrage": db.jload(j["request"], {}),
-                "claude": meta, "pruefung": checks, "ergebnis": result}
+                "ki": meta, "pruefung": checks, "ergebnis": result}
         z.writestr(f"{base}_info.json", json.dumps(info, ensure_ascii=False, indent=2))
         lines = [f"{j['name']} – Version {ver}", "=" * 40, "", meta.get("summary", ""), ""]
         if result.get("bbox"):

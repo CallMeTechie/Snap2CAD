@@ -215,7 +215,7 @@ def call(system: str, messages: list[dict], max_tokens: int = 16000, cancel: thr
     if config.AI_FAKE:
         return _fake(system, messages, cancel)
     if not settings.api_key():
-        raise AIError("Kein Anthropic-API-Schlüssel hinterlegt – KI-Funktionen sind deaktiviert.")
+        raise AIError("KI ist nicht eingerichtet – KI-Funktionen sind deaktiviert.")
     import anthropic
     try:
         text, last = [], time.time()
@@ -244,11 +244,11 @@ def call(system: str, messages: list[dict], max_tokens: int = 16000, cancel: thr
     except anthropic.AuthenticationError as e:
         raise AIError("API-Schlüssel ungültig (Verwaltung → Einstellungen prüfen).") from e
     except anthropic.RateLimitError as e:
-        raise AIError("Anthropic-Ratenlimit erreicht – bitte später erneut versuchen.") from e
+        raise AIError("KI-Dienst: Ratenlimit erreicht – bitte später erneut versuchen.") from e
     except anthropic.APIStatusError as e:
-        raise AIError(f"Anthropic-API-Fehler {e.status_code}: {getattr(e, 'message', e)}") from e
+        raise AIError(f"KI-Dienst: Fehler {e.status_code}: {getattr(e, 'message', e)}") from e
     except anthropic.APIConnectionError as e:
-        raise AIError("Keine Verbindung zur Anthropic-API.") from e
+        raise AIError("Keine Verbindung zum KI-Dienst.") from e
 
 
 # ------------------------------------------------------------------ Antworten zerlegen

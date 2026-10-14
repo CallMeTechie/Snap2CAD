@@ -70,7 +70,7 @@ export default async function (main) {
   const listBox = h("ul", { class: "mlist" });
   const countEl = h("span", { class: "muted", style: { fontWeight: 400 } });
   const suggBox = h("section", { class: "sugg", "aria-labelledby": "ki-h", hidden: true });
-  const suggBtn = h("button", { class: "btn claude sm", onclick: suggest, disabled: !S.status?.ai, title: S.status?.ai ? "" : "KI nicht eingerichtet" }, icon("sparkle", 16), "Claude vorschlagen");
+  const suggBtn = h("button", { class: "btn claude sm", onclick: suggest, disabled: !S.status?.ai, title: S.status?.ai ? "" : "KI nicht eingerichtet" }, icon("sparkle", 16), "KI-Vorschläge");
 
   const picker = projectPicker(() => { selId = null; init(); });
   const refreshPicker = (() => { let t; return () => { clearTimeout(t); t = setTimeout(() => picker.refresh(), 800); }; })();
@@ -496,7 +496,7 @@ export default async function (main) {
         h("label", { class: "check small" }, h("input", { type: "checkbox", checked: !!m.critical, onchange: e => patch(m, { critical: e.target.checked }) }), "Kritisches Maß (für Passungen)"),
         h("button", { class: "btn sm danger", onclick: () => del(m) }, icon("trash", 14), "Löschen")),
       m.caliper != null ? h("span", { class: "xs", style: { color: "var(--ok)" } }, "Messschieber-Wert wird für CAD verwendet") : null,
-      m.source === "claude" && m.reason ? h("span", { class: "xs muted" }, `Claude: ${m.reason}`) : null);
+      m.source === "claude" && m.reason ? h("span", { class: "xs muted" }, `KI: ${m.reason}`) : null);
     return { panel, focus: () => { lbl.focus(); lbl.select(); } };
   }
   function renderList(focusNew = false) {
@@ -512,7 +512,7 @@ export default async function (main) {
       return h("li", { class: "mitem", "aria-current": String(sel), tabindex: 0, onclick: () => select(sel ? null : m.id), onkeydown: e => { if (e.key === "Enter" && e.target === e.currentTarget) select(sel ? null : m.id); } },
         h("span", { class: "mid" }, `M${m.seq}`),
         h("span", { style: { fontWeight: 500, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, m.label,
-          m.critical ? h("span", { class: "crit" }, "kritisch") : null, m.source === "claude" ? h("span", { class: "src-claude" }, "Claude") : null),
+          m.critical ? h("span", { class: "crit" }, "kritisch") : null, m.source === "claude" ? h("span", { class: "src-claude" }, "KI") : null),
         h("span", { class: "mval" }, m.caliper != null ? h("span", { title: `Foto: ${fmtValue(m)}` }, `${m.kind === "diameter" ? "Ø " : ""}${num(m.caliper, 2)} mm`) : fmtValue(m)),
         h("span", { class: "msub" }, sourceText(m)),
         h("span", { class: "munc" }, m.caliper != null ? "MS" : m.kind === "point" ? "" : `±${num(m.unc, 1)}`),
@@ -523,7 +523,7 @@ export default async function (main) {
     suggBox.hidden = !sugg.length;
     if (sugg.length) {
       clear(suggBox,
-        h("div", { class: "card-head" }, h("h3", { id: "ki-h", style: { color: "var(--claude)" } }, "Vorschläge von Claude ", h("span", { style: { fontWeight: 400 } }, `(${sugg.length})`)),
+        h("div", { class: "card-head" }, h("h3", { id: "ki-h", style: { color: "var(--claude)" } }, "KI-Vorschläge ", h("span", { style: { fontWeight: 400 } }, `(${sugg.length})`)),
           h("span", { class: "xs muted" }, "aus Fotos geschätzt · noch nicht übernommen")),
         sugg.map(m => h("div", { class: "sitem", "aria-current": String(m.id === selId), onclick: () => select(m.id) },
           h("span", { class: "mid k" }, `K${m.seq}`),
@@ -536,7 +536,7 @@ export default async function (main) {
         h("div", { class: "chips" },
           h("button", { class: "btn sm", onclick: async () => { try { await api(`/api/projects/${S.project.id}/measurements/accept-all`, { method: "POST" }); await reloadProject(); renderList(); dirty = true; } catch (e) { fail(e); } } }, "Alle übernehmen"),
           h("button", { class: "btn sm ghost", onclick: async () => { try { await api(`/api/projects/${S.project.id}/measurements/discard-suggestions`, { method: "POST" }); await reloadProject(); renderList(); dirty = true; } catch (e) { fail(e); } } }, "Alle verwerfen")),
-        h("span", { class: "xs muted" }, "Claude bekommt die entzerrten Fotos und deine Messungen. Übernommene Vorschläge erscheinen als normale Messung mit Herkunft „Claude“."));
+        h("span", { class: "xs muted" }, "Die KI bekommt die entzerrten Fotos und deine Messungen. Übernommene Vorschläge erscheinen als normale Messung mit Herkunft „KI“."));
     }
   }
 
@@ -564,14 +564,14 @@ export default async function (main) {
   async function suggest() {
     if (!src) { toast("Erst ein auswertbares Foto hochladen", "err"); return; }
     const old = [...suggBtn.childNodes];
-    clear(suggBtn, h("span", { class: "spin" }), "Claude analysiert …");
+    clear(suggBtn, h("span", { class: "spin" }), "KI analysiert …");
     suggBtn.disabled = true;
     try {
       await api(`/api/projects/${S.project.id}/suggest`, { method: "POST", body: { photo_id: src.photo.id } });
       await reloadProject();
       renderList(); dirty = true;
       const n = S.project.measurements.filter(m => !m.accepted).length;
-      toast(n ? `${n} Vorschläge von Claude` : "Claude hat keine weiteren Maße gefunden", n ? "ok" : "");
+      toast(n ? `${n} KI-Vorschläge` : "Die KI hat keine weiteren Maße gefunden", n ? "ok" : "");
     } catch (e) { fail(e); } finally { clear(suggBtn, ...old); suggBtn.disabled = !S.status?.ai; }
   }
 
