@@ -7,9 +7,10 @@ from __future__ import annotations
 import math
 import statistics
 
+import cv2
 from shapely.geometry import LinearRing, Point, Polygon
 
-from . import db, geom
+from . import ai, db, geom
 
 RECT_TOL_DEG = 4.0
 EDGE_DIFF_MM = 1.0
@@ -580,3 +581,47 @@ def replace_detected(project_id, photo_id, detected):
         else:
             create_part(project_id, photo_id, x["label"], x["role"], x["polygon"], hidden_flags=x.get("hidden"),
                         holes=x.get("holes") or [], source=x.get("source", "auto"), note=x.get("note", ""))
+
+
+def outline_parts(res):
+    """Ohne KI: jeder Umriss wird ein Teil, Bohrungen zum kleinsten umgebenden Teil."""
+    out = [{"label": "Teil", "role": "body", "polygon": o["polygon"], "hidden": [False] * len(o["polygon"]), "source": "auto"}
+           for o in res["outlines"]]
+    assign_holes(out, res["holes"])
+    return out
+
+
+def candidate_image(photo_dir, res):
+    """Kandidatenbild fuer die KI als edges_ki.jpg im Fotoordner (Zeichnen in core.edges)."""
+    from core import edges as core_edges  # spaet: main.py setzt sys.path erst nach den App-Importen
+    img = core_edges.draw_candidates(cv2.imread(str(photo_dir / "rect.jpg")), res)
+    out = photo_dir / "edges_ki.jpg"
+    cv2.imwrite(str(out), img, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    return out
+
+
+def candidate_text(res):
+    lines = ["Kanten-Kandidaten (mm, Draufsicht):"]
+    for s in res["segments"]:
+        lines.append(f"{s['id']}: ({s['a'][0]:.1f}, {s['a'][1]:.1f}) → ({s['b'][0]:.1f}, {s['b'][1]:.1f}), "
+                     f"{_seg_len(s['a'], s['b']):.1f} mm, {'Umriss' if s['kind'] == 'outline' else 'Innenkante'}")
+    for i, o in enumerate(res["outlines"], 1):
+        lines.append(f"Umriss {i}: " + " ".join(f"({x:.1f}, {y:.1f})" for x, y in o["polygon"]))
+    for h in res["holes"]:
+        lines.append(f"Bohrung: Mitte ({h['c'][0]:.1f}, {h['c'][1]:.1f}), Ø {h['d']:.1f} mm")
+    return "\n".join(lines)
+
+
+def ai_parts(photo_dir, res):
+    """Teile per KI zuordnen und auf die Kandidaten einrasten. Leere Liste = KI hat nichts Brauchbares geliefert."""
+    img = candidate_image(photo_dir, res)
+    content = ai.image_ref(img, ai.scaled_caption(img, "Draufsicht mit nummerierten Kanten-Kandidaten", res["px_per_mm"]))
+    content.append({"type": "text", "text": candidate_text(res)})
+    text, _ = ai.call(ai.PARTS_SYSTEM, [{"role": "user", "content": content}], max_tokens=4000)
+    out = []
+    for it in ai.parse_parts(text):
+        poly, hidden = snap_polygon(it["polygon"], res["segments"], it["edges"])
+        out.append({"label": it["label"], "role": it["role"], "polygon": poly, "hidden": hidden, "note": it["note"],
+                    "source": "ki"})
+    assign_holes(out, res["holes"])
+    return out

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import re
 import threading
 import time
@@ -74,6 +75,24 @@ Antworte ausschließlich mit einem JSON-Array, ohne Text davor oder danach:
 kind ist eines von: length, diameter, radius, height, angle (angle in Grad, unit "°").
 points (optional, in mm der jeweiligen Ansicht): bei length/height die zwei Endpunkte, bei diameter/radius
 [Mittelpunkt, Punkt auf dem Rand]. Höchstens 12 Vorschläge."""
+
+PARTS_SYSTEM = """Du hilfst beim Vermessen von Bauteilen auf einer entzerrten Messunterlage (Draufsicht, Maßstab steht dabei).
+Ursprung ist die linke untere Ecke des Bildes, x nach rechts, y nach oben, alles in mm.
+
+Im Bild sind Kanten-Kandidaten eingezeichnet und nummeriert (K1, K2 …); die Liste mit Koordinaten steht im Text.
+Sie stammen aus einer automatischen Kantenerkennung: Umrisskanten und gerade Kanten innerhalb des Objekts.
+
+Aufgabe: Erkenne, aus welchen einzelnen Teilen das Objekt besteht. Beispiel: Ein Quader mit einer aufgeschraubten Platte,
+die seitlich übersteht, sind zwei Teile – der Quader (role "body") und die Platte (role "mounted"). Ein einzelnes Teil
+bleibt ein Teil. Gib für jedes Teil seinen vollständigen Umriss in der Draufsicht als Polygon an, auch dort, wo es von
+einem anderen Teil verdeckt ist (verdeckte Kanten sinnvoll ergänzen, z. B. ein Rechteck vervollständigen). Nutze die
+Koordinaten der Kandidaten, wo sie passen. Bohrungen gehören nicht in das Polygon.
+
+Antworte ausschließlich mit einem JSON-Array, ohne Text davor oder danach:
+[{"label": "Quader", "role": "body", "polygon": [[x1, y1], [x2, y2], [x3, y3]], "edges": ["K1", "K4"],
+  "note": "kurz, woran erkannt"}]
+role ist "body" (Grundkörper) oder "mounted" (montiertes Teil). edges = die Kandidaten, die zu diesem Teil gehören.
+Höchstens 6 Teile, je 3 bis 32 Punkte."""
 
 
 class AIError(Exception):
@@ -276,18 +295,23 @@ def parse_cad(text: str) -> tuple[dict, str]:
     return meta, code
 
 
-def parse_suggestions(text: str) -> list[dict]:
+def _json_array(text: str, what: str) -> list:
+    """JSON-Array aus einer KI-Antwort (auch in einem Codeblock oder mit Text drumherum)."""
     t = text.strip()
     m = _BLOCK.search(t)
     if m:
         t = m.group(2)
     i, j = t.find("["), t.rfind("]")
     if i < 0 or j < i:
-        raise AIError("Die Antwort enthielt keine Vorschlagsliste.")
+        raise AIError(f"Die Antwort enthielt keine {what}.")
     try:
-        items = json.loads(t[i:j + 1])
+        return json.loads(t[i:j + 1])
     except ValueError as e:
-        raise AIError("Die Vorschlagsliste war kein gültiges JSON.") from e
+        raise AIError(f"Die {what} war kein gültiges JSON.") from e
+
+
+def parse_suggestions(text: str) -> list[dict]:
+    items = _json_array(text, "Vorschlagsliste")
     out = []
     kinds = {"length", "diameter", "radius", "height", "angle"}
     for it in items[:12]:
@@ -306,6 +330,32 @@ def parse_suggestions(text: str) -> list[dict]:
                     "unc": round(float(it.get("unc") or 0.5), 2) if str(it.get("unc", "")).strip() else 0.5,
                     "view": it.get("view") if it.get("view") in ("top", "gauge") else "top",
                     "points": pts, "reason": str(it.get("reason") or "")[:300], "unsure": bool(it.get("unsure"))})
+    return out
+
+
+def parse_parts(text: str) -> list[dict]:
+    """Teileliste der KI defensiv lesen (Spec §2): unbrauchbare Eintraege werden verworfen."""
+    items = _json_array(text, "Teileliste")
+    out = []
+    for it in items if isinstance(items, list) else []:
+        if not isinstance(it, dict):
+            continue
+        pts = it.get("polygon")
+        if not isinstance(pts, list) or not 3 <= len(pts) <= 32:
+            continue
+        try:
+            poly = [[float(p[0]), float(p[1])] for p in pts if isinstance(p, list) and len(p) == 2]
+        except (TypeError, ValueError):
+            continue
+        if len(poly) != len(pts) or not all(math.isfinite(v) and abs(v) < 1e4 for p in poly for v in p):
+            continue
+        raw_edges = it.get("edges") if isinstance(it.get("edges"), list) else []
+        out.append({"label": str(it.get("label") or "Teil")[:80],
+                    "role": it.get("role") if it.get("role") in ("body", "mounted") else "body",
+                    "polygon": poly, "edges": [str(e)[:8] for e in raw_edges if isinstance(e, (str, int))][:64],
+                    "note": str(it.get("note") or "")[:300]})
+        if len(out) == 6:
+            break
     return out
 
 
@@ -371,6 +421,12 @@ def _fake(system, messages, cancel):
         time.sleep(0.1)
     usage = {"input_tokens": 4200, "output_tokens": 900, "cache_read": 0, "cache_write": 0,
              "model": "fake", "stop_reason": "end_turn"}
+    if system == PARTS_SYSTEM:
+        last = messages[-1]["content"]
+        txt = " ".join(b.get("text", "") for b in last if isinstance(b, dict))
+        m = re.search(r"Umriss 1: (.*)", txt)
+        pts = [[float(a), float(b)] for a, b in re.findall(r"\((-?[\d.]+), (-?[\d.]+)\)", m.group(1))] if m else []
+        return json.dumps([{"label": "Quader", "role": "body", "polygon": pts, "edges": [], "note": "Testmodus"}]), usage
     if system == SUGGEST_SYSTEM:
         return json.dumps([
             {"label": "Gesamtlänge", "kind": "length", "value": 79.8, "unc": 0.4, "view": "top",

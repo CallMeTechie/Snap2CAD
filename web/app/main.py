@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 from . import ai, auth, config, db, geom, jobs, parts, sandbox, settings
 
 sys.path.insert(0, str(config.ROOT))
-from core import matgen, vision  # noqa: E402
+from core import edges, matgen, vision  # noqa: E402
 
 VERSION = os.environ.get("SNAP2CAD_VERSION", "0.1.0")  # im Image vom Git-Tag gesetzt
 STATIC = Path(__file__).resolve().parent.parent / "static"
@@ -241,6 +241,16 @@ def _meas_public(m: dict) -> dict:
 def _usage(user: dict) -> dict:
     q = auth.quota_of(user)
     return {"quota": q, "used": auth.usage_this_month(user["id"])}
+
+
+AI_DAILY_LIMIT = 30
+_detect_lock = threading.Semaphore(1)  # nur um den OpenCV-Teil, nicht um den KI-Aufruf (Spec §7)
+
+
+def _ai_uses_today(u: dict) -> int:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return db.q1("SELECT COUNT(*) n FROM audit WHERE user_id=? AND action IN ('suggest','edges_ai') AND substr(ts,1,10)=?",
+                 (u["id"], today))["n"]
 
 
 # ------------------------------------------------------------------ Status & Auth
@@ -919,6 +929,71 @@ def photo_file(phid: int, kind: str, u: dict = Depends(auth.require_user)):
     return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=600"})
 
 
+class EdgesIn(BaseModel):
+    use_ai: bool = True
+
+
+@app.post("/api/photos/{phid}/edges")
+def photo_edges(phid: int, body: EdgesIn, request: Request, u: dict = Depends(auth.require_user)):
+    ph, p = _own_photo(phid, u)
+    d = _photo_dir(phid)
+    rect = (db.jload(ph["analysis"], {}) or {}).get("rect")
+    if not rect or not (d / "rect.jpg").is_file() or ph["format"] not in matgen.FORMATS:
+        raise HTTPException(400, "Für dieses Foto gibt es keine entzerrte Draufsicht.")
+    img = cv2.imread(str(d / "rect.jpg"))
+    if img is None:
+        raise HTTPException(400, "Die Draufsicht ist nicht lesbar.")
+    if not _detect_lock.acquire(blocking=False):
+        raise HTTPException(429, "Kantenerkennung ist gerade belegt – bitte gleich erneut versuchen.")
+    try:
+        res = edges.detect(img, ph["format"])
+    finally:
+        _detect_lock.release()
+    if not res["outlines"]:
+        raise HTTPException(422, "Kein Objekt erkannt – Teil von Hand zeichnen.")
+
+    def inside(poly):
+        return all(-10 <= q[0] <= rect["w_mm"] + 10 and -10 <= q[1] <= rect["h_mm"] + 10 for q in poly)
+    notice, detected = "", []
+    if body.use_ai and settings.ai_enabled():
+        if u["role"] != "admin" and _ai_uses_today(u) >= AI_DAILY_LIMIT:
+            notice = f"Tageslimit für KI erreicht ({AI_DAILY_LIMIT}) – Teile nur aus dem Umriss."
+        else:
+            db.audit("edges_ai", f"Foto {phid}", user_id=u["id"], actor=u["username"], ip=auth.client_ip(request))
+            try:
+                detected = [x for x in parts.ai_parts(d, res) if inside(x["polygon"])]
+                if not detected:
+                    notice = "Die KI hat keine Teile erkannt – Teile nur aus dem Umriss."
+            except ai.AIError as e:
+                notice = f"KI-Zuordnung fehlgeschlagen: {e} – Teile nur aus dem Umriss."
+    with db.atomic():
+        cur = db.q1("SELECT format FROM photos WHERE id=?", (phid,))
+        if not cur or cur["format"] != ph["format"]:
+            raise HTTPException(409, "Das Foto wurde während der Erkennung geändert – bitte erneut erkennen.")
+        has_parts = bool(db.q1("SELECT 1 FROM parts WHERE photo_id=? AND source!='user'", (phid,)))
+        if not detected and has_parts:
+            # ohne KI-Ergebnis vorhandene Teile nicht durch den Gesamtumriss ersetzen (sonst zerfaellt z. B. Quader + Platte)
+            notice = notice.replace("Teile nur aus dem Umriss.", "vorhandene Teile bleiben unverändert.") if notice \
+                else "Ohne KI wurden nur die Kanten aktualisiert; vorhandene Teile bleiben unverändert."
+        else:
+            parts.replace_detected(p["id"], phid, detected or parts.outline_parts(res))
+        _refresh(p)
+        tmp = d / "edges.json.tmp"  # innerhalb von atomic: kein zweiter Lauf und kein Loeschen dazwischen
+        tmp.write_text(json.dumps(res), encoding="utf-8")
+        os.replace(tmp, d / "edges.json")
+    return {"parts": [t for t in parts.public_list(p["id"]) if t["photo_id"] == phid], "segments": res["segments"],
+            "notice": notice}
+
+
+@app.get("/api/photos/{phid}/edges.json")
+def photo_edges_get(phid: int, u: dict = Depends(auth.require_user)):
+    _own_photo(phid, u)
+    f = _photo_dir(phid) / "edges.json"
+    if not f.is_file():
+        raise HTTPException(404, "Noch keine Kanten erkannt")
+    return json.loads(f.read_text(encoding="utf-8"))
+
+
 # ------------------------------------------------------------------ Masse
 
 def _points(pts):
@@ -1212,11 +1287,8 @@ def meas_suggest(pid: int, body: SuggestIn, request: Request, u: dict = Depends(
     p = _own_project(pid, u)
     if not settings.ai_enabled():
         raise HTTPException(503, "KI ist nicht eingerichtet (Verwaltung → Einstellungen).")
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    n = db.q1("SELECT COUNT(*) n FROM audit WHERE user_id=? AND action='suggest' AND substr(ts,1,10)=?",
-              (u["id"], today))["n"]
-    if u["role"] != "admin" and n >= 30:
-        raise HTTPException(429, "Tageslimit für Maßvorschläge erreicht (30).")
+    if u["role"] != "admin" and _ai_uses_today(u) >= AI_DAILY_LIMIT:
+        raise HTTPException(429, f"Tageslimit für KI-Funktionen erreicht ({AI_DAILY_LIMIT}).")
     photos = db.q("SELECT * FROM photos WHERE project_id=? ORDER BY id", (pid,))
     if body.photo_id:
         photos = [ph for ph in photos if ph["id"] == body.photo_id] + [ph for ph in photos if ph["id"] != body.photo_id]
