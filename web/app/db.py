@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from . import config
@@ -92,11 +93,20 @@ CREATE TABLE IF NOT EXISTS job_log (
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY, value TEXT, updated_at TEXT NOT NULL, updated_by INTEGER
 );
+CREATE TABLE IF NOT EXISTS parts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL, label TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'body',
+  data TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'auto',
+  scale REAL NOT NULL DEFAULT 1.0, created_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS ix_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS ix_photos_project ON photos(project_id);
 CREATE INDEX IF NOT EXISTS ix_meas_project ON measurements(project_id);
 CREATE INDEX IF NOT EXISTS ix_jobs_user ON jobs(user_id);
 CREATE INDEX IF NOT EXISTS ix_log_job ON job_log(job_id);
+CREATE INDEX IF NOT EXISTS ix_parts_photo ON parts(photo_id);
 """
 
 _lock = threading.RLock()
@@ -117,8 +127,17 @@ def conn() -> sqlite3.Connection:
         c.execute("PRAGMA foreign_keys=ON")
         c.execute("PRAGMA busy_timeout=5000")
         c.executescript(SCHEMA)
+        _migrate(c)
         _conn = c
     return _conn
+
+
+def _migrate(c: sqlite3.Connection):
+    """Spalten nachruesten, die CREATE TABLE IF NOT EXISTS bei bestehenden Datenbanken nicht anlegt."""
+    cols = {r[1] for r in c.execute("PRAGMA table_info(measurements)").fetchall()}
+    if "part_id" not in cols:
+        c.execute("ALTER TABLE measurements ADD COLUMN part_id INTEGER REFERENCES parts(id) ON DELETE SET NULL")
+    c.execute("CREATE INDEX IF NOT EXISTS ix_meas_part ON measurements(part_id)")
 
 
 def q(sql: str, args=()) -> list[dict]:
@@ -151,6 +170,25 @@ def tx(statements: list[tuple[str, tuple]]):
             raise
 
 
+
+@contextmanager
+def atomic():
+    """Mehrere Lese-/Schreibschritte als eine Transaktion. Haelt _lock, damit parallele Anfragen (Threadpool)
+    Aenderung + Neuberechnung nicht verschraenken. Verschachtelt = keine Savepoints: eine im inneren Block
+    gefangene Ausnahme rollt nichts zurueck."""
+    with _lock:
+        c = conn()
+        if c.in_transaction:
+            yield c
+            return
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            yield c
+        except BaseException:
+            if c.in_transaction:
+                c.execute("ROLLBACK")
+            raise
+        c.execute("COMMIT")
 def jload(s, default=None):
     if s is None or s == "":
         return default
