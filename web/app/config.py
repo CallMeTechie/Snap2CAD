@@ -14,11 +14,18 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 RUNS_DIR = Path(os.environ.get("RUNS_DIR", "/runs"))
 DB_PATH = DATA_DIR / "snap2cad.db"
 
+# Leer = Schluessel und Modell werden in der App gesetzt (Einrichtung / Verwaltung) und in der DB gespeichert.
+# Gesetzt = die Umgebungsvariable hat Vorrang und ist in der Oberflaeche nicht aenderbar.
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5-5").strip()
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "").strip()
+DEFAULT_MODEL = "claude-sonnet-5-5"
 AI_FAKE = os.environ.get("AI_FAKE", "") == "1"  # nur fuer Entwicklung/Tests
 
+# Nur fuer automatisierte Installationen: legt beim Start ein Konto "admin" mit diesem Startpasswort an.
+# Leer (Standard) = Einrichtungsassistent im Browser beim ersten Aufruf.
 ADMIN_INITIAL_PASSWORD = os.environ.get("ADMIN_INITIAL_PASSWORD", "")
+# Einrichtung nur aus privaten Netzen (LAN, VPN, Docker) erlauben; 1 = auch aus dem Internet
+SETUP_ALLOW_PUBLIC = os.environ.get("SETUP_ALLOW_PUBLIC", "") == "1"
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "auto").lower()  # auto | true | false
 SESSION_DAYS = _int("SESSION_DAYS", 30)
@@ -40,7 +47,3 @@ LOGIN_LOCK_MINUTES = 15
 
 RUNNER = Path(__file__).resolve().parent / "runner" / "cad_runner.py"
 ROOT = Path(__file__).resolve().parents[2]  # Repo-/Image-Wurzel (enthaelt core/, PROMPT.md)
-
-
-def ai_enabled() -> bool:
-    return bool(ANTHROPIC_API_KEY) or AI_FAKE

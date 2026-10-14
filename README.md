@@ -130,21 +130,27 @@ Alles aus diesem Repo als selbst gehostete Web-Oberfläche: Unterlage als PDF er
 
 ```bash
 git clone https://github.com/CallMeTechie/snap2cad.git && cd snap2cad
-cp .env.example .env          # ANTHROPIC_API_KEY eintragen, Rest nach Bedarf
+cp .env.example .env          # optional anpassen (Port, Kontingente …)
 docker compose up -d          # lädt das fertige Image ghcr.io/callmetechie/snap2cad:latest
-docker compose logs app       # beim ersten Start: Admin-Passwort (falls ADMIN_INITIAL_PASSWORD leer)
 ```
 
 Eigenen Build statt fertigem Image: `docker compose up -d --build`. Eine bestimmte Version: `SNAP2CAD_IMAGE=ghcr.io/callmetechie/snap2cad:0.1.0` in die `.env`. Updates: `docker compose pull && docker compose up -d`.
 
-Danach unter `http://localhost:8000` als `admin` anmelden. Beim ersten Login muss das Passwort geändert werden. Weitere Nutzer kommen nur per Einladungslink dazu (Benutzermenü → Benutzerverwaltung). Ohne `ANTHROPIC_API_KEY` funktionieren Unterlage, Fotos und Messen, nur die KI-Funktionen sind aus.
+**Ersteinrichtung im Browser:** Beim ersten Aufruf von `http://localhost:8000` erscheint der Einrichtungsassistent. Dort legst du Benutzername und Passwort des Administrators fest und trägst den Anthropic-API-Schlüssel ein ([console.anthropic.com → API Keys](https://console.anthropic.com/settings/keys)). Der Schlüssel wird vor dem Speichern bei Anthropic geprüft. Erst wenn alles stimmt, wird das Admin-Konto angelegt. Es gibt kein Standardkonto und kein Passwort im Log.
 
-Der Port ist standardmäßig nur auf `127.0.0.1` gebunden. Für den Zugriff von außen einen Reverse-Proxy mit HTTPS davorsetzen (Caddy, Traefik, nginx) und `PUBLIC_URL` setzen, damit Einladungslinks stimmen.
+- Die Einrichtung ist nur aus privaten Netzen möglich (LAN, VPN, Tailscale, Docker). Wer sie bewusst über das Internet erledigen will, setzt vorübergehend `SETUP_ALLOW_PUBLIC=1`. Die Seite verschwindet, sobald das erste Konto existiert.
+- Schlüssel und Modell lassen sich später unter *Benutzerverwaltung → Einstellungen* ändern. Alternativ als `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` in der `.env`; dann hat die Umgebungsvariable Vorrang und ist in der Oberfläche gesperrt.
+- Für automatisierte Installationen (CI, Ansible) legt `ADMIN_INITIAL_PASSWORD` stattdessen ein Konto `admin` an, dessen Passwort beim ersten Login geändert werden muss.
+- Admin-Passwort vergessen: `docker compose exec app python -m app.manage reset-link <benutzername>` erzeugt einen einmaligen Link zum Setzen eines neuen Passworts (`… manage users` listet die Konten).
+
+Weitere Nutzer kommen nur per Einladungslink dazu (Benutzermenü → Benutzerverwaltung). Ohne API-Schlüssel funktionieren Unterlage, Fotos und Messen, nur die KI-Funktionen sind aus.
+
+Der Port ist standardmäßig nur auf `127.0.0.1` gebunden. Für den Zugriff von außen einen Reverse-Proxy mit HTTPS davorsetzen (Caddy, Traefik, nginx, Synology-Reverse-Proxy) und `PUBLIC_URL` setzen, damit Einladungslinks stimmen. Auch mehrere Proxys hintereinander (z. B. Cloudflare → NAS) werden erkannt.
 
 ### Sicherheit
 
 - **Konten:** Passwörter mit Argon2, mindestens 12 Zeichen, Prüfung gegen häufige Passwörter. Login-Sperre nach 5 Fehlversuchen für 15 Minuten. Sitzungen als HttpOnly-Cookie, CSRF-Schutz, strikte Content-Security-Policy. Einladungs- und Reset-Links sind einmalig und werden nur als Hash gespeichert. Protokoll aller sicherheitsrelevanten Ereignisse für Admins.
-- **Kosten:** Der API-Schlüssel bleibt auf dem Server. Jeder Nutzer hat ein monatliches Kontingent an CAD-Läufen (`DEFAULT_QUOTA`, pro Nutzer änderbar).
+- **Kosten:** Der API-Schlüssel bleibt auf dem Server und wird in der Oberfläche nie wieder vollständig angezeigt. Jeder Nutzer hat ein monatliches Kontingent an CAD-Läufen (`DEFAULT_QUOTA`, pro Nutzer änderbar).
 - **Sandbox:** Von Claude erzeugter Code läuft nie im Web-Container, sondern im Dienst `sandbox`: ohne Netzwerk, ohne Datenbank und ohne API-Schlüssel, schreibgeschütztes Dateisystem, jeder Lauf unter einer eigenen Benutzerkennung, mit Zeit-, Speicher- und Prozesslimits, seccomp-Filter (kein Programmstart, keine Sockets) und Python-Audit-Hook.
 
 ### Daten

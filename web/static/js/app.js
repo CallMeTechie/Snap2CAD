@@ -1,6 +1,6 @@
 // Snap2CAD – Einstieg, Router, Kopfzeile, Anmeldung, Konto, Verwaltung
 import { api, h, clear, icon, LOGO, toast, fail, dialog, confirmDlg, dt, until, initials, num, debounce, strength,
-  STRENGTH_TEXT, parseNum } from "./lib.js";
+  STRENGTH_TEXT, parseNum, copyText } from "./lib.js";
 
 export const S = { me: null, project: null, leave: [] };
 const app = document.getElementById("app");
@@ -42,6 +42,7 @@ async function render() {
   let m, r;
   for (r of routes) { m = path.match(r.re); if (m) break; m = null; }
   if (!m) { r = routes.find(x => x.notFound); m = []; }
+  if (S.status?.setup?.required && path !== "/setup") { go("/setup", true); return; }
   if (!r.public && !S.me) { go("/login" + (path !== "/" ? `?next=${encodeURIComponent(path)}` : ""), true); return; }
   if (S.me && S.me.must_change_pw && !r.public && path !== "/passwort") { go("/passwort", true); return; }
   if (r.admin && S.me?.role !== "admin") { go("/", true); return; }
@@ -219,6 +220,70 @@ function strengthUI(input, getUser, { initial = false } = {}) {
 
 function errBox() { return h("div", { class: "note err", role: "alert", hidden: true }); }
 function showErr(box, msg) { clear(box, icon("warn"), h("span", {}, msg)); box.hidden = !msg; }
+
+// ------------------------------------------------------------------ Ersteinrichtung
+route(/^\/setup$/, async root => {
+  const st = S.status?.setup;
+  if (!st?.required) { go(S.me ? "/" : "/login", true); return; }
+  const page = h("div", { class: "auth-page" }, h("div", { class: "auth-brand" }, h("span", { class: "b" }, LOGO(), "Snap2CAD"),
+    h("span", { class: "muted" }, "Bauteile per Foto vermessen · CAD mit Claude")));
+  clear(root, page);
+  if (!st.allowed) {
+    page.append(h("div", { class: "auth-card" }, h("h1", { style: { fontSize: "22px" } }, "Einrichtung gesperrt"),
+      h("div", { class: "note err" }, icon("lock"), h("span", {}, "Snap2CAD ist noch nicht eingerichtet. Die Einrichtung ist aus Sicherheitsgründen nur aus dem lokalen Netz möglich. Bitte die Seite im Heimnetz oder per VPN öffnen.")),
+      h("p", { class: "hint" }, "Wer die Einrichtung bewusst über das Internet durchführen will, setzt vorübergehend SETUP_ALLOW_PUBLIC=1.")));
+    return;
+  }
+  const err = errBox();
+  const dn = h("input", { id: "sdn", class: "input", autocomplete: "name", maxlength: 80, placeholder: "z. B. Max Mustermann" });
+  const un = h("input", { id: "sun", class: "input", autocomplete: "username", required: true, maxlength: 32, autocapitalize: "none", spellcheck: "false", value: "admin" });
+  const em = h("input", { id: "sem", class: "input", type: "email", autocomplete: "email", maxlength: 200, placeholder: "name@beispiel.de" });
+  const pw = pwInput("spw", "new-password"), pw2 = pwInput("spw2", "new-password");
+  const key = pwInput("skey", "off", { required: !st.key_optional, maxlength: 400, spellcheck: "false", autocapitalize: "none", placeholder: "sk-ant-…" });
+  key.wrap.querySelector("button").setAttribute("aria-label", "Schlüssel anzeigen");
+  dn.addEventListener("input", () => {
+    if (!un.dataset.touched) un.value = dn.value.trim().toLowerCase().replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss").replace(/\s+/g, ".").replace(/[^a-z0-9._-]/g, "").slice(0, 32) || "admin";
+  });
+  un.addEventListener("keydown", () => { un.dataset.touched = "1"; });
+  const submit = h("button", { class: "btn primary big wide", type: "submit" }, "Einrichtung abschließen");
+  const keyField = st.key_from_env
+    ? h("div", { class: "note ok" }, icon("check"), h("span", {}, "Der API-Schlüssel ist bereits über die Umgebungsvariable ANTHROPIC_API_KEY gesetzt."))
+    : h("div", { class: "field" }, h("label", { for: "skey" }, "Anthropic-API-Schlüssel", st.key_optional ? h("span", { class: "muted", style: { fontWeight: 400 } }, " (optional im Testmodus)") : null), key.wrap,
+      h("span", { class: "hint" }, "Anlegen unter ", h("a", { href: "https://console.anthropic.com/settings/keys", target: "_blank", rel: "noopener noreferrer" }, "console.anthropic.com → API Keys"),
+        ". Der Schlüssel wird vor dem Speichern bei Anthropic geprüft, liegt danach nur auf diesem Server und lässt sich unter Verwaltung → Einstellungen ändern."));
+  page.append(h("form", { class: "auth-card w", "aria-labelledby": "s-h", onsubmit: async ev => {
+    ev.preventDefault(); showErr(err, "");
+    if (pw.input.value !== pw2.input.value) { showErr(err, "Die Passwörter stimmen nicht überein."); pw2.input.focus(); return; }
+    submit.disabled = true;
+    const label = submit.textContent;
+    submit.textContent = key.input.value.trim() ? "Schlüssel wird geprüft …" : "Wird eingerichtet …";
+    try {
+      await api("/api/setup", { method: "POST", body: { username: un.value.trim(), display_name: dn.value.trim(), email: em.value.trim() || null,
+        password: pw.input.value, api_key: st.key_from_env ? "" : key.input.value.trim() } });
+      await refreshMe();
+      toast("Snap2CAD ist eingerichtet. Willkommen!", "ok");
+      go("/", true);
+    } catch (e) {
+      showErr(err, e.message);
+      if (e.status === 409) { await refreshMe().catch(() => {}); go("/login", true); }
+    } finally { submit.disabled = false; submit.textContent = label; }
+  } },
+  h("div", { style: { display: "flex", flexDirection: "column", gap: "6px" } }, h("h1", { id: "s-h", style: { fontSize: "24px" } }, "Snap2CAD einrichten"),
+    h("p", { class: "lead" }, "Lege das Administrator-Konto an und verbinde Claude. Erst danach ist Snap2CAD nutzbar.")),
+  err,
+  h("h2", { style: { fontSize: "16px", margin: "4px 0 0" } }, "1 · Administrator-Konto"),
+  h("div", { class: "grid2" }, h("div", { class: "field" }, h("label", { for: "sdn" }, "Anzeigename"), dn),
+    h("div", { class: "field" }, h("label", { for: "sun" }, "Benutzername"), un, h("span", { class: "hint" }, "3–32 Zeichen: a–z, 0–9, Punkt, Minus, Unterstrich"))),
+  h("div", { class: "field" }, h("label", { for: "sem" }, "E-Mail ", h("span", { class: "muted", style: { fontWeight: 400 } }, "(optional)")), em,
+    h("span", { class: "hint" }, "Damit kannst du dich auch per E-Mail anmelden.")),
+  h("div", { class: "field" }, h("label", { for: "spw" }, "Passwort"), pw.wrap, strengthUI(pw.input, () => un.value)),
+  h("div", { class: "field" }, h("label", { for: "spw2" }, "Passwort wiederholen"), pw2.wrap),
+  h("h2", { style: { fontSize: "16px", margin: "8px 0 0" } }, "2 · Claude verbinden"),
+  keyField,
+  submit,
+  h("p", { class: "hint", style: { textAlign: "center" } }, "Diese Seite erscheint nur, solange noch kein Konto existiert.")));
+  dn.focus();
+}, { public: true });
 
 // ------------------------------------------------------------------ Anmelden
 route(/^\/login$/, async root => {
@@ -464,21 +529,24 @@ const ACTIONS = {
   invite_created: "Einladung erstellt", invite_accepted: "Einladung angenommen", invite_revoked: "Einladung widerrufen",
   user_changed: "Benutzer geändert", user_deleted: "Benutzer gelöscht", sessions_ended: "Sitzungen beendet",
   admin_created: "Admin angelegt", cad_create: "CAD-Auftrag", suggest: "Maßvorschläge",
+  setup: "Ersteinrichtung", setup_denied: "Einrichtung abgelehnt", settings_changed: "Einstellungen geändert",
 };
 
-route(/^\/admin(?:\/(einladungen|protokoll))?$/, async (main, tab = "benutzer") => {
+route(/^\/admin(?:\/(einladungen|protokoll|einstellungen))?$/, async (main, tab = "benutzer") => {
   const [users, invites, status] = await Promise.all([api("/api/admin/users"), api("/api/admin/invites"), api("/api/admin/status")]);
   const open = invites.filter(i => i.state === "offen");
+  const openBox = h("div", { style: { display: "flex", flexDirection: "column", gap: "4px" } });
   const month = new Date().toLocaleDateString("de-DE", { month: "short" }).replace(".", "");
   main.append(h("div", { class: "head" }, h("div", { class: "t" }, h("h1", {}, "Benutzerverwaltung"),
     h("p", { class: "lead" }, "Neue Nutzer kommen nur über Einladungslinks dazu. CAD-Läufe nutzen den Server-Key – Kontingente begrenzen die Kosten.")),
   h("div", { class: "pill" }, h("span", { class: `dot ${status.sandbox ? "" : "err"}` }), `Sandbox ${status.sandbox ? "läuft" : "offline"} · `,
     h("span", { class: "mono" }, `${num(status.tokens_month.input / 1000, 0)}k / ${num(status.tokens_month.output / 1000, 0)}k Token (${month})`))));
   const tabs = h("div", { class: "tabs", role: "tablist", "aria-label": "Bereiche" },
-    [["benutzer", "Benutzer", users.length], ["einladungen", "Einladungen", open.length], ["protokoll", "Protokoll", null]].map(([k, t, c]) =>
-      h("button", { role: "tab", "aria-selected": String(tab === k), onclick: () => go(k === "benutzer" ? "/admin" : `/admin/${k}`, true) }, t, c != null ? h("span", { class: "cnt" }, c) : null)));
+    [["benutzer", "Benutzer", users.length], ["einladungen", "Einladungen", open.length], ["protokoll", "Protokoll", null], ["einstellungen", "Einstellungen", null]].map(([k, t, c]) =>
+      h("button", { role: "tab", "data-tab": k, "aria-selected": String(tab === k), onclick: () => go(k === "benutzer" ? "/admin" : `/admin/${k}`, true) }, t, c != null ? h("span", { class: "cnt" }, c) : null)));
   main.append(tabs);
   if (tab === "protokoll") return auditTab(main);
+  if (tab === "einstellungen") return settingsTab(main);
   const left = h("section", { class: "card", style: { padding: "0", gap: "0" }, "aria-label": tab === "benutzer" ? "Benutzerliste" : "Einladungen" });
   main.append(h("div", { class: "admin-layout" }, left, inviteAside(open)));
   if (tab === "einladungen") {
@@ -551,7 +619,24 @@ route(/^\/admin(?:\/(einladungen|protokoll))?$/, async (main, tab = "benutzer") 
 
   async function revoke(i) {
     if (!await confirmDlg("Einladung widerrufen?", "Der Link funktioniert danach nicht mehr.", "Widerrufen", true)) return;
-    try { await api(`/api/admin/invites/${i.id}`, { method: "DELETE" }); go(location.pathname, true); } catch (e) { fail(e); }
+    try {
+      await api(`/api/admin/invites/${i.id}`, { method: "DELETE" });
+      toast("Einladung widerrufen", "ok");
+      if (tab === "einladungen") go(location.pathname, true); else await refreshOpen();
+    } catch (e) { fail(e); }
+  }
+
+  // Liste „Offene Einladungen“ und Zaehler im Reiter neu laden, ohne den gerade erzeugten Link zu verlieren
+  function fillOpen(list) {
+    clear(openBox, list.length ? list.map(i => h("div", { class: "inv" }, h("span", { style: { fontWeight: 500 } }, i.email || "ohne E-Mail-Bindung"),
+      h("button", { class: "btn sm danger", onclick: () => revoke(i) }, "Widerrufen"),
+      h("span", { class: "small muted" }, `${i.role === "admin" ? "Admin" : "Nutzer"} · ${until(i.expires_at)}`)))
+      : h("p", { class: "hint" }, "Keine offenen Einladungen."));
+    const cnt = tabs.querySelector('[data-tab="einladungen"] .cnt');
+    if (cnt) cnt.textContent = list.length;
+  }
+  async function refreshOpen() {
+    fillOpen((await api("/api/admin/invites")).filter(i => i.state === "offen"));
   }
 
   function inviteAside(openList) {
@@ -573,6 +658,7 @@ route(/^\/admin(?:\/(einladungen|protokoll))?$/, async (main, tab = "benutzer") 
             h("span", { class: "hint" }, "Der Link wird nur jetzt vollständig angezeigt. Versand per Mail-Programm oder Messenger."));
           out.hidden = false; inp.select();
           email.value = ""; quota.value = "";
+          refreshOpen().catch(() => {});
         } catch (e) { fail(e); }
       } },
       h("h2", { id: "inv-h" }, "Einladung erstellen"),
@@ -582,12 +668,52 @@ route(/^\/admin(?:\/(einladungen|protokoll))?$/, async (main, tab = "benutzer") 
         h("label", { class: "field" }, h("span", { class: "flabel" }, "CAD-Läufe / Monat"), quota)),
       h("button", { class: "btn primary", type: "submit" }, "Einladungslink erzeugen"), out),
       h("section", { class: "card", "aria-labelledby": "open-h", style: { gap: "4px" } }, h("h2", { id: "open-h", style: { marginBottom: "8px" } }, "Offene Einladungen"),
-        openList.length ? openList.map(i => h("div", { class: "inv" }, h("span", { style: { fontWeight: 500 } }, i.email || "ohne E-Mail-Bindung"),
-          h("button", { class: "btn sm danger", onclick: () => revoke(i) }, "Widerrufen"),
-          h("span", { class: "small muted" }, `${i.role === "admin" ? "Admin" : "Nutzer"} · ${until(i.expires_at)}`)))
-          : h("p", { class: "hint" }, "Keine offenen Einladungen.")));
+        (fillOpen(openList), openBox)));
   }
 });
+
+async function settingsTab(main) {
+  const cfg = await api("/api/admin/settings");
+  const k = cfg.api_key, md = cfg.model;
+  const err = errBox();
+  const key = pwInput("akey", "off", { required: false, maxlength: 400, spellcheck: "false", autocapitalize: "none", placeholder: "sk-ant-…" });
+  key.wrap.querySelector("button").setAttribute("aria-label", "Schlüssel anzeigen");
+  const save = async (body, btn, msg) => {
+    showErr(err, ""); btn.disabled = true;
+    const label = btn.textContent; btn.textContent = "Wird geprüft …";
+    try { await api("/api/admin/settings", { method: "PUT", body }); await refreshMe(); toast(msg, "ok"); go("/admin/einstellungen", true); }
+    catch (e) { showErr(err, e.message); } finally { btn.disabled = false; btn.textContent = label; }
+  };
+  const keyBtn = h("button", { class: "btn primary", type: "submit" }, k.source === "none" ? "Schlüssel prüfen und speichern" : "Schlüssel ersetzen");
+  const status = k.source === "env"
+    ? h("div", { class: "note info" }, icon("info"), h("span", {}, `Gesetzt über die Umgebungsvariable ANTHROPIC_API_KEY (${k.hint || "…"}). Ändern nur in der .env-Datei; ist sie leer, gilt der hier hinterlegte Schlüssel.`))
+    : k.source === "db"
+      ? h("div", { class: "note ok" }, icon("check"), h("span", {}, "Hinterlegt: ", h("span", { class: "mono" }, k.hint || "…")))
+      : h("div", { class: "note warn" }, icon("warn"), h("span", {}, cfg.ai_fake ? "Kein Schlüssel hinterlegt – der Testmodus (AI_FAKE) ist aktiv." : "Kein Schlüssel hinterlegt – Maßvorschläge und CAD mit Claude sind deaktiviert."));
+  const keyForm = h("form", { class: "card", style: { flex: "1 1 380px", maxWidth: "560px" }, "aria-labelledby": "k-h", onsubmit: ev => {
+    ev.preventDefault();
+    if (!key.input.value.trim()) { showErr(err, "Bitte einen API-Schlüssel eingeben."); key.input.focus(); return; }
+    save({ api_key: key.input.value.trim() }, keyBtn, "API-Schlüssel gespeichert");
+  } }, h("h2", { id: "k-h" }, "Anthropic-API-Schlüssel"), status,
+  k.source === "env" ? null : [
+    h("div", { class: "field" }, h("label", { for: "akey" }, k.source === "none" ? "Schlüssel" : "Neuer Schlüssel"), key.wrap,
+      h("span", { class: "hint" }, "Anlegen unter ", h("a", { href: "https://console.anthropic.com/settings/keys", target: "_blank", rel: "noopener noreferrer" }, "console.anthropic.com → API Keys"),
+        ". Wird vor dem Speichern geprüft und nie wieder vollständig angezeigt.")),
+    h("div", { class: "chips" }, keyBtn, k.source === "db" ? h("button", { class: "btn danger", type: "button", onclick: async ev => {
+      const btn = ev.currentTarget;
+      if (!await confirmDlg("API-Schlüssel entfernen?", "Maßvorschläge und CAD mit Claude sind danach deaktiviert, bis ein neuer Schlüssel hinterlegt ist.", "Entfernen", true)) return;
+      save({ clear_api_key: true }, btn, "API-Schlüssel entfernt");
+    } }, "Entfernen") : null)]);
+  const mInp = h("input", { id: "amodel", class: "input mono", value: md.value, maxlength: 100, disabled: md.source === "env", spellcheck: "false", autocapitalize: "none" });
+  const mBtn = h("button", { class: "btn primary", type: "submit", disabled: md.source === "env" }, "Modell speichern");
+  const modelForm = h("form", { class: "card", style: { flex: "1 1 300px", maxWidth: "460px" }, "aria-labelledby": "m-h", onsubmit: ev => {
+    ev.preventDefault(); save({ model: mInp.value.trim() }, mBtn, "Modell gespeichert");
+  } }, h("h2", { id: "m-h" }, "Claude-Modell"),
+  h("div", { class: "field" }, h("label", { for: "amodel" }, "Modell-ID"), mInp,
+    h("span", { class: "hint" }, md.source === "env" ? "Festgelegt über die Umgebungsvariable ANTHROPIC_MODEL." : `Leer lassen für den Standard (${md.default}). Wird mit dem hinterlegten Schlüssel geprüft.`)),
+  h("div", {}, mBtn));
+  main.append(err, h("div", { class: "row", style: { alignItems: "flex-start" } }, keyForm, modelForm));
+}
 
 async function auditTab(main) {
   const sel = h("select", { class: "input", style: { maxWidth: "280px" } }, h("option", { value: "" }, "Alle Ereignisse"),
@@ -607,10 +733,11 @@ async function auditTab(main) {
 }
 
 function copyBtn(text) {
-  return h("button", { class: "btn", type: "button", onclick: async ev => {
-    try { await navigator.clipboard.writeText(text); ev.currentTarget.textContent = "Kopiert"; }
-    catch { toast("Kopieren nicht möglich – bitte manuell markieren", "err"); }
+  const btn = h("button", { class: "btn", type: "button", onclick: async () => {
+    if (await copyText(text)) { clear(btn, icon("check", 16), "Kopiert"); setTimeout(() => clear(btn, icon("copy", 16), "Kopieren"), 2000); }
+    else toast("Kopieren nicht möglich – bitte den Link markieren und mit Strg+C kopieren", "err");
   } }, icon("copy", 16), "Kopieren");
+  return btn;
 }
 async function showLink(title, link, text) {
   const inp = h("input", { class: "input mono", readonly: true, value: link });

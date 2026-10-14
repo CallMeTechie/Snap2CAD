@@ -220,3 +220,18 @@ export function strength(pw) {
   if (s < 12) return 1; if (s < 20) return 2; if (s < 30) return 3; return 4;
 }
 export const STRENGTH_TEXT = ["", "Schwach", "Mittel", "Gut", "Stark"];
+
+// In die Zwischenablage; ohne HTTPS (http://nas:8000) ueber den alten execCommand-Weg
+export async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; }
+  } catch { /* Fallback unten */ }
+  // ohne HTTPS (z. B. http://nas:8000) gibt es keine Clipboard-API
+  const ta = h("textarea", { readonly: true, style: { position: "fixed", top: "0", left: "0", opacity: "0" } }, text);
+  (document.querySelector("dialog[open]") || document.body).append(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { /* */ }
+  ta.remove();
+  return ok;
+}

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from . import ai, auth, config, db, sandbox
+from . import ai, auth, config, db, sandbox, settings
 
 _pool = ThreadPoolExecutor(max_workers=max(1, config.MAX_CONCURRENT_JOBS), thread_name_prefix="job")
 _cancel: dict[int, threading.Event] = {}
@@ -186,8 +186,8 @@ def _check_quota(user: dict):
 
 
 def _check_ready():
-    if not config.ai_enabled():
-        raise HTTPException(503, "KI ist nicht eingerichtet (ANTHROPIC_API_KEY fehlt).")
+    if not settings.ai_enabled():
+        raise HTTPException(503, "KI ist nicht eingerichtet: Anthropic-API-Schlüssel fehlt (Verwaltung → Einstellungen).")
     if not sandbox.worker_alive():
         raise HTTPException(503, "Die CAD-Sandbox läuft nicht (Dienst „sandbox“ prüfen).")
 

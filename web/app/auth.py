@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import re
 import secrets
 import threading
@@ -17,9 +18,6 @@ from . import config, db
 PH = PasswordHasher()
 COOKIE = "mu_session"
 ROLES = ("user", "admin")
-
-# Beim ersten Start nur im Log ausgegeben
-INITIAL_ADMIN_INFO: dict = {}
 
 _COMMON = {
     "passwort", "password", "123456789012", "passwort1234", "password1234", "qwertzuiopü", "qwertyuiop12",
@@ -47,6 +45,22 @@ def _expired(ts: str | None) -> bool:
     if not ts:
         return True
     return datetime.fromisoformat(ts) <= datetime.now(timezone.utc)
+
+
+def forwarded(request: Request, name: str, default: str) -> str:
+    """Erster Eintrag eines X-Forwarded-*-Headers. Bei mehreren Proxys hintereinander (z. B. Cloudflare +
+    Synology-Reverse-Proxy) haengt jeder seinen Wert an ("https,http"); der erste ist der des Browsers."""
+    v = (request.headers.get(name) or "").split(",", 1)[0].strip()
+    return v or default
+
+
+def public_proto(request: Request) -> str:
+    p = forwarded(request, "x-forwarded-proto", request.url.scheme).lower()
+    return p if p in ("http", "https") else request.url.scheme
+
+
+def public_host(request: Request) -> str:
+    return forwarded(request, "x-forwarded-host", request.headers.get("host", "localhost"))
 
 
 def client_ip(request: Request) -> str:
@@ -113,25 +127,54 @@ def usage_this_month(user_id: int) -> int:
     return r["n"] if r else 0
 
 
-# ---------------------------------------------------------------- Default-Admin
+# ---------------------------------------------------------------- Ersteinrichtung
 
 def ensure_admin():
-    if db.q1("SELECT id FROM users WHERE role='admin' LIMIT 1"):
+    """Nur fuer automatisierte Installationen (ADMIN_INITIAL_PASSWORD gesetzt): Konto 'admin' anlegen.
+    Ohne die Variable bleibt die Datenbank leer und der Einrichtungsassistent im Browser legt das erste
+    Admin-Konto an."""
+    if not config.ADMIN_INITIAL_PASSWORD or db.q1("SELECT id FROM users LIMIT 1"):
         return
-    pw = config.ADMIN_INITIAL_PASSWORD or secrets.token_urlsafe(12)
-    h = hash_pw(pw)
+    h = hash_pw(config.ADMIN_INITIAL_PASSWORD)
     db.ex("""INSERT INTO users(username,display_name,pw_hash,role,status,must_change_pw,initial_pw_hash,created_at)
              VALUES ('admin','Administrator',?,'admin','active',1,?,?)""", (h, h, db.now()))
-    db.audit("admin_created", "Standard-Administrator angelegt", actor="system")
-    INITIAL_ADMIN_INFO["generated"] = not config.ADMIN_INITIAL_PASSWORD
-    bar = "=" * 64
-    if config.ADMIN_INITIAL_PASSWORD:
-        print(f"{bar}\n Admin-Konto angelegt: Benutzer 'admin', Passwort aus ADMIN_INITIAL_PASSWORD.\n"
-              f" Beim ersten Login muss das Passwort geändert werden.\n{bar}", flush=True)
-    else:
-        print(f"{bar}\n Admin-Konto angelegt\n   Benutzer: admin\n   Passwort: {pw}\n"
-              f" Dieses Passwort wird nur jetzt angezeigt und muss beim ersten Login geändert werden.\n{bar}",
-              flush=True)
+    db.audit("admin_created", "Konto „admin“ aus ADMIN_INITIAL_PASSWORD angelegt", actor="system")
+    print("Admin-Konto 'admin' aus ADMIN_INITIAL_PASSWORD angelegt (Passwort muss beim ersten Login geändert werden).",
+          flush=True)
+
+
+def setup_required() -> bool:
+    return db.q1("SELECT id FROM users LIMIT 1") is None
+
+
+def setup_ip_allowed(ip: str) -> bool:
+    if config.SETUP_ALLOW_PUBLIC:
+        return True
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    if isinstance(a, ipaddress.IPv6Address) and a.ipv4_mapped:
+        a = a.ipv4_mapped
+    # alles, was nicht aus dem oeffentlichen Internet kommt: LAN, Loopback, Docker, VPN/CGNAT (Tailscale)
+    return not a.is_global and not a.is_multicast and not a.is_unspecified
+
+
+def check_username(username: str):
+    if not (3 <= len(username) <= 32) or not set(username.lower()) <= USERNAME_OK:
+        raise HTTPException(400, "Benutzername: 3–32 Zeichen, nur Buchstaben a–z, Ziffern, Punkt, Minus, Unterstrich.")
+
+
+def create_first_admin(username: str, display_name: str, email: str | None, password: str, ip: str) -> dict:
+    """Legt das erste Konto an – nur solange noch kein Benutzer existiert (atomar gegen parallele Aufrufe)."""
+    with db._lock:
+        if not setup_required():
+            raise HTTPException(409, "Snap2CAD ist bereits eingerichtet. Bitte anmelden.")
+        uid = db.ex("""INSERT INTO users(username,email,display_name,pw_hash,role,status,must_change_pw,created_at)
+                       VALUES (?,?,?,?,'admin','active',0,?)""",
+                    (username, email, (display_name or "").strip()[:80] or username, hash_pw(password), db.now()))
+    db.audit("setup", f"Ersteinrichtung: Administrator „{username}“ angelegt", user_id=uid, actor=username, ip=ip)
+    return db.q1("SELECT * FROM users WHERE id=?", (uid,))
 
 
 # ---------------------------------------------------------------- Login-Sperre
@@ -188,8 +231,7 @@ def _secure(request: Request) -> bool:
         return True
     if config.COOKIE_SECURE == "false":
         return False
-    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
-    return proto == "https"
+    return public_proto(request) == "https"
 
 
 def create_session(response: Response, request: Request, user: dict, remember: bool):
@@ -316,9 +358,7 @@ def change_password(u: dict, current: str, new: str, ip: str, keep_token: str | 
 def link(kind: str, token: str, request: Request | None = None) -> str:
     base = config.PUBLIC_URL
     if not base and request is not None:
-        proto = request.headers.get("x-forwarded-proto", request.url.scheme)
-        host = request.headers.get("x-forwarded-host", request.headers.get("host", "localhost"))
-        base = f"{proto}://{host}"
+        base = f"{public_proto(request)}://{public_host(request)}"
     return f"{base}/{kind}/{token}"
 
 
@@ -373,8 +413,7 @@ def accept_invite(token: str, username: str, display_name: str, email: str | Non
                   ip: str) -> dict:
     inv = find_invite(token)
     username = (username or "").strip()
-    if not (3 <= len(username) <= 32) or not set(username.lower()) <= USERNAME_OK:
-        raise HTTPException(400, "Benutzername: 3–32 Zeichen, nur Buchstaben a–z, Ziffern, Punkt, Minus, Unterstrich.")
+    check_username(username)
     if db.q1("SELECT id FROM users WHERE username=?", (username,)):
         raise HTTPException(400, "Dieser Benutzername ist vergeben.")
     email = inv["email"] or clean_email(email)
@@ -396,12 +435,14 @@ def accept_invite(token: str, username: str, display_name: str, email: str | Non
     return db.q1("SELECT * FROM users WHERE id=?", (uid,))
 
 
-def create_reset(admin: dict, user: dict) -> str:
+def create_reset(admin: dict | None, user: dict) -> str:
+    """admin=None: von der Kommandozeile im Container erstellt (Notfallzugang)."""
     token = secrets.token_urlsafe(24)
     db.ex("UPDATE resets SET used_at=? WHERE user_id=? AND used_at IS NULL", (db.now(), user["id"]))
     db.ex("INSERT INTO resets(token_hash,user_id,created_by,created_at,expires_at) VALUES (?,?,?,?,?)",
-          (_sha(token), user["id"], admin["id"], db.now(), _future(hours=48)))
-    db.audit("reset_created", f"für „{user['username']}“", user_id=admin["id"], actor=admin["username"])
+          (_sha(token), user["id"], admin["id"] if admin else None, db.now(), _future(hours=48)))
+    db.audit("reset_created", f"für „{user['username']}“" + ("" if admin else " (Kommandozeile)"),
+             user_id=admin["id"] if admin else user["id"], actor=admin["username"] if admin else "konsole")
     return token
 
 

@@ -89,6 +89,9 @@ CREATE TABLE IF NOT EXISTS job_log (
   job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
   ts TEXT NOT NULL, level TEXT NOT NULL DEFAULT 'info', msg TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY, value TEXT, updated_at TEXT NOT NULL, updated_by INTEGER
+);
 CREATE INDEX IF NOT EXISTS ix_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS ix_photos_project ON photos(project_id);
 CREATE INDEX IF NOT EXISTS ix_meas_project ON measurements(project_id);

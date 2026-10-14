@@ -1,9 +1,9 @@
-# Nur fuer die CI: Testmodus statt echter KI, festes Startpasswort, kurze Zeitlimits.
+# Nur fuer die CI: Testmodus statt echter KI, kurze Zeitlimits. Das Admin-Konto legt der Smoke-Test
+# ueber den Einrichtungsassistenten an (/api/setup).
 services:
   app:
     environment:
       AI_FAKE: "1"
-      ADMIN_INITIAL_PASSWORD: "Start-Passwort-1"
       SANDBOX_TIMEOUT: "20"
   sandbox:
     environment:

@@ -1,7 +1,7 @@
 # Snap2CAD – Web-App mit CAD-Sandbox
-#   cp .env.example .env    # ANTHROPIC_API_KEY eintragen
+#   cp .env.example .env    # optional anpassen
 #   docker compose up -d     # fertiges Image von ghcr.io  (oder: --build fuer lokalen Build)
-#   docker compose logs app  # zeigt beim ersten Start das Admin-Passwort (falls nicht gesetzt)
+#   Danach im Browser oeffnen: der Einrichtungsassistent legt Admin-Konto und API-Schluessel an.
 name: snap2cad
 
 x-image: &image
@@ -14,8 +14,9 @@ services:
     restart: unless-stopped
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-5-5}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
       ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:-}
+      SETUP_ALLOW_PUBLIC: ${SETUP_ALLOW_PUBLIC:-}
       PUBLIC_URL: ${PUBLIC_URL:-}
       COOKIE_SECURE: ${COOKIE_SECURE:-auto}
       FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1,172.16.0.0/12}

@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import ai, auth, config, db, geom, jobs, sandbox
+from . import ai, auth, config, db, geom, jobs, sandbox, settings
 
 sys.path.insert(0, str(config.ROOT))
 from core import matgen, vision  # noqa: E402
@@ -38,8 +38,11 @@ def _startup():
     auth.ensure_admin()
     auth.purge_expired()
     jobs.startup()
-    print(f"Snap2CAD {VERSION} · KI: {'Testmodus' if config.AI_FAKE else ('an' if config.ANTHROPIC_API_KEY else 'aus')}"
-          f" · Modell {config.ANTHROPIC_MODEL} · Sandbox {config.SANDBOX_MODE}", flush=True)
+    ki = "Testmodus" if config.AI_FAKE else {"env": "an (Umgebung)", "db": "an", "none": "aus"}[settings.api_key_source()]
+    print(f"Snap2CAD {VERSION} · KI: {ki} · Modell {settings.model()} · Sandbox {config.SANDBOX_MODE}", flush=True)
+    if auth.setup_required():
+        print("Noch nicht eingerichtet: Snap2CAD im Browser öffnen – der Einrichtungsassistent legt das erste"
+              " Admin-Konto an.", flush=True)
 
 
 @asynccontextmanager
@@ -107,7 +110,7 @@ async def security(request: Request, call_next):
             return JSONResponse({"detail": "CSRF-Prüfung fehlgeschlagen"}, status_code=403)
         origin = request.headers.get("origin")
         if origin:
-            host = request.headers.get("x-forwarded-host", request.headers.get("host", ""))
+            host = auth.public_host(request)
             if origin.split("://", 1)[-1] != host:
                 return JSONResponse({"detail": "Fremde Herkunft abgelehnt"}, status_code=403)
         cl = request.headers.get("content-length")
@@ -231,14 +234,60 @@ def _usage(user: dict) -> dict:
 @app.get("/api/me")
 def me(request: Request):
     u = auth.current_user(request)
-    out = {"version": VERSION, "ai": config.ai_enabled(), "ai_fake": config.AI_FAKE, "model": config.ANTHROPIC_MODEL,
+    out = {"version": VERSION, "ai": settings.ai_enabled(), "ai_fake": config.AI_FAKE, "model": settings.model(),
            "sandbox": sandbox.worker_alive(), "user": None, "max_upload_mb": config.MAX_UPLOAD_MB,
            "limits": {"timeout_s": config.SANDBOX_TIMEOUT, "mem_mb": config.SANDBOX_MEM_MB, "autofix": config.MAX_AUTOFIX,
                       "sandbox_mode": config.SANDBOX_MODE}}
+    if auth.setup_required():
+        out["setup"] = {"required": True, "key_from_env": settings.api_key_source() == "env",
+                        "key_optional": config.AI_FAKE or settings.api_key_source() == "env",
+                        "allowed": auth.setup_ip_allowed(auth.client_ip(request))}
     if u:
         out["user"] = auth.public_user(u)
         out["usage"] = _usage(u)
     return out
+
+
+class SetupIn(BaseModel):
+    username: str = Field(max_length=64)
+    display_name: str = Field(default="", max_length=80)
+    email: str | None = Field(default=None, max_length=200)
+    password: str = Field(max_length=300)
+    api_key: str = Field(default="", max_length=400)
+
+
+@app.post("/api/setup")
+def setup(body: SetupIn, request: Request, response: Response):
+    """Ersteinrichtung: legt das erste Admin-Konto an und speichert den API-Schluessel.
+    Nur solange es noch keinen Benutzer gibt und (standardmaessig) nur aus privaten Netzen."""
+    ip = auth.client_ip(request)
+    if not auth.setup_required():
+        raise HTTPException(409, "Snap2CAD ist bereits eingerichtet. Bitte anmelden.")
+    if not auth.setup_ip_allowed(ip):
+        db.audit("setup_denied", "Einrichtung aus öffentlichem Netz abgelehnt", ip=ip)
+        raise HTTPException(403, "Die Einrichtung ist nur aus dem lokalen Netz möglich (oder SETUP_ALLOW_PUBLIC=1 setzen).")
+    username = body.username.strip()
+    auth.check_username(username)
+    email = auth.clean_email(body.email)
+    problems = auth.check_policy(body.password, username)
+    if problems:
+        raise HTTPException(400, "Passwort: " + ", ".join(problems) + ".")
+    key = body.api_key.strip()
+    if settings.api_key_source() == "env":
+        key = ""  # Schluessel kommt aus der Umgebung
+    elif key:
+        err = ai.verify(key)
+        if err:
+            raise HTTPException(400, err)
+    elif not config.AI_FAKE:
+        raise HTTPException(400, "Bitte den Anthropic-API-Schlüssel eingeben.")
+    u = auth.create_first_admin(username, body.display_name, email, body.password, ip)
+    if key:
+        settings.put("anthropic_api_key", key, u["id"])
+        db.audit("settings_changed", f"API-Schlüssel hinterlegt (…{key[-4:]})", user_id=u["id"], actor=u["username"], ip=ip)
+    db.ex("UPDATE users SET last_login=? WHERE id=?", (db.now(), u["id"]))
+    auth.create_session(response, request, u, False)
+    return {"user": auth.public_user(u)}
 
 
 class LoginIn(BaseModel):
@@ -527,12 +576,63 @@ def admin_status(a: dict = Depends(auth.require_admin)):
     tok = db.q("SELECT usage FROM job_versions WHERE substr(created_at,1,7)=?", (month,))
     tin = sum((db.jload(t["usage"], {}) or {}).get("input_tokens", 0) for t in tok)
     tout = sum((db.jload(t["usage"], {}) or {}).get("output_tokens", 0) for t in tok)
-    return {"version": VERSION, "ai": config.ai_enabled(), "ai_fake": config.AI_FAKE, "model": config.ANTHROPIC_MODEL,
+    return {"version": VERSION, "ai": settings.ai_enabled(), "ai_fake": config.AI_FAKE, "model": settings.model(),
             "sandbox": sandbox.worker_alive(), "sandbox_mode": config.SANDBOX_MODE,
             "sandbox_limits": {"timeout_s": config.SANDBOX_TIMEOUT, "mem_mb": config.SANDBOX_MEM_MB},
             "default_quota": config.DEFAULT_QUOTA, "users": db.q1("SELECT COUNT(*) n FROM users")["n"],
             "jobs_month": db.q1("SELECT COUNT(*) n FROM jobs WHERE substr(created_at,1,7)=?", (month,))["n"],
             "tokens_month": {"input": tin, "output": tout}}
+
+
+def _settings_public() -> dict:
+    return {"api_key": {"source": settings.api_key_source(), "hint": settings.api_key_hint()},
+            "model": {"value": settings.model(), "source": settings.model_source(), "default": config.DEFAULT_MODEL},
+            "ai_fake": config.AI_FAKE}
+
+
+@app.get("/api/admin/settings")
+def admin_settings(a: dict = Depends(auth.require_admin)):
+    return _settings_public()
+
+
+class SettingsIn(BaseModel):
+    api_key: str | None = Field(default=None, max_length=400)
+    clear_api_key: bool = False
+    model: str | None = Field(default=None, max_length=100)
+
+
+@app.put("/api/admin/settings")
+def admin_settings_put(body: SettingsIn, request: Request, a: dict = Depends(auth.require_admin)):
+    ip = auth.client_ip(request)
+    key = (body.api_key or "").strip()
+    model = (body.model or "").strip() if body.model is not None else None
+    if (key or body.clear_api_key) and settings.api_key_source() == "env":
+        raise HTTPException(400, "Der API-Schlüssel ist per Umgebungsvariable ANTHROPIC_API_KEY gesetzt und "
+                                 "kann hier nicht geändert werden.")
+    if model is not None and settings.model_source() == "env":
+        raise HTTPException(400, "Das Modell ist per Umgebungsvariable ANTHROPIC_MODEL festgelegt.")
+    if model == config.DEFAULT_MODEL:
+        model = ""
+    # Pruefen, bevor irgendetwas gespeichert wird
+    check_key = key or (settings.api_key() if not body.clear_api_key else "")
+    if key or (model and check_key):
+        err = ai.verify(check_key, model or None)
+        if err:
+            raise HTTPException(400, err)
+    elif model:
+        err = ai.check_model_format(model)
+        if err:
+            raise HTTPException(400, err)
+    if key:
+        settings.put("anthropic_api_key", key, a["id"])
+        db.audit("settings_changed", f"API-Schlüssel ersetzt (…{key[-4:]})", user_id=a["id"], actor=a["username"], ip=ip)
+    elif body.clear_api_key:
+        settings.put("anthropic_api_key", None)
+        db.audit("settings_changed", "API-Schlüssel entfernt", user_id=a["id"], actor=a["username"], ip=ip)
+    if model is not None:
+        settings.put("anthropic_model", model or None, a["id"])
+        db.audit("settings_changed", f"Modell: {model or config.DEFAULT_MODEL}", user_id=a["id"], actor=a["username"], ip=ip)
+    return _settings_public()
 
 
 # ------------------------------------------------------------------ Messunterlage
@@ -979,8 +1079,8 @@ class SuggestIn(BaseModel):
 @app.post("/api/projects/{pid}/suggest")
 def meas_suggest(pid: int, body: SuggestIn, request: Request, u: dict = Depends(auth.require_user)):
     p = _own_project(pid, u)
-    if not config.ai_enabled():
-        raise HTTPException(503, "KI ist nicht eingerichtet (ANTHROPIC_API_KEY fehlt).")
+    if not settings.ai_enabled():
+        raise HTTPException(503, "KI ist nicht eingerichtet: Anthropic-API-Schlüssel fehlt (Verwaltung → Einstellungen).")
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     n = db.q1("SELECT COUNT(*) n FROM audit WHERE user_id=? AND action='suggest' AND substr(ts,1,10)=?",
               (u["id"], today))["n"]

@@ -151,3 +151,17 @@ def test_session_cookie_flags(app):
     r = c.post("/api/auth/login", json={"username": "admin", "password": ADMIN_PW, "remember": True}, headers=H)
     cookie = r.headers["set-cookie"].lower()
     assert "httponly" in cookie and "samesite=lax" in cookie
+
+
+def test_proxy_chain_headers(app, admin):
+    """Zwei Proxys hintereinander (z. B. Cloudflare + Synology): X-Forwarded-Proto = "https,http"."""
+    fwd = {**H, "X-Forwarded-Proto": "https,http", "X-Forwarded-Host": "snap2cad.example.de, nas:8000",
+           "Origin": "https://snap2cad.example.de"}
+    r = admin.post("/api/admin/invites", json={"role": "user", "days": 1}, headers=fwd)
+    assert r.status_code == 200, r.text
+    assert r.json()["link"].startswith("https://snap2cad.example.de/einladung/"), r.json()["link"]
+    c = TestClient(app)
+    r = c.post("/api/auth/login", json={"username": "admin", "password": ADMIN_PW}, headers=fwd)
+    assert r.status_code == 200 and "secure" in r.headers["set-cookie"].lower()
+    r = c.post("/api/auth/logout", headers={**fwd, "Origin": "https://boese.example"})
+    assert r.status_code == 403

@@ -4,6 +4,7 @@ import http.cookiejar
 import json
 import sys
 import time
+import urllib.error
 import urllib.request
 
 BASE = sys.argv[1].rstrip("/")
@@ -22,8 +23,17 @@ def call(method, path, body=None):
 
 me = call("GET", "/api/me")
 assert me["sandbox"], "Sandbox-Worker meldet keinen Herzschlag"
-call("POST", "/api/auth/login", {"username": "admin", "password": "Start-Passwort-1"})
-call("POST", "/api/auth/change-password", {"current": "Start-Passwort-1", "new": "CI-Testpasswort-Lang-1"})
+# Frische Installation: kein Konto, Einrichtungsassistent aktiv
+assert me["setup"]["required"] and me["setup"]["allowed"], me.get("setup")
+u = call("POST", "/api/setup", {"username": "ci-admin", "display_name": "CI", "password": "CI-Testpasswort-Lang-1",
+                                "api_key": ""})["user"]
+assert u["role"] == "admin" and not u["must_change_pw"], u
+assert "setup" not in call("GET", "/api/me")
+try:
+    call("POST", "/api/setup", {"username": "zweiter", "password": "CI-Testpasswort-Lang-2"})
+    raise AssertionError("zweite Einrichtung darf nicht moeglich sein")
+except urllib.error.HTTPError as e:
+    assert e.code == 409, e.code
 assert call("GET", "/api/mat.pdf?format=A4")[:4] == b"%PDF"
 html = opener.open(BASE + "/", timeout=30).read()
 assert b"Snap2CAD" in html

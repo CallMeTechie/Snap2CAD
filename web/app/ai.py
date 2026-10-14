@@ -14,7 +14,7 @@ from pathlib import Path
 
 import cv2
 
-from . import config
+from . import config, settings
 
 MAX_IMG_SIDE = 1568
 
@@ -85,16 +85,68 @@ class Cancelled(Exception):
 
 
 _client = None
+_client_key = ""
 _client_lock = threading.Lock()
 
 
 def client():
-    global _client
+    """Gemeinsamer Client; wird neu gebaut, sobald der Schluessel in der Verwaltung geaendert wurde."""
+    global _client, _client_key
+    key = settings.api_key()
     with _client_lock:
-        if _client is None:
+        if _client is None or key != _client_key:
             import anthropic
-            _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, max_retries=3, timeout=600)
+            _client = anthropic.Anthropic(api_key=key, max_retries=3, timeout=600)
+            _client_key = key
         return _client
+
+
+_KEY_RE = re.compile(r"^[A-Za-z0-9_\-]{20,300}$")
+_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@\-]{2,99}$")
+
+
+def check_key_format(key: str) -> str | None:
+    if not _KEY_RE.match(key or ""):
+        return "Das sieht nicht wie ein API-Schlüssel aus (erwartet z. B. „sk-ant-…“, ohne Leerzeichen)."
+    return None
+
+
+def check_model_format(model: str) -> str | None:
+    if not _MODEL_RE.match(model or ""):
+        return "Ungültiger Modellname (z. B. „claude-sonnet-5-5“)."
+    return None
+
+
+def verify(key: str, model: str | None = None) -> str | None:
+    """Prueft Schluessel (und optional Modell) mit einem kostenlosen API-Aufruf. None = in Ordnung,
+    sonst eine Fehlermeldung fuer die Oberflaeche. Es werden keine Token verbraucht."""
+    err = check_key_format(key) or (check_model_format(model) if model else None)
+    if err:
+        return err
+    if config.AI_FAKE:
+        return None
+    import anthropic
+    c = anthropic.Anthropic(api_key=key, max_retries=1, timeout=20)
+    try:
+        if model:
+            c.models.retrieve(model)
+        else:
+            c.models.list(limit=1)
+    except anthropic.AuthenticationError:
+        return "Anthropic lehnt diesen API-Schlüssel ab. Bitte in der Anthropic Console prüfen."
+    except anthropic.PermissionDeniedError:
+        return "Dieser API-Schlüssel hat keine Berechtigung für die Anthropic-API."
+    except anthropic.NotFoundError:
+        return f"Das Modell „{model}“ ist mit diesem Schlüssel nicht verfügbar."
+    except anthropic.RateLimitError:
+        return None  # Schluessel ist gueltig, nur gerade ausgelastet
+    except anthropic.APIConnectionError:
+        return "Keine Verbindung zur Anthropic-API (api.anthropic.com). Hat der Server Internetzugang?"
+    except anthropic.APIStatusError as e:
+        return f"Anthropic-API antwortet mit Fehler {e.status_code}. Bitte später erneut versuchen."
+    finally:
+        c.close()
+    return None
 
 
 # ------------------------------------------------------------------ Bilder
@@ -162,13 +214,13 @@ def call(system: str, messages: list[dict], max_tokens: int = 16000, cancel: thr
     """Ruft Claude auf. Rueckgabe (Text, usage)."""
     if config.AI_FAKE:
         return _fake(system, messages, cancel)
-    if not config.ANTHROPIC_API_KEY:
-        raise AIError("Kein ANTHROPIC_API_KEY gesetzt – KI-Funktionen sind deaktiviert.")
+    if not settings.api_key():
+        raise AIError("Kein Anthropic-API-Schlüssel hinterlegt – KI-Funktionen sind deaktiviert.")
     import anthropic
     try:
         text, last = [], time.time()
         with client().messages.stream(
-                model=config.ANTHROPIC_MODEL, max_tokens=max_tokens,
+                model=settings.model(), max_tokens=max_tokens,
                 system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
                 messages=_materialize(messages)) as stream:
             n = 0
@@ -190,7 +242,7 @@ def call(system: str, messages: list[dict], max_tokens: int = 16000, cancel: thr
     except Cancelled:
         raise
     except anthropic.AuthenticationError as e:
-        raise AIError("API-Schlüssel ungültig (ANTHROPIC_API_KEY prüfen).") from e
+        raise AIError("API-Schlüssel ungültig (Verwaltung → Einstellungen prüfen).") from e
     except anthropic.RateLimitError as e:
         raise AIError("Anthropic-Ratenlimit erreicht – bitte später erneut versuchen.") from e
     except anthropic.APIStatusError as e:

@@ -1,5 +1,5 @@
 // Schritt 4: CAD mit Claude – Auftrag, Fortschritt, Ergebnis
-import { api, h, clear, icon, num, bytes, toast, fail, mmss, dt, confirmDlg } from "./lib.js";
+import { api, h, clear, icon, num, bytes, toast, fail, mmss, dt, confirmDlg, copyText } from "./lib.js";
 import { S, ensureProject, go, onLeave, refreshMe, jobBadge } from "./app.js";
 import { fmtValue } from "./measure.js";
 
@@ -442,4 +442,4 @@ function codeView(code, errLine) {
   (code || "").replace(/\n$/, "").split("\n").forEach((ln, i) => pre.append(h("div", { class: i + 1 === errLine ? "err" : "" }, h("span", { class: "ln" }, i + 1), ln || " ")));
   return pre;
 }
-async function copy(t) { try { await navigator.clipboard.writeText(t); toast("Kopiert", "ok"); } catch { toast("Kopieren nicht möglich", "err"); } }
+async function copy(t) { if (await copyText(t)) toast("Kopiert", "ok"); else toast("Kopieren nicht möglich", "err"); }
