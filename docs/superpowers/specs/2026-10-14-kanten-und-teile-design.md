@@ -18,11 +18,11 @@ Erfolgskriterium (Beispiel aus dem Auftrag): Quader 60 × 40 × 30 mm, Draufsich
 | Nr. | Kriterium | Nachweis |
 |---|---|---|
 | A1 | Synthetische A4-Draufsicht, Quader 60 × 40 mm: genau ein Umriss mit 4 Ecken, jede Ecke ± 0,5 mm. Variante Quader + Platte 80 × 20 mm (dunklerer Grauton als der Quader) + Bohrung Ø 5 mm in der Platte: Bohrung Mittelpunkt und Ø ± 0,3 mm; mindestens ein `inner`-Segment liegt auf einer Plattenkante über dem Quader (Winkel < 3°, Abstand < 1 mm) | `pytest tests/test_edges.py -v` |
-| A2 | Teil-Maßstab: L Foto 63,60, Messschieber 60,00 → B Foto 42,40 wird 40,00 ± 0,01 ohne Änderung an B; zweite Referenz mit 1,5 % Abweichung → Warnung am Teil; Verhältnis 1,40 → keine Referenz, Hinweis an der Messung | `pytest tests/test_parts.py -v` |
-| A3 | Zwei Teile: `ai.call` per Monkeypatch mit fester Antwort „Quader“ (body) + „Platte“ (mounted) → `POST /api/photos/{phid}/edges` liefert 2 Teile mit je eigenen Auto-Maßen; CAD-Auftrag mit `part_id` von T2 → Maßtabelle enthält keine Messung von T1 | `pytest tests/test_api.py -v -k parts` |
-| A4 | Erneute Erkennung erhält den Maßstab: nach Messschieber 60,00 an L und zweitem `POST …/edges` hat das Teil dieselbe id, k = 0,943 ± 0,001 und genau eine Messung „Länge“ | `pytest tests/test_api.py -v -k redetect` |
+| A2 | Teil-Maßstab: L Foto 63,60, Messschieber 60,00 → B Foto 42,40 wird 40,00 ± 0,01 ohne Änderung an B; zweite Referenz mit 1,5 % Abweichung → Warnung am Teil; Verhältnis 1,40 → keine Referenz, Hinweis an der Messung | `pytest tests/test_parts.py tests/test_parts_api.py -k "massstab or referenz"` |
+| A3 | Zwei Teile: `ai.call` per Monkeypatch mit fester Antwort „Quader“ (body) + „Platte“ (mounted) → `POST /api/photos/{phid}/edges` liefert 2 Teile mit je eigenen Auto-Maßen; CAD-Auftrag mit `part_id` von T2 → Maßtabelle enthält keine Messung von T1 | `pytest tests/test_edges_api.py -k "zwei_teile or cad_auftrag"` |
+| A4 | Erneute Erkennung erhält den Maßstab: nach Messschieber 60,00 an L und zweitem `POST …/edges` hat das Teil dieselbe id, k = 0,943 ± 0,001 und genau eine Messung „Länge“ | `pytest tests/test_edges_api.py -k erneute` |
 | A5 | Oberfläche ohne „Claude“: kein Treffer für „Claude“ in `web/static` außerhalb von `//`-Kommentaren; „Anthropic“ nur in Einrichtung und Verwaltung (app.js); in `web/app/main.py`, `web/app/jobs.py` und `web/app/ai.py` nennt keine Nutzermeldung Claude oder Anthropic außer den Einrichtungs-/Verwaltungsmeldungen (`ai.verify`, „Bitte den Anthropic-API-Schlüssel eingeben.“) | `pytest tests/test_texts.py -v` (durchsucht die Dateien) |
-| A6 | `GET /api/prompt.md` → 404 | `pytest tests/test_api.py -k prompt`; Docker-Smoke-Test |
+| A6 | `GET /api/prompt.md` → 404 | `pytest tests/test_api.py -k mat_pdf`; Docker-Smoke-Test |
 | A7 | Bestehende Tests grün | CI (`pytest -v`) |
 | A8 | Manuell nach dem Deployment auf der DS918+: echtes Foto Quader + Platte → zwei Teile; Dauer eines Erkennungslaufs (A4, mit KI) wird notiert (kein Stopp-Kriterium) | Browser, Zeit aus dem Netzwerk-Tab |
 
