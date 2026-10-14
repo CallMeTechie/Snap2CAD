@@ -18,9 +18,20 @@
 - Oberflächentexte Deutsch und neutral („KI“); „Claude“ steht nirgends in `web/static`, außer in `//`-Kommentaren. „Anthropic“ steht nur in Einrichtung und Verwaltung (`app.js`).
 - Interne Werte bleiben: `source = 'claude'`, CSS-Klassen `.claude`, `--claude`.
 - Ruff: Zeilenlänge 130, Regeln E, F, W, B (`pyproject.toml`). JS: `node --check` für jede Datei unter `web/static/js`.
-- Tests: `cd /root/Snap2CAD && /root/Snap2CAD-venv/bin/pytest -q <Datei>`; Lint: `/root/Snap2CAD-venv/bin/ruff check .`
+- Tests: `cd /root/Snap2CAD && /root/Snap2CAD-venv/bin/pytest -q` (volle Suite, ca. 80 s; pytest-xdist ist nicht installiert, also kein `-n`); Lint: `/root/Snap2CAD-venv/bin/ruff check .`. Jeder Task endet mit voller Suite + ruff, nicht nur mit den eigenen Dateien.
+- Nachweise der Abnahmekriterien (Spec-Tabelle wird beim Abschluss angeglichen): A1 = `pytest tests/test_edges.py`; A2 = `pytest tests/test_parts.py tests/test_parts_api.py -k "massstab or referenz"`; A3 = `pytest tests/test_edges_api.py -k "zwei_teile or cad_auftrag"`; A4 = `pytest tests/test_edges_api.py -k erneute`; A5 = `pytest tests/test_texts.py`; A6 = `pytest tests/test_api.py -k mat_pdf` + Docker-Smoke. Formatwechsel und Migration stehen in `tests/test_parts_api.py`.
+- Nebenläufigkeit: Jede Änderung an Teilen/Messungen und das folgende `refresh` laufen zusammen in `with db.atomic():` (Task 2). Ein KI-Aufruf liegt nie innerhalb von `db.atomic()`.
 - Commits ohne Co-Autor-Zeile und ohne Erwähnung von Claude (Nutzervorgabe). Branch `kanten-und-teile`.
-- Abweichung von der Spec (bewusst): Referenz-Hinweise stehen in `data.ref_warn` der Messung, Geometrie-Hinweise der Auto-Maße in `data.warn`, damit sich beide nicht überschreiben. KI-Schätzwerte (`data.ai_value`) und manuelle Werte werden nie mit k skaliert, weil ihr Wert nicht aus Punkten berechnet wird.
+- Abweichungen von der Spec (bewusst):
+  - Referenz-Hinweise stehen in `data.ref_warn` der Messung, Geometrie-Hinweise der Auto-Maße in `data.warn`, damit sich beide nicht überschreiben.
+  - KI-Schätzwerte (`data.ai_value`) und manuelle Werte werden nie mit k skaliert, weil ihr Wert nicht aus Punkten berechnet wird.
+  - Rechteck mit verdeckter Kante: L/B nur aus der sichtbaren Seite, sind beide Seiten verdeckt, aus dem Mittelwert mit dem Hinweis „verdeckt, geschätzt“.
+  - Auto-Maße lassen sich keinem anderen Teil zuordnen (PATCH `part_id` → 400). Wer Punkte, Wert oder Art eines Auto-Maßes ändert, macht es zur normalen Messung.
+  - Die CSV bekommt zusätzlich die Spalten „Teil“ und „Nennmaß“. Der CAD-Text schreibt „(montiertes Teil)“ statt „(montiert)“.
+  - Die Bohrung wird per `fitEllipse` angepasst statt per Kreis-Kleinste-Quadrate.
+  - Zusätzliche Hinweise: „Die KI hat keine Teile erkannt – …“. Bei einer erneuten Erkennung ohne KI-Ergebnis bleiben vorhandene Teile unverändert. Von Hand gezeichnete Teile (`source='user'`) werden bei einer erneuten Erkennung nie gelöscht.
+  - Ein zweiter, gleichzeitiger Erkennungslauf wartet nicht, sondern bekommt sofort 429 „Kantenerkennung ist gerade belegt …“, damit der Threadpool nicht vollläuft.
+  - Grenzen: höchstens 6 Umrisse je Erkennung, 64 Ecken je Polygon, 12 Teile je Foto.
 
 ## Review Focus
 
@@ -29,13 +40,15 @@
 3. **Objekt berührt den Rasterrand:** wird trotzdem gefunden, alle Ecken liegen innerhalb der Fläche. Test in Task 3.
 4. **Unbrauchbare KI-Antwort** (Text drumherum, 2 Punkte, NaN, Strings, gar kein JSON): Die Antwort wird verworfen, es gibt Teile aus dem Umriss und einen Hinweis. Tests in Task 6.
 5. **Foto mit Teilen und Messschieber-Referenz wird gelöscht** oder bekommt ein anderes Format: Die Referenzmessung bleibt als normale Messung erhalten, die Teile verschwinden. Test in Task 5.
+6. **Zwei Anfragen gleichzeitig** (zwei Tabs, Loslassen beim Ziehen und sofort Umbenennen): keine doppelten Auto-Maße. Test in Task 5 (Threads).
+7. **Erneute Erkennung, wenn die KI ausfällt:** Die vorhandenen Teile bleiben unverändert. Test in Task 6.
 
 ---
 
 ### Task 1: Texte ohne Claude, Prompt-Download entfernen
 
 **Files:**
-- Modify: `web/static/js/mat.js:39-40`, `web/static/js/app.js:63-73,229,272,281,316,703,719,726`, `web/static/js/cad.js:1,65,74-75,94,107,122,237,281`, `web/static/js/measure.js:73,499,515,526,539,567,574`
+- Modify: `web/static/js/mat.js:39-40`, `web/static/js/app.js:63-73,229,272,281,316,703,719,726`, `web/static/js/cad.js:1,65,69,74-75,94,107,122,237,281`, `web/static/js/measure.js:73,499,515,526,539,567,574`
 - Modify: `web/app/ai.py:218,247,249,251`, `web/app/main.py:718-723,1105,1164,1299`, `web/app/jobs.py:1,52,62,190,306`, `web/app/config.py:52`, `Dockerfile:43`
 - Modify: `tests/test_api.py:36`, `tests/docker/smoke_api.py`
 - Create: `tests/test_texts.py`
@@ -51,7 +64,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-STATIC = [*(ROOT / "web/static/js").glob("*.js"), ROOT / "web/static/index.html"]
+STATIC = [*(ROOT / "web/static/js").glob("*.js"), *(ROOT / "web/static/css").glob("*.css"), ROOT / "web/static/index.html"]
 
 
 def _code_lines(path):
@@ -136,6 +149,7 @@ function statusPill() {
 `web/static/js/cad.js`:
 - Zeile 1: `// Schritt 4: CAD mit Claude – Auftrag, Fortschritt, Ergebnis` → `// Schritt 4: CAD-Modell – Auftrag, Fortschritt, Ergebnis`.
 - Zeile 65: `"Keine entzerrten Fotos – Claude arbeitet dann nur mit Maßen und Beschreibung."` → `"Keine entzerrten Fotos – das Modell entsteht dann nur aus Maßen und Beschreibung."`.
+- Zeile 69: `"KI ist nicht eingerichtet (ANTHROPIC_API_KEY fehlt)."` → `"KI ist nicht eingerichtet (Verwaltung → Einstellungen)."`.
 - Zeile 74: `"CAD-Modell mit Claude"` → `"CAD-Modell erzeugen"`.
 - Zeile 75: `"Claude schreibt aus Maßen und Fotos ein parametrisches build123d-Modell. Der Code läuft abgeschottet auf dem Server und liefert STEP und STL."` → `"Aus Maßen und Fotos entsteht ein parametrisches build123d-Modell. Der Code läuft abgeschottet auf dem Server und liefert STEP und STL."`.
 - Zeile 94: `"Je klarer die Funktion, desto besser trifft Claude Konstruktionsabsicht und Nennmaße."` → `"Je klarer die Funktion, desto besser trifft die KI Konstruktionsabsicht und Nennmaße."`.
@@ -198,7 +212,7 @@ except urllib.error.HTTPError as e:
 
 - [ ] **Step 5: Tests und Lint**
 
-Run: `/root/Snap2CAD-venv/bin/pytest -q tests/test_texts.py tests/test_api.py && /root/Snap2CAD-venv/bin/ruff check . && for f in web/static/js/*.js; do node --check "$f"; done`
+Run: `/root/Snap2CAD-venv/bin/pytest -q && /root/Snap2CAD-venv/bin/ruff check . && for f in web/static/js/*.js; do node --check "$f" || exit 1; done`
 Expected: alles grün. Fällt `test_static_ohne_claude` noch durch, zeigt die Trefferliste Datei und Zeile.
 
 - [ ] **Step 6: Commit**
@@ -217,7 +231,7 @@ git commit -m "Oberfläche ohne Claude-Nennung, Prompt-Download entfernt"
 - Create: `tests/test_parts_api.py` (nur Migrationstest, wird in Task 5 erweitert)
 
 **Interfaces:**
-- Produces: Tabelle `parts(id, project_id, photo_id, seq, label, role, data, source, scale, created_at)`, Spalte `measurements.part_id`, Funktion `db._migrate(c)`.
+- Produces: Tabelle `parts(id, project_id, photo_id, seq, label, role, data, source, scale, created_at)`, Spalte `measurements.part_id` (mit Index `ix_meas_part`), Funktion `db._migrate(c)`, Kontextmanager `db.atomic()` (eine Transaktion, verschachtelbar, hält `db._lock`).
 
 - [ ] **Step 1: Failing Test** – `tests/test_parts_api.py`:
 
@@ -246,6 +260,24 @@ def test_migration_ergaenzt_part_id(tmp_path, monkeypatch):
         assert db.q("SELECT name FROM sqlite_master WHERE type='table' AND name='parts'")
     finally:
         db._conn.close()
+
+
+def test_atomic_rollback_und_verschachtelt():
+    from app import db
+    db.ex("CREATE TABLE IF NOT EXISTS t_atomic (v INTEGER)")
+    try:
+        with db.atomic():
+            db.ex("INSERT INTO t_atomic VALUES (1)")
+            with db.atomic():
+                db.ex("INSERT INTO t_atomic VALUES (2)")
+            raise RuntimeError("abbrechen")
+    except RuntimeError:
+        pass
+    assert db.q("SELECT * FROM t_atomic") == []
+    with db.atomic():
+        db.ex("INSERT INTO t_atomic VALUES (3)")
+    assert db.q("SELECT v FROM t_atomic") == [{"v": 3}]
+    db.ex("DROP TABLE t_atomic")
 ```
 
 `monkeypatch` stellt `db._conn` und `config.DB_PATH` nach dem Test wieder her.
@@ -282,13 +314,39 @@ def _migrate(c: sqlite3.Connection):
     cols = {r[1] for r in c.execute("PRAGMA table_info(measurements)").fetchall()}
     if "part_id" not in cols:
         c.execute("ALTER TABLE measurements ADD COLUMN part_id INTEGER REFERENCES parts(id) ON DELETE SET NULL")
+    c.execute("CREATE INDEX IF NOT EXISTS ix_meas_part ON measurements(part_id)")
 ```
 
-Für neue Datenbanken ebenfalls über `_migrate`. Die Spalte steht bewusst nicht im `CREATE TABLE measurements`, damit es genau einen Weg gibt.
+Für neue Datenbanken ebenfalls über `_migrate`. Die Spalte steht bewusst nicht im `CREATE TABLE measurements`, damit es genau einen Weg gibt. Der Index auf `part_id` steht deshalb auch in `_migrate` und nicht im SCHEMA, sonst scheitert das SCHEMA auf alten Datenbanken.
+
+Nach `tx()` einfügen, dazu oben `from contextlib import contextmanager`:
+
+```python
+@contextmanager
+def atomic():
+    """Mehrere Lese-/Schreibschritte als eine Transaktion. Haelt _lock, damit parallele Anfragen (Threadpool)
+    Aenderung + Neuberechnung nicht verschraenken. Verschachtelt = keine Savepoints: eine im inneren Block
+    gefangene Ausnahme rollt nichts zurueck."""
+    with _lock:
+        c = conn()
+        if c.in_transaction:
+            yield c
+            return
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            yield c
+        except BaseException:
+            if c.in_transaction:
+                c.execute("ROLLBACK")
+            raise
+        c.execute("COMMIT")
+```
+
+`isolation_level=None` (Autocommit) ist gesetzt, `BEGIN IMMEDIATE` ist also erlaubt, und `db.ex`/`db.q` nehmen innerhalb denselben `RLock`.
 
 - [ ] **Step 4: Tests**
 
-Run: `/root/Snap2CAD-venv/bin/pytest -q tests/test_parts_api.py tests/test_api.py`
+Run: `/root/Snap2CAD-venv/bin/pytest -q && /root/Snap2CAD-venv/bin/ruff check .`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -304,10 +362,11 @@ git commit -m "Datenbank: Tabelle parts und Spalte measurements.part_id mit Migr
 
 **Files:**
 - Create: `core/edges.py`, `tests/test_edges.py`
-- Modify: `tests/conftest.py:99-118` (`synthetic_photo`)
+- Modify: `tests/conftest.py:99-117` (`synthetic_photo`)
 
 **Interfaces:**
-- Produces: `edges.detect(rect: np.ndarray, fmt: str) -> dict` mit `{"outlines": [{"polygon": [[x, y], …], "area": float}], "holes": [{"c": [x, y], "d": float}], "segments": [{"id": "K1", "a": [x, y], "b": [x, y], "kind": "outline"|"inner"}], "px_per_mm": 10.0}`. Umrisse sind nach Fläche absteigend sortiert, Segment-IDs laufen fortlaufend: erst alle Umrissseiten, dann die Innenkanten. Alle Zahlen sind Python-`float`, also JSON-fähig.
+- Produces: `edges.detect(rect: np.ndarray, fmt: str) -> dict` mit `{"outlines": [{"polygon": [[x, y], …], "area": float}], "holes": [{"c": [x, y], "d": float}], "segments": [{"id": "K1", "a": [x, y], "b": [x, y], "kind": "outline"|"inner"}], "px_per_mm": 10.0}`. Umrisse sind nach Fläche absteigend sortiert (höchstens `MAX_OUTLINES = 6`, je höchstens `MAX_VERTS = 64` Ecken), Segment-IDs laufen fortlaufend: erst alle Umrissseiten, dann die Innenkanten. Alle Zahlen sind Python-`float`, also JSON-fähig.
+- Produces: `edges.draw_candidates(rect: np.ndarray, res: dict) -> np.ndarray` (Kopie der Draufsicht mit nummerierten Kandidaten, für die KI).
 - Produces: `conftest.synthetic_photo(fmt, page, tilt, blur, objects=None)`.
 
 - [ ] **Step 1: `synthetic_photo` erweitern** – in `tests/conftest.py` die Funktion ersetzen:
@@ -425,6 +484,19 @@ def test_leere_unterlage():
     assert res["outlines"] == [] and res["segments"] == [] and res["holes"] == []
 
 
+def test_viele_objekte_begrenzt():
+    objs = [{"rect": [30 + 20 * i, 30 + 22 * j, 15, 15], "gray": 120} for i in range(6) for j in range(7)]
+    res = edges.detect(_rect(objs), "A4")
+    assert 1 <= len(res["outlines"]) <= edges.MAX_OUTLINES
+    assert all(len(o["polygon"]) <= edges.MAX_VERTS for o in res["outlines"])
+
+
+def test_kandidatenbild(two):
+    img = _rect([BOX, PLATE, HOLE])
+    out = edges.draw_candidates(img, two)
+    assert out.shape == img.shape and (out != img).any()
+
+
 def test_objekt_am_rand():
     res = edges.detect(_rect([{"rect": [0, 60, 50, 30], "gray": 120}]), "A4")
     assert len(res["outlines"]) == 1
@@ -462,6 +534,8 @@ SEARCH_MM = 1.5        # Suchweite der Kantenverfeinerung entlang der Normalen
 MAX_SHIFT_MM = 2.0
 MIN_SEG_MM = 8.0
 MAX_SEGMENTS = 40
+MAX_OUTLINES = 6
+MAX_VERTS = 64
 
 
 def _odd(n: float) -> int:
@@ -732,13 +806,18 @@ def detect(rect: np.ndarray, fmt: str) -> dict:
             area = cv2.contourArea(c) / WORK_PXMM ** 2
             if area < MIN_AREA_MM2:
                 continue
-            ap = cv2.approxPolyDP(c, APPROX_MM * WORK_PXMM, True).reshape(-1, 2)
-            if len(ap) < 3:
+            eps = APPROX_MM * WORK_PXMM
+            ap = cv2.approxPolyDP(c, eps, True).reshape(-1, 2)
+            while len(ap) > MAX_VERTS and eps < 8 * WORK_PXMM:  # sehr unruhige Umrisse vereinfachen
+                eps *= 1.5
+                ap = cv2.approxPolyDP(c, eps, True).reshape(-1, 2)
+            if not 3 <= len(ap) <= MAX_VERTS:
                 continue
             coarse = [[(float(x) + 0.5) / WORK_PXMM, gh - (float(y) + 0.5) / WORK_PXMM] for x, y in ap]
             outlines.append({"polygon": _refine(coarse, gx, gy, gh), "area": round(float(area), 1)})
         holes = _holes(cnts, hier, gray, gh)
     outlines.sort(key=lambda o: -o["area"])
+    del outlines[MAX_OUTLINES:]
     segs = []
     if outlines:
         full = cv2.resize(mask, (rect.shape[1], rect.shape[0]), interpolation=cv2.INTER_NEAREST)
@@ -753,12 +832,36 @@ def detect(rect: np.ndarray, fmt: str) -> dict:
         n += 1
         segments.append({"id": f"K{n}", "a": [round(x1, 3), round(y1, 3)], "b": [round(x2, 3), round(y2, 3)], "kind": "inner"})
     return {"outlines": outlines, "holes": holes if outlines else [], "segments": segments, "px_per_mm": PX_PER_MM}
+
+
+def draw_candidates(rect: np.ndarray, res: dict) -> np.ndarray:
+    """Draufsicht mit eingezeichneten, nummerierten Kandidaten (Bildvorlage fuer die KI-Zuordnung)."""
+    img = rect.copy()
+    px = res["px_per_mm"]
+    gh = img.shape[0] / px
+    colors = [(178, 111, 31), (12, 85, 194), (46, 125, 79), (150, 40, 160)]
+
+    def P(q):
+        return int(round(q[0] * px)), int(round((gh - q[1]) * px))
+    for i, s in enumerate(res["segments"]):
+        a, b, col = P(s["a"]), P(s["b"]), colors[i % len(colors)]
+        cv2.line(img, a, b, col, 4, cv2.LINE_AA)
+        mid = ((a[0] + b[0]) // 2 + 6, (a[1] + b[1]) // 2 - 6)
+        cv2.putText(img, s["id"], mid, cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 5, cv2.LINE_AA)
+        cv2.putText(img, s["id"], mid, cv2.FONT_HERSHEY_SIMPLEX, 1.0, col, 2, cv2.LINE_AA)
+    return img
 ```
 
 - [ ] **Step 5: Tests grün**
 
-Run: `/root/Snap2CAD-venv/bin/pytest -q tests/test_edges.py tests/test_core.py && /root/Snap2CAD-venv/bin/ruff check core tests`
+Run: `/root/Snap2CAD-venv/bin/pytest -q && /root/Snap2CAD-venv/bin/ruff check .`
 Expected: PASS. Wenn `test_leere_unterlage` einen Umriss findet: prüfen, ob Achsbeschriftungen oder Rasterlinien die Maske erreichen (`diff` und Schwelle ausgeben). Gegenmittel: Untergrenze 18 → 24 anheben, nicht den Schließkern vergrößern.
+
+- [ ] **Step 5b: Gegenprobe mit echten Fotos (blockiert die synthetischen Tests nicht)**
+
+Falls auf der DS918+ schon Fotos liegen: 2–3 `rect.jpg` aus dem Volume `snap2cad_data` (`/data/photos/<id>/rect.jpg` im Container) ins Scratchpad kopieren, z. B. `ssh <nas> 'cd /volume1/docker/snap2cad && sudo -n /usr/local/bin/docker compose exec -T app cat /data/photos/<id>/rect.jpg' > $SCRATCH/real_<id>.jpg`. Den Pfad im Container vorher mit `ls` prüfen, den SSH-Zugang beschreibt die Memory `snap2cad-nas`. Dann `edges.detect` mit dem Format des Fotos laufen lassen und notieren: Umrisszahl, Eckenzahl je Umriss, Segmentzahl, Laufzeit.
+
+Die Fotos sind Nutzerdaten: Sie bleiben im Scratchpad und kommen nie ins Repo oder in Tests. Wird kein Umriss gefunden oder bekommt ein Quader mehr als 8 Ecken, `APPROX_MM` bzw. die Schwelle 18 nachstellen und den Grund im Commit nennen. Gibt es keine Fotos, wird das vermerkt, und A8 (Task 9) übernimmt die Gegenprobe.
 
 - [ ] **Step 6: Commit**
 
@@ -939,6 +1042,8 @@ import statistics
 
 from shapely.geometry import LinearRing, Point, Polygon
 
+from . import geom
+
 RECT_TOL_DEG = 4.0
 EDGE_DIFF_MM = 1.0
 ON_EDGE_MM = 1.5
@@ -1019,7 +1124,7 @@ def auto_dims(data, fx=1.0, fy=1.0):
     E = edges_of(poly)
     out = []
     if is_rect(poly):
-        lens = [_seg_len(a, b, fx, fy) for a, b in E]
+        lens = [geom.compute("length", [a, b], fx, fy) for a, b in E]
         raws, picks, warns = [], [], []
         for i, j in ((0, 2), (1, 3)):
             vis = [k for k in (i, j) if ids[k] not in hidden]
@@ -1041,11 +1146,12 @@ def auto_dims(data, fx=1.0, fy=1.0):
                         "points": [list(E[side][0]), list(E[side][1])], "warn": warns[pi]})
     else:
         for (a, b), eid in zip(E, ids, strict=True):
-            out.append({"key": f"E{eid}", "kind": "length", "name": f"Kante {eid}", "raw": round(_seg_len(a, b, fx, fy), 3),
+            out.append({"key": f"E{eid}", "kind": "length", "name": f"Kante {eid}", "raw": geom.compute("length", [a, b], fx, fy),
                         "points": [list(a), list(b)], "warn": "verdeckt, geschätzt" if eid in hidden else None})
     for hole in data.get("holes") or []:
         out.append({"key": f"H{hole['id']}", "kind": "diameter", "name": f"Bohrung {hole['id']}",
-                    "raw": round(hole["d"] * (fx + fy) / 2, 3), "points": circle_points(hole["c"], hole["d"]), "warn": None})
+                    "raw": geom.compute("diameter", circle_points(hole["c"], hole["d"]), fx, fy),
+                    "points": circle_points(hole["c"], hole["d"]), "warn": None})
     return out
 
 
@@ -1264,7 +1370,8 @@ def assign_holes(parts_list, holes):
     for p in parts_list:
         p["holes"] = []
     for hole in holes:
-        cands = [(_valid(p["polygon"]).area, i) for i, p in enumerate(parts_list) if _valid(p["polygon"]).contains(Point(hole["c"]))]
+        c = Point(hole["c"])
+        cands = [(_valid(p["polygon"]).area, i) for i, p in enumerate(parts_list) if _valid(p["polygon"]).contains(c)]
         if cands:
             parts_list[min(cands)[1]]["holes"].append({"c": hole["c"], "d": hole["d"]})
 ```
@@ -1273,7 +1380,7 @@ Hinweis zum vierten Fall in `test_kennungen_einfuegen_loeschen_verschieben`: Aus
 
 - [ ] **Step 4: Tests grün**
 
-Run: `/root/Snap2CAD-venv/bin/pytest -q tests/test_parts.py && /root/Snap2CAD-venv/bin/ruff check web/app/parts.py tests/test_parts.py`
+Run: `/root/Snap2CAD-venv/bin/pytest -q && /root/Snap2CAD-venv/bin/ruff check .`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -1347,6 +1454,8 @@ def test_teil_auto_masse_und_massstab(proj):
     m = c.post(f"/api/projects/{pid}/measurements",
                json={"photo_id": phid, "kind": "length", "points": [[60, 100], [123.6, 100]]}, headers=H).json()
     assert m["part_id"] == part["id"] and m["value"] == pytest.approx(60.0, abs=0.01) and m["data"]["raw"] == pytest.approx(63.6)
+    c.patch(f"/api/measurements/{_auto(p, part['id'], 'B')['id']}", json={"caliper": 40.6}, headers=H)  # 1,5 % Streuung
+    assert "widersprechen" in _p(c, pid)["parts"][0]["warn"]
     c.patch(f"/api/parts/{part['id']}", json={"reset_scale": True}, headers=H)
     p = _p(c, pid)
     assert p["parts"][0]["scale"] == 1.0 and _auto(p, part["id"], "B")["value"] == pytest.approx(42.4)
@@ -1356,7 +1465,7 @@ def test_unplausible_referenz_polygon_bearbeiten_dropped(proj):
     c, pid, phid = proj
     part = _part(c, pid, phid, label="Q")
     B = _auto(_p(c, pid), part["id"], "B")
-    c.patch(f"/api/measurements/{B['id']}", json={"caliper": 70.0}, headers=H)          # 70 / 42,4 = 1,65
+    c.patch(f"/api/measurements/{B['id']}", json={"caliper": 59.36}, headers=H)         # 59,36 / 42,4 = 1,40
     p = _p(c, pid)
     assert p["parts"][0]["scale"] == 1.0 and "Abweichung zu groß" in _auto(p, part["id"], "B")["data"]["ref_warn"]
     r = c.patch(f"/api/parts/{part['id']}", json={"polygon": [RECT[0], [90, 80], *RECT[1:]]}, headers=H)
@@ -1364,12 +1473,18 @@ def test_unplausible_referenz_polygon_bearbeiten_dropped(proj):
     p = _p(c, pid)
     assert sorted(m["data"]["auto_key"] for m in p["measurements"] if m["source"] == "auto") == ["E1", "E2", "E3", "E4", "E5"]
     kept = next(m for m in p["measurements"] if m["id"] == B["id"])
-    assert kept["source"] == "user" and kept["caliper"] == 70.0
+    assert kept["source"] == "user" and kept["caliper"] == 59.36
     e2 = next(m for m in p["measurements"] if m["data"].get("auto_key") == "E2")
     assert c.delete(f"/api/measurements/{e2['id']}", headers=H).status_code == 200
+    e1 = next(m for m in p["measurements"] if m["data"].get("auto_key") == "E1")
+    r = c.patch(f"/api/measurements/{e1['id']}", json={"points": [[60, 81], [90, 81]]}, headers=H).json()
+    assert r["source"] == "user"
+    e3 = next(m for m in p["measurements"] if m["data"].get("auto_key") == "E3")
+    assert c.patch(f"/api/measurements/{e3['id']}", json={"kind": "height"}, headers=H).json()["source"] == "user"
     c.patch(f"/api/parts/{part['id']}", json={"label": "Quader"}, headers=H)
     p = _p(c, pid)
-    assert "E2" not in [m["data"].get("auto_key") for m in p["measurements"]]
+    keys = [m["data"].get("auto_key") for m in p["measurements"]]
+    assert "E1" not in keys and "E2" not in keys and "E3" not in keys
     assert all(m["label"].startswith("Quader ") for m in p["measurements"] if m["source"] == "auto")
     bow = [[60, 80], [123.6, 122.4], [123.6, 80], [60, 122.4]]
     assert c.patch(f"/api/parts/{part['id']}", json={"polygon": bow}, headers=H).status_code == 200
@@ -1409,11 +1524,57 @@ def test_formatwechsel_und_foto_loeschen_behalten_referenz(proj):
 
 def test_teil_validierung(proj, user):
     c, pid, phid = proj
-    assert c.post(f"/api/projects/{pid}/parts", json={"photo_id": phid, "polygon": [[0, 0], [1, 1]]}, headers=H).status_code == 400
+    bad = c.post(f"/api/projects/{pid}/parts", json={"photo_id": phid, "polygon": [[0, 0], [1, 1]]}, headers=H)
+    assert bad.status_code in (400, 422)                                              # Pydantic: min_length=3
     assert c.post(f"/api/projects/{pid}/parts", json={"photo_id": phid, "polygon": [[0, 0], [1e6, 0], [0, 5]]},
                   headers=H).status_code == 400
     other = user.post("/api/projects", json={"name": "fremd"}, headers=H).json()["id"]
     assert c.post(f"/api/projects/{other}/parts", json={"photo_id": phid, "polygon": RECT}, headers=H).status_code == 400
+    for _ in range(12):                                                               # MAX_PARTS_PER_PHOTO
+        _part(c, pid, phid)
+    assert c.post(f"/api/projects/{pid}/parts", json={"photo_id": phid, "polygon": RECT}, headers=H).status_code == 400
+
+
+def test_fremder_nutzer_kein_zugriff(proj, app, admin):
+    from fastapi.testclient import TestClient
+    c, pid, phid = proj
+    part = _part(c, pid, phid)
+    tok = admin.post("/api/admin/invites", json={"role": "user", "days": 1}, headers=H).json()["link"].rsplit("/", 1)[1]
+    f = TestClient(app)
+    assert f.post(f"/api/invite/{tok}", json={"username": f"fremd{pid}", "display_name": "Fremd",
+                                              "password": "Schieblehre-Messing-7"}, headers=H).status_code == 200
+    assert f.patch(f"/api/parts/{part['id']}", json={"label": "x"}, headers=H).status_code == 404
+    assert f.delete(f"/api/parts/{part['id']}", headers=H).status_code == 404
+    assert f.post(f"/api/projects/{pid}/parts", json={"photo_id": phid, "polygon": RECT}, headers=H).status_code == 404
+    own = f.post("/api/projects", json={"name": "f"}, headers=H).json()["id"]
+    m = f.post(f"/api/projects/{own}/measurements", json={"kind": "height", "value": 1.0}, headers=H).json()
+    assert f.patch(f"/api/measurements/{m['id']}", json={"part_id": part["id"]}, headers=H).status_code == 400
+
+
+def test_parallel_keine_doppelten_auto_masse(proj):
+    import threading
+    from app import db, main, parts
+    c, pid, phid = proj
+    part = _part(c, pid, phid)
+    project = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
+    five = [RECT[0], [90, 80], *RECT[1:]]
+    errs = []
+
+    def job(i):
+        try:
+            if i == 0:
+                assert c.patch(f"/api/parts/{part['id']}", json={"polygon": five}, headers=H).status_code == 200
+            else:
+                main._refresh(project)
+        except Exception as e:  # noqa: BLE001
+            errs.append(e)
+    ts = [threading.Thread(target=job, args=(i,)) for i in range(3)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert not errs
+    parts.refresh(project, 1.0, 1.0)
+    keys = [m["data"].get("auto_key") for m in _p(c, pid)["measurements"] if m["source"] == "auto"]
+    assert len(keys) == len(set(keys)) == 5
 ```
 
 Der Migrationstest aus Task 2 bleibt oben in der Datei. Die Importe `import pytest` und `from conftest import H, synthetic_photo` an den Dateianfang zu `import sqlite3` stellen, damit ruff nicht über E402 klagt. (E402 ist ohnehin abgeschaltet, sauber ist es trotzdem.)
@@ -1425,7 +1586,7 @@ Expected: FAIL (404 auf `/api/projects/{pid}/parts`).
 
 - [ ] **Step 3: Datenbankschicht in `web/app/parts.py` anhängen**
 
-Oben bei den Importen ergänzen:
+Die Importzeile `from . import geom` wird zu:
 
 ```python
 from . import db, geom
@@ -1543,7 +1704,16 @@ def _sync_auto(part, photo, fx, fy):
     """Auto-Masse eines Teils an sein Polygon anpassen (Spec §3)."""
     d = _data(part)
     want = {x["key"]: x for x in auto_dims(d, fx, fy) if x["key"] not in (d.get("dropped") or [])}
-    have = {_data(m).get("auto_key"): m for m in db.q("SELECT * FROM measurements WHERE part_id=? AND source='auto'", (part["id"],))}
+    have = {}
+    for m in db.q("SELECT * FROM measurements WHERE part_id=? AND source='auto' ORDER BY id", (part["id"],)):
+        k = _data(m).get("auto_key")
+        if k in have:  # Doppel (z. B. aus einem frueheren Wettlauf) bereinigen
+            if m["caliper"] is None:
+                db.ex("DELETE FROM measurements WHERE id=?", (m["id"],))
+            else:
+                _auto_to_user(m)
+            continue
+        have[k] = m
     for key, x in want.items():
         m = have.get(key)
         if m:
@@ -1587,7 +1757,8 @@ def refresh(project, fx, fy):
         if m["source"] == "auto" or d.get("part_fixed"):
             continue
         new = None
-        if m["source"] != "manual" and d.get("view", "top") == "top" and d.get("points") and m["photo_id"] in by_photo:
+        if m["source"] != "manual" and d.get("view", "top") == "top" and m["kind"] != "height" and d.get("points") \
+                and m["photo_id"] in by_photo:
             new = assign(d["points"], by_photo[m["photo_id"]])
         if new != m["part_id"]:
             db.ex("UPDATE measurements SET part_id=? WHERE id=?", (new, m["id"]))
@@ -1603,7 +1774,7 @@ def refresh(project, fx, fy):
     for part in parts:  # 3. Massstab je Teil
         refs = [(m["id"], m["caliper"] / raw[m["id"]]) for m in rows
                 if m["part_id"] == part["id"] and m["caliper"] is not None and m["kind"] in SCALED_KINDS
-                and datas[m["id"]].get("ref") is not False and raw.get(m["id"])]
+                and datas[m["id"]].get("ref") is not False and datas[m["id"]].get("view", "top") == "top" and raw.get(m["id"])]
         k, good, bad, warn = scale_of(refs)
         kmap[part["id"]] = k
         for mid in bad:
@@ -1648,7 +1819,7 @@ def public_list(project_id):
 
 def replace_detected(project_id, photo_id, detected):
     """Ergebnis einer Erkennung uebernehmen: Abgleich ueber IoU (Spec §2), sonst neu bzw. loeschen."""
-    old = db.q("SELECT * FROM parts WHERE photo_id=? ORDER BY seq", (photo_id,))
+    old = db.q("SELECT * FROM parts WHERE photo_id=? AND source!='user' ORDER BY seq", (photo_id,))  # Handteile bleiben
     m = match_parts([(o["id"], _data(o)["polygon"]) for o in old], [(i, x["polygon"]) for i, x in enumerate(detected)])
     kept = set(m.values())
     for o in old:
@@ -1667,12 +1838,7 @@ def replace_detected(project_id, photo_id, detected):
 
 Importzeile `from . import …` um `parts` ergänzen (alphabetisch einordnen).
 
-`_default_unc` (Zeile 229) ersetzen:
-
-```python
-def _default_unc(photo: dict | None, view: str) -> float:
-    return parts.default_unc(photo, view)
-```
+`_default_unc` (Zeile 229) löschen; die einzige Aufrufstelle (`meas_create`, Zeile 1006) ruft `parts.default_unc(photo, body.view)` auf.
 
 `_project_public`, im `if detail:`-Block ergänzen:
 
@@ -1693,17 +1859,32 @@ def _own_part(part_id: int, user: dict) -> tuple[dict, dict]:
 
 
 def _refresh(p: dict):
-    parts.refresh(p, *_factors(p))
+    with db.atomic():
+        parts.refresh(p, *_factors(p))
 ```
 
-`photo_patch`: im `if body.format is not None and body.format != ph["format"]:`-Block als erste Zeilen:
+**Transaktionen:** In `part_create`, `part_patch`, `part_delete`, `photo_patch`, `photo_delete`, `meas_create`, `meas_patch`, `meas_delete` und `meas_accept_all` stehen die schreibenden Schritte und `_refresh(p)` zusammen in einem `with db.atomic():`. Weil `atomic` verschachtelbar ist, darf `_refresh` darin selbst `atomic` öffnen. Die Lesezugriffe zur Eigentümerprüfung (`_own_*`) bleiben davor. Die Codeblöcke unten zeigen das.
+
+`photo_patch` ersetzen (Teile erst löschen, wenn die neue Auswertung geklappt hat):
 
 ```python
-        parts.delete_photo_parts(phid)
-        (_photo_dir(phid) / "edges.json").unlink(missing_ok=True)
+@app.patch("/api/photos/{phid}")
+def photo_patch(phid: int, body: PhotoPatch, u: dict = Depends(auth.require_user)):
+    ph, p = _own_photo(phid, u)
+    if body.view in VIEWS:
+        db.ex("UPDATE photos SET view=? WHERE id=?", (body.view, phid))
+    if body.format is not None and body.format != ph["format"]:
+        img = vision.load_image((_photo_dir(phid) / "orig.jpg").read_bytes())
+        a = _analyze_store(phid, img, body.format if body.format in matgen.FORMATS else None)
+        with db.atomic():
+            db.ex("UPDATE photos SET format=?, status=?, max_err=?, analysis=? WHERE id=?",
+                  (a.get("format"), a["status"], a.get("max_err_mm"), db.jdump(a), phid))
+            parts.delete_photo_parts(phid)
+            _refresh(p)
+        for n in ("edges.json", "edges_ki.jpg"):
+            (_photo_dir(phid) / n).unlink(missing_ok=True)
+    return _photo_public(db.q1("SELECT * FROM photos WHERE id=?", (phid,)))
 ```
-
-und am Ende der Funktion vor `return`: `_refresh(_own_project(ph["project_id"], u))`.
 
 `photo_delete` ersetzen:
 
@@ -1711,10 +1892,11 @@ und am Ende der Funktion vor `return`: `_refresh(_own_project(ph["project_id"], 
 @app.delete("/api/photos/{phid}")
 def photo_delete(phid: int, u: dict = Depends(auth.require_user)):
     _, p = _own_photo(phid, u)
-    parts.delete_photo_parts(phid)
+    with db.atomic():
+        parts.delete_photo_parts(phid)
+        db.ex("DELETE FROM photos WHERE id=?", (phid,))
+        _refresh(p)
     shutil.rmtree(_photo_dir(phid), ignore_errors=True)
-    db.ex("DELETE FROM photos WHERE id=?", (phid,))
-    _refresh(p)
     return {"ok": True}
 ```
 
@@ -1725,29 +1907,25 @@ def photo_delete(phid: int, u: dict = Depends(auth.require_user)):
     ref: bool | None = None
 ```
 
-`meas_create`: Die letzte Zeile `return _meas_public(db.q1("SELECT * FROM measurements WHERE id=?", (mid,)))` wird zu
-
-```python
-    _refresh(p)
-    return _meas_public(db.q1("SELECT * FROM measurements WHERE id=?", (mid,)))
-```
+`meas_create`: Das `mid = db.ex("""INSERT INTO measurements…""", …)` und ein anschließendes `_refresh(p)` kommen zusammen in `with db.atomic():`, danach unverändert `return _meas_public(db.q1("SELECT * FROM measurements WHERE id=?", (mid,)))`.
 
 `meas_patch`: direkt vor `if body.unc is not None:` einfügen:
 
 ```python
-    if m["source"] == "auto" and (body.points is not None or body.value is not None):
+    drop = None
+    if m["source"] == "auto" and (body.points is not None or body.value is not None or "kind" in sets):
         key = d.pop("auto_key", None)
         d.pop("auto_raw", None)
-        sets["source"] = "user" if body.points is not None else "manual"
-        if m["part_id"]:
-            parts.drop_key(m["part_id"], key)
+        sets["source"] = "manual" if body.value is not None and body.points is None else "user"
+        drop = (m["part_id"], key) if m["part_id"] else None
     if "part_id" in body.model_fields_set:
         if m["source"] == "auto" and "source" not in sets:
             raise HTTPException(400, "Automatische Maße gehören fest zu ihrem Teil.")
         if body.part_id == -1:
             d.pop("part_fixed", None)
         else:
-            if body.part_id is not None and not db.q1("SELECT id FROM parts WHERE id=? AND project_id=?", (body.part_id, p["id"])):
+            if body.part_id is not None and not db.q1("SELECT id FROM parts WHERE id=? AND project_id=?",
+                                                      (body.part_id, p["id"])):
                 raise HTTPException(400, "Teil gehört nicht zu diesem Projekt")
             sets["part_id"] = body.part_id
             d["part_fixed"] = True
@@ -1755,7 +1933,16 @@ def photo_delete(phid: int, u: dict = Depends(auth.require_user)):
         d["ref"] = bool(body.ref)
 ```
 
-Die bestehende Zeile `if m["source"] == "manual": sets["source"] = "user"` im Punkte-Zweig bleibt. Bei Auto-Maßen setzt der neue Block `sets["source"]` danach ohnehin. Am Ende von `meas_patch` vor `return`: `_refresh(p)`.
+Die bestehende Zeile `if m["source"] == "manual": sets["source"] = "user"` im Punkte-Zweig bleibt. Bei Auto-Maßen setzt der neue Block `sets["source"]` danach ohnehin. Im bestehenden `if body.clear_caliper:`-Zweig und im `elif body.caliper is not None:`-Zweig jeweils zusätzlich `d.pop("ref", None)`: Ein neuer oder geänderter Messschieber-Wert ist wieder Referenz, auch nach „Maßstab zurücksetzen“. Am Ende:
+
+```python
+    with db.atomic():
+        if drop:
+            parts.drop_key(*drop)  # erst hier: ein abgelehnter PATCH (400 oben) hinterlaesst nichts
+        db.ex(f"UPDATE measurements SET {cols} WHERE id=?", (*sets.values(), mid))
+        _refresh(p)
+    return _meas_public(db.q1("SELECT * FROM measurements WHERE id=?", (mid,)))
+```
 
 `meas_delete` ersetzen:
 
@@ -1763,14 +1950,15 @@ Die bestehende Zeile `if m["source"] == "manual": sets["source"] = "user"` im Pu
 @app.delete("/api/measurements/{mid}")
 def meas_delete(mid: int, u: dict = Depends(auth.require_user)):
     m, p = _own_meas(mid, u)
-    if m["source"] == "auto" and m["part_id"]:
-        parts.drop_key(m["part_id"], (db.jload(m["data"], {}) or {}).get("auto_key"))
-    db.ex("DELETE FROM measurements WHERE id=?", (mid,))
-    _refresh(p)
+    with db.atomic():
+        if m["source"] == "auto" and m["part_id"]:
+            parts.drop_key(m["part_id"], (db.jload(m["data"], {}) or {}).get("auto_key"))
+        db.ex("DELETE FROM measurements WHERE id=?", (mid,))
+        _refresh(p)
     return {"ok": True}
 ```
 
-`meas_accept_all`: `p = _own_project(pid, u)` statt `_own_project(pid, u)`, und vor `return` `_refresh(p)`.
+`meas_accept_all`: `p = _own_project(pid, u)` statt `_own_project(pid, u)`. Das `UPDATE` und `_refresh(p)` stehen zusammen in `with db.atomic():`.
 
 Neue Endpunkte nach `meas_discard`:
 
@@ -1779,14 +1967,17 @@ class PartIn(BaseModel):
     photo_id: int
     label: str = Field(default="", max_length=80)
     role: str = "body"
-    polygon: list[list[float]]
+    polygon: list[list[float]] = Field(min_length=3, max_length=64)
 
 
 class PartPatch(BaseModel):
     label: str | None = Field(default=None, max_length=80)
     role: str | None = None
-    polygon: list[list[float]] | None = None
+    polygon: list[list[float]] | None = Field(default=None, min_length=3, max_length=64)
     reset_scale: bool = False
+
+
+MAX_PARTS_PER_PHOTO = 12
 
 
 def _polygon(pts: list, photo: dict) -> list:
@@ -1810,32 +2001,43 @@ def part_create(pid: int, body: PartIn, u: dict = Depends(auth.require_user)):
     ph, pp = _own_photo(body.photo_id, u)
     if pp["id"] != pid:
         raise HTTPException(400, "Foto gehört zu einem anderen Projekt")
-    tid = parts.create_part(pid, ph["id"], body.label, body.role, _polygon(body.polygon, ph))
-    _refresh(p)
+    poly = _polygon(body.polygon, ph)
+    with db.atomic():
+        if db.q1("SELECT COUNT(*) n FROM parts WHERE photo_id=?", (ph["id"],))["n"] >= MAX_PARTS_PER_PHOTO:
+            raise HTTPException(400, f"Höchstens {MAX_PARTS_PER_PHOTO} Teile je Foto.")
+        tid = parts.create_part(pid, ph["id"], body.label, body.role, poly)
+        _refresh(p)
     return parts.part_public(db.q1("SELECT * FROM parts WHERE id=?", (tid,)))
 
 
 @app.patch("/api/parts/{part_id}")
 def part_patch(part_id: int, body: PartPatch, u: dict = Depends(auth.require_user)):
     t, p = _own_part(part_id, u)
+    poly = None
     if body.polygon is not None:
-        ph = db.q1("SELECT * FROM photos WHERE id=?", (t["photo_id"],))
-        parts.set_polygon(t, _polygon(body.polygon, ph))
-    if body.label is not None:
-        parts.rename(t, body.label)
-    if body.role in parts.ROLE_TEXT:
-        db.ex("UPDATE parts SET role=? WHERE id=?", (body.role, part_id))
-    if body.reset_scale:
-        parts.reset_scale(part_id)
-    _refresh(p)
+        poly = _polygon(body.polygon, db.q1("SELECT * FROM photos WHERE id=?", (t["photo_id"],)))
+    with db.atomic():
+        t = db.q1("SELECT * FROM parts WHERE id=?", (part_id,))  # frisch lesen: kein Wettlauf mit parallelem PATCH
+        if not t:
+            raise HTTPException(404, "Teil nicht gefunden")
+        if poly is not None:
+            parts.set_polygon(t, poly)
+        if body.label is not None:
+            parts.rename(t, body.label)
+        if body.role in parts.ROLE_TEXT:
+            db.ex("UPDATE parts SET role=? WHERE id=?", (body.role, part_id))
+        if body.reset_scale:
+            parts.reset_scale(part_id)
+        _refresh(p)
     return parts.part_public(db.q1("SELECT * FROM parts WHERE id=?", (part_id,)))
 
 
 @app.delete("/api/parts/{part_id}")
 def part_delete(part_id: int, u: dict = Depends(auth.require_user)):
     t, p = _own_part(part_id, u)
-    parts.delete_part(t)
-    _refresh(p)
+    with db.atomic():
+        parts.delete_part(t)
+        _refresh(p)
     return {"ok": True}
 ```
 
@@ -1851,7 +2053,7 @@ und `cells` am Ende um `f"T{seq[m['part_id']]}" if m["part_id"] in seq else "", 
 
 - [ ] **Step 5: Tests grün**
 
-Run: `/root/Snap2CAD-venv/bin/pytest -q tests/test_parts_api.py tests/test_parts.py tests/test_api.py && /root/Snap2CAD-venv/bin/ruff check .`
+Run: `/root/Snap2CAD-venv/bin/pytest -q && /root/Snap2CAD-venv/bin/ruff check .`
 Expected: PASS. `test_measurements_and_factors` deckt ab, dass sich nach dem Wegfall von `_recompute` beim Kontrollmaß nichts ändert.
 
 - [ ] **Step 6: Commit**
@@ -1867,13 +2069,14 @@ git commit -m "Teile speichern, Auto-Maße und Maßstab je Teil, Teil-Endpunkte"
 
 **Files:**
 - Modify: `web/app/ai.py` (`import math`, `PARTS_SYSTEM`, `parse_parts`, `_fake`)
-- Modify: `web/app/parts.py` (`candidate_image`, `candidate_text`, `ai_parts`, `outline_parts`, `DETECT_LOCK`)
+- Modify: `web/app/parts.py` (`candidate_text`, `ai_parts`, `outline_parts`)
 - Modify: `web/app/main.py` (`_ai_uses_today`, `meas_suggest`, `POST /api/photos/{phid}/edges`, `GET /api/photos/{phid}/edges.json`)
 - Create: `tests/test_edges_api.py`
 
 **Interfaces:**
 - Consumes: `edges.detect`, `parts.snap_polygon`, `parts.assign_holes`, `parts.replace_detected`, `parts.refresh`, `parts.public_list`.
-- Produces: `ai.PARTS_SYSTEM: str`, `ai.parse_parts(text) -> list[{"label", "role", "polygon", "edges", "note"}]`; `parts.ai_parts(photo_dir: Path, res: dict) -> list[dict]`, `parts.outline_parts(res) -> list[dict]`, `parts.DETECT_LOCK: threading.Semaphore`; `POST /api/photos/{phid}/edges` → `{"parts": [...], "segments": [...], "notice": str}`.
+- Consumes: `edges.draw_candidates` (Task 3).
+- Produces: `ai.PARTS_SYSTEM: str`, `ai.parse_parts(text) -> list[{"label", "role", "polygon", "edges", "note"}]`, `ai._json_array(text, what) -> list` (gemeinsam mit `parse_suggestions`); `parts.ai_parts(photo_dir: Path, res: dict) -> list[dict]`, `parts.outline_parts(res) -> list[dict]`; `main._detect_lock: threading.Semaphore`; `POST /api/photos/{phid}/edges` → `{"parts": [...], "segments": [...], "notice": str}` (409 bei Fotoänderung während der Erkennung, 422 ohne Objekt, 429 wenn belegt).
 
 - [ ] **Step 1: Failing Tests** – `tests/test_edges_api.py`:
 
@@ -1923,7 +2126,7 @@ def test_erkennung_testmodus(two):
     assert c.get(f"/api/photos/{phid}/edges.json").json()["segments"] == res["segments"]
 
 
-def test_zwei_teile_und_cad_tabelle(two, monkeypatch):
+def test_zwei_teile(two, monkeypatch):
     c, pid, phid = two
     _ki(monkeypatch, KI_ZWEI)
     res = c.post(f"/api/photos/{phid}/edges", json={}, headers=H).json()
@@ -1933,9 +2136,48 @@ def test_zwei_teile_und_cad_tabelle(two, monkeypatch):
     assert pl["rect"] and pl["size"] == pytest.approx([80, 20], abs=0.6) and len(pl["holes"]) == 1
     p = c.get(f"/api/projects/{pid}").json()
     assert {m["part_id"] for m in p["measurements"] if m["source"] == "auto"} == {q["id"], pl["id"]}
-    from app import jobs
-    _, rows = jobs.measurement_table(pid, pl["id"])
-    assert rows and all(m["part_id"] != q["id"] for m in rows)
+
+
+def test_erneute_erkennung_ohne_ki_laesst_teile(two, monkeypatch):
+    c, pid, phid = two
+    _ki(monkeypatch, KI_ZWEI)
+    first = c.post(f"/api/photos/{phid}/edges", json={}, headers=H).json()["parts"]
+    _ki(monkeypatch, "kein json")
+    res = c.post(f"/api/photos/{phid}/edges", json={}, headers=H).json()
+    assert [p["id"] for p in res["parts"]] == [p["id"] for p in first] and "unverändert" in res["notice"]
+    res = c.post(f"/api/photos/{phid}/edges", json={"use_ai": False}, headers=H).json()
+    assert [p["id"] for p in res["parts"]] == [p["id"] for p in first]
+
+
+def test_ohne_ki_und_handteil_bleibt(two):
+    c, pid, phid = two
+    hand = c.post(f"/api/projects/{pid}/parts", json={"photo_id": phid, "label": "Hand",
+                                                      "polygon": [[5, 150], [30, 150], [30, 170]]}, headers=H).json()
+    res = c.post(f"/api/photos/{phid}/edges", json={"use_ai": False}, headers=H).json()
+    assert sorted(p["label"] for p in res["parts"]) == ["Hand", "Teil"] and res["notice"] == ""
+    assert hand["id"] in [p["id"] for p in res["parts"]]
+
+
+def test_erkennung_belegt_429(two):
+    c, pid, phid = two
+    from app import main
+    assert main._detect_lock.acquire(blocking=False)
+    try:
+        r = c.post(f"/api/photos/{phid}/edges", json={}, headers=H)
+        assert r.status_code == 429 and "belegt" in r.json()["detail"]
+    finally:
+        main._detect_lock.release()
+
+
+def test_fremder_nutzer_keine_erkennung(two, app, admin):
+    from fastapi.testclient import TestClient
+    c, pid, phid = two
+    tok = admin.post("/api/admin/invites", json={"role": "user", "days": 1}, headers=H).json()["link"].rsplit("/", 1)[1]
+    f = TestClient(app)
+    assert f.post(f"/api/invite/{tok}", json={"username": f"fremdk{pid}", "display_name": "Fremd",
+                                              "password": "Schieblehre-Messing-7"}, headers=H).status_code == 200
+    assert f.post(f"/api/photos/{phid}/edges", json={}, headers=H).status_code == 404
+    assert f.get(f"/api/photos/{phid}/edges.json").status_code == 404
 
 
 def test_erneute_erkennung_behaelt_massstab(two, monkeypatch):
@@ -1957,6 +2199,13 @@ def test_ki_unbrauchbar(two, monkeypatch):
     _ki(monkeypatch, 'Hier: [{"label": "x", "polygon": [[1, 2], [3, "a"]]}, 5, {"polygon": [[0, 0], [1, 1]]}]')
     res = c.post(f"/api/photos/{phid}/edges", json={}, headers=H).json()
     assert [p["label"] for p in res["parts"]] == ["Teil"] and "keine Teile" in res["notice"]
+    _ki(monkeypatch, json.dumps([{"label": "riesig", "polygon": [[0, 0], [5000, 0], [0, 5000]]}]))
+    res = c.post(f"/api/photos/{phid}/edges", json={}, headers=H).json()
+    assert [p["label"] for p in res["parts"]] == ["Teil"] and "keine Teile" in res["notice"]
+
+
+def test_ki_fehler_beim_ersten_lauf(two, monkeypatch):
+    c, pid, phid = two
     _ki(monkeypatch, "kein json")
     res = c.post(f"/api/photos/{phid}/edges", json={}, headers=H).json()
     assert "KI-Zuordnung fehlgeschlagen" in res["notice"] and len(res["parts"]) == 1
@@ -2015,22 +2264,30 @@ role ist "body" (Grundkörper) oder "mounted" (montiertes Teil). edges = die Kan
 Höchstens 6 Teile, je 3 bis 32 Punkte."""
 ```
 
-Nach `parse_suggestions` einfügen:
+Vor `parse_suggestions` einen gemeinsamen Helfer einfügen und `parse_suggestions` darauf umstellen. Dessen ersten Block (`t = text.strip()` bis `raise AIError("Die Vorschlagsliste war kein gültiges JSON.") from e`) durch `items = _json_array(text, "Vorschlagsliste")` ersetzen; die Meldungen bleiben gleich:
 
 ```python
-def parse_parts(text: str) -> list[dict]:
-    """Teileliste der KI defensiv lesen (Spec §2): unbrauchbare Eintraege werden verworfen."""
+def _json_array(text: str, what: str) -> list:
+    """JSON-Array aus einer KI-Antwort (auch in einem Codeblock oder mit Text drumherum)."""
     t = text.strip()
     m = _BLOCK.search(t)
     if m:
         t = m.group(2)
     i, j = t.find("["), t.rfind("]")
     if i < 0 or j < i:
-        raise AIError("Die Antwort enthielt keine Teileliste.")
+        raise AIError(f"Die Antwort enthielt keine {what}.")
     try:
-        items = json.loads(t[i:j + 1])
+        return json.loads(t[i:j + 1])
     except ValueError as e:
-        raise AIError("Die Teileliste war kein gültiges JSON.") from e
+        raise AIError(f"Die {what} war kein gültiges JSON.") from e
+```
+
+Nach `parse_suggestions` einfügen:
+
+```python
+def parse_parts(text: str) -> list[dict]:
+    """Teileliste der KI defensiv lesen (Spec §2): unbrauchbare Eintraege werden verworfen."""
+    items = _json_array(text, "Teileliste")
     out = []
     for it in items if isinstance(items, list) else []:
         if not isinstance(it, dict):
@@ -2065,12 +2322,9 @@ In `_fake` vor `if system == SUGGEST_SYSTEM:` einfügen:
         return json.dumps([{"label": "Quader", "role": "body", "polygon": pts, "edges": [], "note": "Testmodus"}]), usage
 ```
 
-- [ ] **Step 4: `parts.py` erweitern** – Importe ergänzen (`import threading`, `import cv2`, `from . import ai, db, geom`) und anhängen:
+- [ ] **Step 4: `parts.py` erweitern** – Importe ergänzen (`import cv2`, Importzeile `from . import ai, db, geom`; `core` wird erst in `candidate_image` importiert, weil `main.py` `sys.path` erst nach den App-Importen setzt) und anhängen:
 
 ```python
-DETECT_LOCK = threading.Semaphore(1)  # nur um den OpenCV-Teil, nicht um den KI-Aufruf (Spec §7)
-
-
 def outline_parts(res):
     """Ohne KI: jeder Umriss wird ein Teil, Bohrungen zum kleinsten umgebenden Teil."""
     out = [{"label": "Teil", "role": "body", "polygon": o["polygon"], "hidden": [False] * len(o["polygon"]), "source": "auto"}
@@ -2080,18 +2334,9 @@ def outline_parts(res):
 
 
 def candidate_image(photo_dir, res):
-    """Draufsicht mit eingezeichneten, nummerierten Kandidaten fuer die KI."""
-    img = cv2.imread(str(photo_dir / "rect.jpg"))
-    px = res["px_per_mm"]
-    gh = img.shape[0] / px
-    colors = [(178, 111, 31), (12, 85, 194), (46, 125, 79), (150, 40, 160)]
-    P = lambda q: (int(round(q[0] * px)), int(round((gh - q[1]) * px)))  # noqa: E731
-    for i, s in enumerate(res["segments"]):
-        a, b, col = P(s["a"]), P(s["b"]), colors[i % len(colors)]
-        cv2.line(img, a, b, col, 4, cv2.LINE_AA)
-        mid = ((a[0] + b[0]) // 2 + 6, (a[1] + b[1]) // 2 - 6)
-        cv2.putText(img, s["id"], mid, cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 5, cv2.LINE_AA)
-        cv2.putText(img, s["id"], mid, cv2.FONT_HERSHEY_SIMPLEX, 1.0, col, 2, cv2.LINE_AA)
+    """Kandidatenbild fuer die KI als edges_ki.jpg im Fotoordner (Zeichnen in core.edges)."""
+    from core import edges as core_edges  # spaet: main.py setzt sys.path erst nach den App-Importen
+    img = core_edges.draw_candidates(cv2.imread(str(photo_dir / "rect.jpg")), res)
     out = photo_dir / "edges_ki.jpg"
     cv2.imwrite(str(out), img, [cv2.IMWRITE_JPEG_QUALITY, 88])
     return out
@@ -2126,10 +2371,11 @@ def ai_parts(photo_dir, res):
 
 - [ ] **Step 5: `main.py` – Tageslimit und Endpunkte**
 
-Importzeile um `edges` aus `core` ergänzen (`from core import edges, matgen, vision`, an die bestehende `core`-Importzeile anpassen). Unter `_usage` einfügen:
+Die bestehende Zeile `from core import matgen, vision  # noqa: E402` wird zu `from core import edges, matgen, vision  # noqa: E402`. `json`, `cv2`, `threading` (falls nicht vorhanden, ergänzen; `_preview_lock` deutet darauf hin), `datetime` und `timezone` sind schon importiert. Unter `_usage` einfügen:
 
 ```python
 AI_DAILY_LIMIT = 30
+_detect_lock = threading.Semaphore(1)  # nur um den OpenCV-Teil, nicht um den KI-Aufruf (Spec §7)
 
 
 def _ai_uses_today(u: dict) -> int:
@@ -2166,30 +2412,50 @@ class EdgesIn(BaseModel):
 def photo_edges(phid: int, body: EdgesIn, request: Request, u: dict = Depends(auth.require_user)):
     ph, p = _own_photo(phid, u)
     d = _photo_dir(phid)
-    if not (d / "rect.jpg").is_file() or ph["format"] not in matgen.FORMATS:
+    rect = (db.jload(ph["analysis"], {}) or {}).get("rect")
+    if not rect or not (d / "rect.jpg").is_file() or ph["format"] not in matgen.FORMATS:
         raise HTTPException(400, "Für dieses Foto gibt es keine entzerrte Draufsicht.")
     img = cv2.imread(str(d / "rect.jpg"))
-    with parts.DETECT_LOCK:
+    if img is None:
+        raise HTTPException(400, "Die Draufsicht ist nicht lesbar.")
+    if not _detect_lock.acquire(blocking=False):
+        raise HTTPException(429, "Kantenerkennung ist gerade belegt – bitte gleich erneut versuchen.")
+    try:
         res = edges.detect(img, ph["format"])
+    finally:
+        _detect_lock.release()
     if not res["outlines"]:
         raise HTTPException(422, "Kein Objekt erkannt – Teil von Hand zeichnen.")
-    (d / "edges.json").write_text(json.dumps(res), encoding="utf-8")
-    notice, detected = "", []
+
+    def inside(poly):
+        return all(-10 <= q[0] <= rect["w_mm"] + 10 and -10 <= q[1] <= rect["h_mm"] + 10 for q in poly)
+    notice, detected, ai_failed = "", [], False
     if body.use_ai and settings.ai_enabled():
         if u["role"] != "admin" and _ai_uses_today(u) >= AI_DAILY_LIMIT:
-            notice = f"Tageslimit für KI erreicht ({AI_DAILY_LIMIT}) – Teile nur aus dem Umriss."
+            notice, ai_failed = f"Tageslimit für KI erreicht ({AI_DAILY_LIMIT}) – Teile nur aus dem Umriss.", True
         else:
             db.audit("edges_ai", f"Foto {phid}", user_id=u["id"], actor=u["username"], ip=auth.client_ip(request))
             try:
-                detected = parts.ai_parts(d, res)
+                detected = [x for x in parts.ai_parts(d, res) if inside(x["polygon"])]
                 if not detected:
-                    notice = "Die KI hat keine Teile erkannt – Teile nur aus dem Umriss."
+                    notice, ai_failed = "Die KI hat keine Teile erkannt – Teile nur aus dem Umriss.", True
             except ai.AIError as e:
-                notice = f"KI-Zuordnung fehlgeschlagen: {e} – Teile nur aus dem Umriss."
-    if not detected:
-        detected = parts.outline_parts(res)
-    parts.replace_detected(p["id"], phid, detected)
-    _refresh(p)
+                notice, ai_failed = f"KI-Zuordnung fehlgeschlagen: {e} – Teile nur aus dem Umriss.", True
+    with db.atomic():
+        cur = db.q1("SELECT format FROM photos WHERE id=?", (phid,))
+        if not cur or cur["format"] != ph["format"]:
+            raise HTTPException(409, "Das Foto wurde während der Erkennung geändert – bitte erneut erkennen.")
+        has_parts = bool(db.q1("SELECT 1 FROM parts WHERE photo_id=? AND source!='user'", (phid,)))
+        if not detected and has_parts:
+            # ohne KI-Ergebnis vorhandene Teile nicht durch den Gesamtumriss ersetzen (sonst zerfaellt z. B. Quader + Platte)
+            notice = notice.replace("Teile nur aus dem Umriss.", "vorhandene Teile bleiben unverändert.") if notice \
+                else "Ohne KI wurden nur die Kanten aktualisiert; vorhandene Teile bleiben unverändert."
+        else:
+            parts.replace_detected(p["id"], phid, detected or parts.outline_parts(res))
+        _refresh(p)
+        tmp = d / "edges.json.tmp"  # innerhalb von atomic: kein zweiter Lauf und kein Loeschen dazwischen
+        tmp.write_text(json.dumps(res), encoding="utf-8")
+        os.replace(tmp, d / "edges.json")
     return {"parts": [t for t in parts.public_list(p["id"]) if t["photo_id"] == phid], "segments": res["segments"],
             "notice": notice}
 
@@ -2203,11 +2469,13 @@ def photo_edges_get(phid: int, u: dict = Depends(auth.require_user)):
     return json.loads(f.read_text(encoding="utf-8"))
 ```
 
-Prüfen, ob `json` und `cv2` in `main.py` schon importiert sind (`grep -n "^import" web/app/main.py`), und fehlende Importe ergänzen.
+`os` und `threading` sind in `main.py` schon importiert.
+
+Hinweis zu `test_erneute_erkennung_ohne_ki_laesst_teile`: Der dritte Lauf mit `use_ai: false` findet Teile vor und lässt sie stehen; der Hinweis ist „Ohne KI wurden nur die Kanten aktualisiert …“. `test_ohne_ki_und_handteil_bleibt`: Ein Handteil zählt nicht als „vorhandene Teile“ (`source!='user'`), also entsteht das Umriss-Teil, und das Handteil bleibt (Task 5, `replace_detected`).
 
 - [ ] **Step 6: Tests grün**
 
-Run: `/root/Snap2CAD-venv/bin/pytest -q tests/test_edges_api.py tests/test_api.py && /root/Snap2CAD-venv/bin/ruff check .`
+Run: `/root/Snap2CAD-venv/bin/pytest -q && /root/Snap2CAD-venv/bin/ruff check .`
 Expected: PASS. `test_claude_suggestions` muss weiter grün sein, also bleibt das Tageslimit für Vorschläge gleich.
 
 - [ ] **Step 7: Commit**
@@ -2223,6 +2491,7 @@ git commit -m "Kanten erkennen: OpenCV-Kandidaten, KI-Teile-Zuordnung mit Einras
 
 **Files:**
 - Modify: `web/app/jobs.py` (`measurement_table`, `build_initial_message`)
+- Modify: `web/app/ai.py:25-26` (`CAD_SYSTEM`, Abschnitt „Eingaben“)
 - Modify: `web/app/parts.py` (`cad_text`)
 - Modify: `web/app/main.py` (`JobIn`, `job_create`)
 - Modify: `web/static/js/cad.js` (`form`)
@@ -2243,12 +2512,19 @@ def test_cad_auftrag_fuer_ein_teil(two, monkeypatch, user):
     project = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
     msg = jobs.build_initial_message(project, "Platte nachbauen", {"part_id": pl["id"], "name": "P"})
     text = msg[0]["content"][0]["text"]
-    assert "Modelliert wird nur Teil T2 „Platte“ (montiertes Teil)" in text and "| Teil |" in text and "| Messschieber |" in text
+    assert "Modelliert wird nur Teil T2 „Platte“ (montiertes Teil)" in text
+    assert "| Teil |" in text and "| Messschieber |" in text
     alle = jobs.build_initial_message(project, "alles", {"name": "A"})[0]["content"][0]["text"]
     assert "Teile im Foto: T1 Quader (Grundkörper), T2 Platte (montiertes Teil)" in alle
+    _, rows = jobs.measurement_table(pid, pl["id"])
+    assert rows and all(m["part_id"] != q["id"] for m in rows)
     other = user.post("/api/projects", json={"name": "x"}, headers=H).json()["id"]
     bad = c.post("/api/jobs", json={"project_id": other, "name": "x", "request": "x", "part_id": pl["id"]}, headers=H)
     assert bad.status_code == 400
+    r = c.post("/api/jobs", json={"project_id": pid, "name": "P", "request": "Platte", "part_id": pl["id"]}, headers=H)
+    assert r.status_code == 200, r.text
+    t = json.loads(db.q1("SELECT messages FROM jobs WHERE id=?", (r.json()["id"],))["messages"])[0]["content"][0]["text"]
+    assert "Modelliert wird nur Teil T2" in t and "| T1 |" not in t
 ```
 
 Achtung: `user` und `two` sind dieselbe Fixture-Instanz (`two` nutzt `user`). `other` gehört also demselben Nutzer und ist trotzdem ein anderes Projekt.
@@ -2287,7 +2563,8 @@ def measurement_table(project_id: int, part_id: int | None = None) -> tuple[str,
     if part_id is not None:
         rows = [m for m in rows if m["part_id"] in (part_id, None)]
     seq = {t["id"]: t["seq"] for t in db.q("SELECT id, seq FROM parts WHERE project_id=?", (project_id,))}
-    lines = ["| ID | Bezeichnung | Teil | Art | Wert | ± | Messschieber | Nennmaß | kritisch | Passung | Quelle | Ansicht/Punkte (mm) |",
+    lines = ["| ID | Bezeichnung | Teil | Art | Wert | ± | Messschieber | Nennmaß | kritisch | Passung | Quelle "
+             "| Ansicht/Punkte (mm) |",
              "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for m in rows:
         d = db.jload(m["data"], {}) or {}
@@ -2311,6 +2588,14 @@ In `build_initial_message`: `table, rows = measurement_table(project["id"])` →
 ```
 
 Damit steht der Teile-Hinweis direkt unter „## Messwerte“ und vor der Tabelle.
+
+`web/app/ai.py`, `CAD_SYSTEM` Zeilen 25–26 ersetzen durch:
+
+```
+- Eine Messtabelle (IDs M1, M2 …) mit Messwert, Unsicherheit, optionalem Messschieber-Wert, Nennmaß-Vorschlag,
+  Teil (T1, T2 …), Passung und Kennzeichnung „kritisch“. Ein Messschieber-Wert hat immer Vorrang vor dem Fotowert;
+  das Nennmaß ist nur ein Vorschlag, Regel 2 gilt weiter.
+```
 
 `web/app/main.py`: `JobIn` um `part_id: int | None = None` ergänzen. In `job_create` nach `project = …`:
 
@@ -2358,13 +2643,13 @@ und im Options-Dict `"part_id": body.part_id,` ergänzen.
 
 - [ ] **Step 4: Tests grün**
 
-Run: `/root/Snap2CAD-venv/bin/pytest -q tests/test_edges_api.py tests/test_api.py && /root/Snap2CAD-venv/bin/ruff check . && node --check web/static/js/cad.js`
+Run: `/root/Snap2CAD-venv/bin/pytest -q && /root/Snap2CAD-venv/bin/ruff check . && node --check web/static/js/cad.js`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add web/app/jobs.py web/app/parts.py web/app/main.py web/static/js/cad.js tests/test_edges_api.py
+git add web/app/jobs.py web/app/parts.py web/app/main.py web/app/ai.py web/static/js/cad.js tests/test_edges_api.py
 git commit -m "CAD-Auftrag für ein gewähltes Teil, Maßtabelle mit Teil und Nennmaß"
 ```
 
@@ -2374,7 +2659,7 @@ git commit -m "CAD-Auftrag für ein gewähltes Teil, Maßtabelle mit Teil und Ne
 
 **Files:**
 - Create: `web/static/js/edges.js`
-- Modify: `web/static/js/measure.js`, `web/static/js/lib.js` (`ICONS.edges`)
+- Modify: `web/static/js/measure.js`, `web/static/js/lib.js` (`ICONS.edges`), `web/static/css/app.css` (`.src-part`)
 
 **Interfaces:**
 - Consumes: `GET /api/projects/{pid}` (`parts`, `measurements[].part_id`, `data.auto_key|raw|nominal|warn|ref_warn|ref|part_fixed`), `POST /api/photos/{id}/edges`, `GET /api/photos/{id}/edges.json`, `POST /api/projects/{pid}/parts`, `PATCH/DELETE /api/parts/{id}`, `PATCH /api/measurements/{id}` (`part_id`, `ref`).
@@ -2384,6 +2669,12 @@ git commit -m "CAD-Auftrag für ein gewähltes Teil, Maßtabelle mit Teil und Ne
 
 ```js
   edges: '<path d="M4 18L7 5l11 2 2 11z"/><circle cx="4" cy="18" r="1.6" fill="currentColor"/><circle cx="7" cy="5" r="1.6" fill="currentColor"/><circle cx="18" cy="7" r="1.6" fill="currentColor"/><circle cx="20" cy="18" r="1.6" fill="currentColor"/>',
+```
+
+In `web/static/css/app.css` nach der Zeile mit `.src-claude{…}` (Zeile 213) einfügen:
+
+```css
+.src-part{font-size:11px;font-weight:600;padding:1px 6px;border-radius:3px;color:#fff;margin-left:6px}
 ```
 
 - [ ] **Step 2: `web/static/js/edges.js` anlegen**
@@ -2396,7 +2687,7 @@ import { S, reloadProject } from "./app.js";
 export const PART_COLORS = ["#0F766E", "#7C3AED", "#B45309", "#BE185D", "#4D7C0F", "#0369A1"];
 export const partColor = p => PART_COLORS[(p.seq - 1) % PART_COLORS.length];
 export const ROLE = { body: "Grundkörper", mounted: "montiertes Teil" };
-const HANDLE = 7;
+const HANDLE = 7, DARK = "#17212B";
 const r3 = v => Math.round(v * 1000) / 1000;
 
 export function segDist(p, a, b) {
@@ -2429,7 +2720,7 @@ function plus(ctx, [x, y], col) {
 // env: { ctx(), scr(ix, iy), toPX(X, Y), cursorMM() -> [X, Y] | null, photoId() -> id | null, active() -> bool,
 //        redraw(), changed(), selectPart(id) }
 export function createPartsLayer(env) {
-  let sel = null, vtx = null, drag = null, drawing = null, segments = [];
+  let sel = null, vtx = null, drag = null, drawing = null, segments = [], busy = false;
   const list = () => (env.photoId() ? (S.project.parts || []).filter(p => p.photo_id === env.photoId()) : []);
   const P = q => env.scr(...env.toPX(q[0], q[1]));
   const selPart = () => list().find(p => p.id === sel) || null;
@@ -2474,9 +2765,9 @@ export function createPartsLayer(env) {
     if (drawing) {
       const pts = drawing.map(P), cur = env.cursorMM();
       if (cur) pts.push(P(cur));
-      ctx.setLineDash([]); ctx.strokeStyle = "#17212B"; ctx.lineWidth = 1.8;
+      ctx.setLineDash([]); ctx.strokeStyle = DARK; ctx.lineWidth = 1.8;
       ctx.beginPath(); pts.forEach((q, i) => (i ? ctx.lineTo(...q) : ctx.moveTo(...q))); ctx.stroke();
-      ctx.fillStyle = "#17212B";
+      ctx.fillStyle = DARK;
       drawing.map(P).forEach(q => { ctx.beginPath(); ctx.arc(q[0], q[1], 4, 0, 7); ctx.fill(); });
     }
     ctx.restore();
@@ -2507,10 +2798,12 @@ export function createPartsLayer(env) {
     return best?.p || null;
   }
   function select(id) { sel = id; vtx = null; env.selectPart?.(id); env.redraw(); }
-  async function save(id, body) {
-    try { await api(`/api/parts/${id}`, { method: "PATCH", body }); }
-    catch (e) { fail(e); }
-    await reloadProject().catch(() => {});
+  async function save(id, body) {  // busy: kein zweites Ziehen auf veraltetem Stand, bis neu geladen ist
+    busy = true;
+    try {
+      try { await api(`/api/parts/${id}`, { method: "PATCH", body }); } catch (e) { fail(e); }
+      await reloadProject().catch(() => {});
+    } finally { busy = false; }
     env.changed();
   }
   async function finishNew() {
@@ -2524,7 +2817,7 @@ export function createPartsLayer(env) {
 
   // Zeiger: down() liefert true, wenn die Ebene das Ziehen uebernimmt (Eckpunkt oder Griff „+“)
   function down(sx, sy) {
-    if (drawing) return false;
+    if (drawing || busy) return false;
     const v = hitVertex(sx, sy);
     if (v) { vtx = v.i; drag = { id: v.part.id, i: v.i, poly: v.part.polygon.map(q => [...q]), moved: false, sx, sy }; env.redraw(); return true; }
     const pl = hitPlus(sx, sy);
@@ -2560,6 +2853,7 @@ export function createPartsLayer(env) {
   // Tasten nur im Werkzeug „Kanten“; true = verarbeitet
   function key(e) {
     const k = e.key;
+    if (busy && (k === "Delete" || k === "Backspace")) return true;
     if (drawing) {
       if (k === "Escape") { drawing = null; env.redraw(); return true; }
       if (k === "Enter") { finishNew(); return true; }
@@ -2616,20 +2910,21 @@ export function partsPanel({ photoId, selected, onSelect, onNew, onChanged }) {
       h("span", { class: "msub" }, ROLE[p.role],
         scaled ? h("span", {}, ` · Maßstab × ${num(p.scale, 3)}${p.refs.length ? ` aus ${p.refs.join(", ")}` : ""} `,
           h("button", { class: "btn sm ghost", style: { minHeight: "24px", padding: "0 6px" }, onclick: e => { e.stopPropagation(); patchPart(p, { reset_scale: true }); } }, "Zurücksetzen")) : null),
-      p.warn ? h("span", { class: "msub", style: { color: "#8A5A00" } }, p.warn) : null,
+      p.warn ? h("span", { class: "msub", style: { color: "var(--warn)" } }, p.warn) : null,
       isSel ? editor(p) : null);
   });
   return h("div", { style: { display: "flex", flexDirection: "column", gap: "8px" } },
     h("div", { class: "card-head" }, h("h2", { id: "t-h" }, "Teile ", h("span", { class: "muted", style: { fontWeight: 400 } }, `(${ps.length})`)),
       h("button", { class: "btn sm", onclick: onNew, disabled: !photoId }, icon("plus", 16), "Neues Teil")),
     ps.length ? h("ul", { class: "mlist", "aria-labelledby": "t-h" }, items)
-      : h("p", { class: "xs muted", style: { margin: 0 } }, photoId ? "Noch keine Teile. „Kanten erkennen“ oder „Neues Teil“ zeichnen." : "Teile gibt es nur auf einer Draufsicht."));
+      : h("p", { class: "xs muted", style: { margin: 0 } }, photoId ? "Noch keine Teile. „Kanten erkennen“ oder „Neues Teil“ zeichnen." : "Teile gibt es nur auf einer Draufsicht."),
+    photoId ? h("p", { class: "xs muted", style: { margin: 0 } }, "Grenzen: Weiße Teile auf weißem Papier und harte Schlagschatten verfälschen den Umriss – dann die Eckpunkte von Hand korrigieren.") : null);
 }
 ```
 
 - [ ] **Step 3: `measure.js` anbinden** – Änderungen in dieser Reihenfolge:
 
-1. Importe: Zeile 2 um `reloadProject` ist schon da. Nach Zeile 4 einfügen:
+1. Importe: `reloadProject` ist in Zeile 3 schon importiert. Nach Zeile 4 einfügen:
 
 ```js
 import { createPartsLayer, partsPanel, partColor, segDist } from "./edges.js";
@@ -2677,6 +2972,8 @@ import { createPartsLayer, partsPanel, partColor, segDist } from "./edges.js";
     if (tool === "edges" && e.button === 0) { updateCursor(e); if (layer.down(...evPos(e))) { edgeDrag = true; return; } }
 ```
 
+   Im Pinch-Block (`if (pointers.size === 2) {…}`) vor `dragStart = null; return;` einfügen: `if (edgeDrag) { edgeDrag = false; layer.cancel(); }`.
+
 11. `pointermove`: nach dem Pinch-Block (`if (pinch && pointers.size === 2) {…}`) einfügen:
 
 ```js
@@ -2686,7 +2983,7 @@ import { createPartsLayer, partsPanel, partColor, segDist } from "./edges.js";
 12. `endPointer`: nach `if (pointers.size < 2) pinch = null;` einfügen:
 
 ```js
-    if (edgeDrag) { edgeDrag = false; layer.up(); return; }
+    if (edgeDrag) { edgeDrag = false; if (e.type === "pointercancel") layer.cancel(); else layer.up(); return; }
 ```
 
 13. `click(e)`: nach `if (!img || !cursor) return;` einfügen:
@@ -2721,10 +3018,11 @@ import { createPartsLayer, partsPanel, partColor, segDist } from "./edges.js";
     const partOf = m => (S.project.parts || []).find(p => p.id === m.part_id);
 ```
 
-   Im Listeneintrag nach `m.source === "claude" ? h("span", { class: "src-claude" }, "KI") : null` einfügen:
+   Im Listeneintrag `m.source === "claude" ? h("span", { class: "src-claude" }, "KI") : null),` ersetzen durch (Komma beachten, die schließende Klammer wandert ans Ende):
 
 ```js
-          partOf(m) ? h("span", { class: "crit", style: { background: partColor(partOf(m)), color: "#fff" } }, partOf(m).id_label) : null
+          m.source === "claude" ? h("span", { class: "src-claude" }, "KI") : null,
+          partOf(m) ? h("span", { class: "src-part", style: { background: partColor(partOf(m)) } }, partOf(m).id_label) : null),
 ```
 
    Den Wert-Span (`h("span", { class: "mval" }, m.caliper != null ? … : fmtValue(m)),`) ersetzen durch:
@@ -2738,7 +3036,7 @@ import { createPartsLayer, partsPanel, partColor, segDist } from "./edges.js";
    Nach dem `msub`-Span einfügen:
 
 ```js
-        m.data?.ref_warn || m.data?.warn ? h("span", { class: "msub", style: { color: "#8A5A00" } }, m.data.ref_warn || m.data.warn) : null,
+        m.data?.ref_warn || m.data?.warn ? h("span", { class: "msub", style: { color: "var(--warn)" } }, m.data.ref_warn || m.data.warn) : null,
 ```
 
 18. `editPanel(m)`: vor `const panel = h("div", { class: "medit", …` einfügen:
@@ -2771,11 +3069,13 @@ import { createPartsLayer, partsPanel, partColor, segDist } from "./edges.js";
     if (!src || src.view !== "top") { toast("Kanten lassen sich nur auf einer Draufsicht erkennen", "err"); return; }
     if ((S.project.parts || []).some(p => p.photo_id === src.photo.id) &&
       !await confirmDlg("Kanten neu erkennen?", "Teile dieses Fotos werden neu erkannt. Wiedergefundene Teile behalten Bezeichnung und Messschieber-Referenzen.", "Neu erkennen")) return;
-    const old = [...edgeBtn.childNodes];
+    const old = [...edgeBtn.childNodes], phid = src.photo.id;
     clear(edgeBtn, h("span", { class: "spin" }), "Kanten werden erkannt …"); edgeBtn.disabled = true;
     try {
-      const r = await api(`/api/photos/${src.photo.id}/edges`, { method: "POST", body: { use_ai: true } });
-      await reloadProject(); layer.setSegments(r.segments); setTool("edges"); renderList(); dirty = true;
+      const r = await api(`/api/photos/${phid}/edges`, { method: "POST", body: { use_ai: true } });
+      await reloadProject();
+      if (src?.photo.id === phid) { layer.setSegments(r.segments); setTool("edges"); }
+      renderList(); dirty = true;
       toast(r.notice || `${r.parts.length} Teil${r.parts.length === 1 ? "" : "e"} erkannt`, r.notice ? "" : "ok");
     } catch (e) { fail(e); } finally { clear(edgeBtn, ...old); edgeBtn.disabled = false; }
   }
@@ -2789,7 +3089,7 @@ Expected: keine Syntaxfehler, Tests grün. Der Text-Test ist wichtig: In den neu
 - [ ] **Step 5: Commit**
 
 ```bash
-git add web/static/js/edges.js web/static/js/measure.js web/static/js/lib.js
+git add web/static/js/edges.js web/static/js/measure.js web/static/js/lib.js web/static/css/app.css
 git commit -m "Messen: Kanten erkennen, Teile zeichnen und bearbeiten, Teil-Zuordnung und Referenz"
 ```
 
@@ -2802,8 +3102,8 @@ git commit -m "Messen: Kanten erkennen, Teile zeichnen und bearbeiten, Teil-Zuor
 
 - [ ] **Step 1: Volle Suite und Lint**
 
-Run: `cd /root/Snap2CAD && /root/Snap2CAD-venv/bin/pytest -q -n 0 2>&1 | tail -5; /root/Snap2CAD-venv/bin/ruff check . && for f in web/static/js/*.js; do node --check "$f"; done`
-Expected: alle Tests grün. Ohne pytest-xdist ist `-n 0` unbekannt, dann einfach weglassen.
+Run: `cd /root/Snap2CAD && /root/Snap2CAD-venv/bin/pytest -q && /root/Snap2CAD-venv/bin/ruff check . && for f in web/static/js/*.js; do node --check "$f" || exit 1; done`
+Expected: alle Tests grün. Danach in der Spec die Nachweis-Spalte der Abnahmekriterien an die echten Testdateien angleichen (siehe Global Constraints) und das mit committen.
 
 - [ ] **Step 2: App lokal im Testmodus starten** (Hintergrund)
 
@@ -2826,34 +3126,45 @@ cd /root/Snap2CAD/web && DATA_DIR=$SCRATCH/data RUNS_DIR=$SCRATCH/runs AI_FAKE=1
 
   Gefundene Fehler mit `superpowers:systematic-debugging` beheben, Test ergänzen, committen.
 
-- [ ] **Step 4: Push und CI auf dem Branch**
+- [ ] **Step 4: Push, Pull Request, CI auf dem Branch**
+
+CI startet nur bei `pull_request`, bei Push auf `main` und bei `workflow_dispatch` (`ci.yml`). Ein reiner Branch-Push startet nichts.
 
 ```bash
 git push -u origin kanten-und-teile
-gh run watch --exit-status $(gh run list --branch kanten-und-teile --limit 1 --json databaseId -q '.[0].databaseId')
+gh pr create --base main --head kanten-und-teile --title "Kanten, Teile und mitdenkende Bemaßung" --body-file $SCRATCH/pr.md
+sha=$(git rev-parse HEAD)
+until id=$(gh run list --workflow CI --commit "$sha" --event pull_request --json databaseId -q '.[0].databaseId') && [ -n "$id" ]; do sleep 10; done
+gh run watch --exit-status "$id"
 ```
 
-Expected: Lint, Tests, Trivy, Docker-Smoke grün.
+`pr.md` beschreibt den Inhalt in drei, vier Sätzen, ohne Claude-Nennung und ohne Co-Autor-Zeile. Expected: Lint, Tests, Trivy und Docker-Smoke grün. Bei Rot: Log mit `gh run view "$id" --log-failed`, beheben, committen, pushen, dieselbe Warteschleife mit dem neuen `sha`.
 
-- [ ] **Step 5: Nach `main` mergen (Nutzerauftrag: direkt mergen)**
+- [ ] **Step 5: Nach `main` mergen (Nutzerauftrag vom 14.10.2026: „direkt auf GitHub nach main mergen“)**
 
 ```bash
-git checkout main && git merge --ff-only kanten-und-teile && git push origin main
-gh run watch --exit-status $(gh run list --branch main --limit 1 --json databaseId -q '.[0].databaseId')
+gh pr merge kanten-und-teile --merge --delete-branch
+git checkout main && git pull --ff-only origin main
+sha=$(git rev-parse main)
+until id=$(gh run list --workflow CI --commit "$sha" --event push --json databaseId -q '.[0].databaseId') && [ -n "$id" ]; do sleep 10; done
+gh run watch --exit-status "$id"
 ```
 
-Expected: CI auf `main` grün, Image `ghcr.io/callmetechie/snap2cad:latest` neu gebaut. Wenn der Auto-Modus den Merge sperrt: stoppen und den Nutzer bitten (Hinweis aus der Memory „Merges darf Claude nicht selbst“).
+Expected: CI auf `main` grün, Image `ghcr.io/callmetechie/snap2cad:latest` mit Version `dev-<7 Zeichen von $sha>` veröffentlicht. Verweigert der Auto-Modus den Merge (Memory: „Merges darf Claude nicht selbst“), stoppen und den Nutzer bitten, den PR in GitHub zu mergen. Danach geht es mit der Warteschleife weiter.
 
 - [ ] **Step 6: DS918+ aktualisieren**
 
-Über SSH (siehe Memory `snap2cad-nas`) in `/volume1/docker/snap2cad`:
+Über SSH (Zugang siehe Memory `snap2cad-nas`) in `/volume1/docker/snap2cad`:
 
 ```bash
 sudo -n /usr/local/bin/docker compose pull && sudo -n /usr/local/bin/docker compose up -d
+sudo -n /usr/local/bin/docker compose ps
+sudo -n /usr/local/bin/docker compose exec -T app printenv SNAP2CAD_VERSION
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8097/api/me
 ```
 
-Die eigene Compose-Datei wird nie durch die aus dem Repo ersetzt. Danach `docker compose ps` (healthy) und `curl -s http://<nas>:8097/api/me` prüfen. Die Version muss zum neuen Image passen.
+Expected: beide Dienste laufen (app healthy), `SNAP2CAD_VERSION` = `dev-$(git rev-parse --short=7 main)`, HTTP 200. Die eigene Compose-Datei auf der NAS wird nie durch die aus dem Repo ersetzt (kein `cpus:`, kein `build:`).
 
 - [ ] **Step 7: A8 vermerken**
 
-Der Nutzer probiert mit einem echten Foto Quader + Platte. Die Dauer eines Erkennungslaufs wird notiert. Ergebnis und neuer Stand in die Memory `snap2cad-nas` schreiben.
+Der Nutzer probiert mit einem echten Foto Quader + Platte. Die Dauer eines Erkennungslaufs wird notiert. Richtwert: Mit `use_ai:false` dauert eine Erkennung auf der DS918+ unter 10 s. Liegt sie darüber, ist `WORK_PXMM` 3 statt 4 eine Folgeaufgabe, kein Stopp. Ergebnis und neuer Stand in die Memory `snap2cad-nas` schreiben.
