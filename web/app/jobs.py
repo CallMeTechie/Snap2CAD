@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import threading
 import traceback
@@ -25,6 +26,9 @@ PROCESSES = {
     "other": "nicht festgelegt",
 }
 SOURCE_LABEL = {"claude": "KI", "auto": "automatisch", "user": "Foto", "manual": "manuell"}
+GROUP_TEXT = {"aussen": "außen", "bohrung": "Bohrung", "tiefe": "Tiefe", "fase": "Fase", "platte": "Platte",
+              "sonst": "sonstige"}
+MODEL_DIMS_HEADING = "## Messschieber am Modell (verbindlich)"
 
 
 def job_dir(job_id: int) -> Path:
@@ -60,6 +64,78 @@ def top_points(m: dict, d: dict, photos: dict) -> tuple[str, list]:
     tag = "(unten)" if (db.jload(ph["analysis"], {}) or {}).get("bottom_align") else \
         "(unten, nicht ausgerichtet, links-rechts gespiegelt)"
     return tag, to_top(ph, pts)
+
+
+# ------------------------------------------------------------------ Gelernte Werte (Spec Stufe B §4)
+
+def label_norm(label: str) -> str:
+    return " ".join(re.sub(r"[^\w]+", " ", label.casefold()).split())
+
+
+def _norm_of(d: dict) -> str:
+    """label_norm eines Masses; ohne Buchstaben/Ziffern im Label die D-Nummer (sonst ueberschreiben sie sich)."""
+    return label_norm(str(d.get("label") or "")) or str(d.get("id") or "").casefold()
+
+
+def learn_dims(project_id: int, job_id: int | None, dims: list[dict]):
+    """Je Mass ein Eintrag; gleiche label_norm im Projekt ersetzt den alten Wert (UPSERT)."""
+    for d in dims:
+        db.ex("""INSERT INTO model_dims(project_id,label,label_norm,grp,value,job_id,dim_id,note,created_at)
+                 VALUES (?,?,?,?,?,?,?,?,?)
+                 ON CONFLICT(project_id,label_norm) DO UPDATE SET label=excluded.label, grp=excluded.grp,
+                   value=excluded.value, job_id=excluded.job_id, dim_id=excluded.dim_id, note=excluded.note,
+                   created_at=excluded.created_at""",
+              (project_id, str(d.get("label") or d.get("id")), _norm_of(d), d.get("group") or "sonst", float(d["value"]),
+               job_id, d.get("id"), None, db.now()))
+
+
+def learned_dims(project_id: int) -> list[dict]:
+    return db.q("SELECT * FROM model_dims WHERE project_id=? ORDER BY id", (project_id,))
+
+
+def model_dims_section(project_id: int | None) -> str:
+    rows = learned_dims(project_id) if project_id else []
+    if not rows:
+        return ""
+    lines = [MODEL_DIMS_HEADING]
+    for r in rows:
+        where = f"gemessen am Auftrag {r['job_id']}" if r["job_id"] else "gemessen am Modell"
+        lines.append(f"- {r['label']}: {_fmt(r['value'], 3)} mm (Gruppe {GROUP_TEXT.get(r['grp'], r['grp'])}, {where})")
+    return "\n".join(lines)
+
+
+def _de_num(v: float) -> str:
+    return _fmt(v, 3).replace(".", ",")
+
+
+def reconcile_learned(meta: dict, project_id: int | None, job_id: int) -> dict | None:
+    """Nach jedem KI-Lauf (nicht param): gelernter Wert getroffen -> user_set; sonst Warnung, nie Zurueckschreiben."""
+    rows = learned_dims(project_id) if project_id else []
+    if not rows:
+        return None
+    dims = [d for d in meta.get("dimensions", []) if isinstance(d, dict) and isinstance(d.get("value"), (int, float))]
+    by_norm: dict[str, dict] = {}
+    for d in dims:
+        by_norm.setdefault(_norm_of(d), d)
+    by_id = {d.get("id"): d for d in dims}
+    hit, far = 0, []
+    for r in rows:
+        d = by_norm.get(r["label_norm"])
+        if d is None and r["job_id"] == job_id and r["dim_id"]:
+            d = by_id.get(r["dim_id"])       # Label umbenannt, D-Nummer im selben Auftrag stabil (Regel 12)
+        if d is None:
+            if r["job_id"] == job_id:        # nachgemessenes Mass dieses Auftrags fehlt in der neuen Antwort
+                far.append(f"{r['label']}: {_de_num(r['value'])} → fehlt")
+            continue
+        if abs(d["value"] - r["value"]) <= 0.01 + 1e-9:
+            d["user_set"], d["assumed"] = True, False
+            hit += 1
+        else:
+            far.append(f"{r['label']}: {_de_num(r['value'])} → {_de_num(d['value'])}")
+    label = "Messschieber am Modell übernommen"
+    if far:
+        return {"id": "model_dims", "label": label, "state": "warn", "detail": "; ".join(far)}
+    return {"id": "model_dims", "label": label, "state": "ok", "detail": f"{hit} übernommen"} if hit else None
 
 
 def measurement_table(project_id: int, part_id: int | None = None) -> tuple[str, list[dict]]:
@@ -178,6 +254,9 @@ def build_initial_message(project: dict, request_text: str, options: dict) -> li
     teile = cad_text(project["id"], options.get("part_id"))
     if teile:
         parts[parts.index("## Messwerte") + 1:parts.index("## Messwerte") + 1] = [teile]
+    sec = model_dims_section(project["id"])   # Spec §4: Erstauftrag und Pruefung bekommen den Abschnitt nach der Tabelle
+    if sec:
+        parts += ["", sec]
     if not chk:
         parts += ["", "## Wunsch des Nutzers", request_text.strip() or "Bauteil möglichst originalgetreu nachbilden."]
     if options.get("check_items"):
@@ -330,8 +409,9 @@ def _iterate_locked(user: dict, job: dict, text: str):
     msgs = db.jload(job["messages"], [])
     # Gespraech auf die aktuelle Version zurueckschneiden ist nicht noetig: Claude sieht den Verlauf.
     cur = db.q1("SELECT code FROM job_versions WHERE job_id=? AND version=?", (job["id"], base))
+    sec = model_dims_section(job["project_id"])   # Spec §4: gelernte Werte an jeden Aenderungswunsch
     msgs.append({"role": "user", "content": [{"type": "text", "text":
-                 f"Änderungswunsch zu Version {base}:\n{text.strip()}\n\n"
+                 f"Änderungswunsch zu Version {base}:\n{text.strip()}\n\n" + (f"{sec}\n\n" if sec else "") +
                  "Ausgangspunkt ist dieser Code:\n```python\n" + (cur["code"] if cur else "") + "```\n"
                  "Antworte wieder im gleichen Format (JSON-Block + vollständiger Python-Block)."}]})
     _set(job["id"], messages=db.jdump(msgs), status="queued", error=None)
