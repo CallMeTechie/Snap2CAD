@@ -15,7 +15,7 @@ function plus(ctx, [x, y], col) {
 }
 
 // env: { ctx(), scr(ix, iy), toPX(X, Y), cursorMM() -> [X, Y] | null, photoId() -> id | null, active() -> bool,
-//        redraw(), changed(), selectPart(id), toEdges() }
+//        redraw(), changed(), selectPart(id), toEdges(), dragEnd() – Ziehen beendet oder abgebrochen }
 export function createPartsLayer(env) {
   // rdrag: Rechtsklick/-ziehen { mode: "vertex"|"edge"|"new", sx, sy, moved, ... } (Eckpunkt mit Linie, Punkt auf Kante, neues Teil)
   let sel = null, vtx = null, drag = null, rdrag = null, drawing = null, segments = [], busy = false;
@@ -186,6 +186,7 @@ export function createPartsLayer(env) {
       rdrag = { mode: v ? "vertex" : "edge", id: (v || e).part.id, from: i, ins: i + 1, foot: p, poly: insertVertex(poly, i, p),
         full: poly.length >= MAXV, sx, sy, moved: false };
     } else if (!hitPart(sx, sy)) rdrag = { mode: "new", start: [r3(mm[0]), r3(mm[1])], sx, sy, moved: false };
+    else return false;  // in einer Teilflaeche ohne Kante/Eckpunkt: Rechts-Ziehen verschiebt wie bisher
     env.redraw(); return true;
   }
   function moveRight(sx, sy) {
@@ -199,6 +200,7 @@ export function createPartsLayer(env) {
   function upRight(sx, sy) {
     const r = rdrag; rdrag = null;
     if (!r) return false;
+    if (busy) { env.redraw(); return true; }  // vorige Aenderung wird noch gespeichert
     const far = Math.hypot(sx - r.sx, sy - r.sy) >= 4, mm = env.cursorMM();
     if (r.mode === "new") {
       if (far && mm) {
@@ -250,9 +252,9 @@ export function createPartsLayer(env) {
   return {
     draw, down, move, up, click, key, select, downVertexAny, downRight, moveRight, upRight, dbl,
     startNew() { drawing = []; sel = null; vtx = null; env.redraw(); },
-    cancel() { drawing = null; drag = null; rdrag = null; env.redraw(); },
-    cancelDrag() { drag = null; rdrag = null; env.redraw(); },  // Esc beim Ziehen: Polygon unveraendert
-    reset() { sel = null; vtx = null; drag = null; rdrag = null; drawing = null; segments = []; },
+    cancel() { drawing = null; drag = null; rdrag = null; env.dragEnd?.(); env.redraw(); },
+    cancelDrag() { drag = null; rdrag = null; env.dragEnd?.(); env.redraw(); },  // Esc beim Ziehen: Polygon unveraendert
+    reset() { sel = null; vtx = null; drag = null; rdrag = null; drawing = null; segments = []; env.dragEnd?.(); },
     setSegments(s) { segments = s || []; env.redraw(); },
     get selected() { return sel; }, get drawing() { return !!drawing; }, get dragging() { return !!(drag || rdrag); },
   };

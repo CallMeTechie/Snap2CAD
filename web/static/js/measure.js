@@ -110,6 +110,7 @@ export default async function (main) {
     photoId: () => (src && planar(src.view) ? src.photo.id : null), active: () => tool === "edges",
     redraw: () => { dirty = true; }, changed: () => { renderList(); dirty = true; }, selectPart: () => renderList(),
     toEdges: () => { if (tool !== "edges") setTool("edges"); },
+    dragEnd: () => { edgeDrag = false; rDrag = false; dirty = true; },  // Esc, Werkzeugwechsel, neues Foto: Zeiger wieder frei
   });
 
   // ---------------------------------------------------------------- Quellen
@@ -319,7 +320,7 @@ export default async function (main) {
     height: "Höhe: Fußpunkt auf der Tischkante (0) und Oberkante setzen · Shift = senkrecht",
     circle: "Kreis: 3 Punkte auf dem Rand setzen · Backspace = letzten Punkt zurück" + EDIT,
     point: "Punkt: Klick setzt eine Koordinate (Ursprung unten links)" + EDIT,
-    edges: "Kanten: Teil anklicken · Eckpunkt ziehen · Griff + an der Kantenmitte = Punkt einfügen · Rechtsklick auf Kante = Punkt · Rechtsklick ziehen = Punkt mit Linie · Entf = Punkt löschen · Esc = abbrechen",
+    edges: "Kanten: Teil anklicken · Eckpunkt ziehen · Griff + an der Kantenmitte = Punkt einfügen · Rechtsklick auf Kante = Punkt · Rechtsklick ziehen = Punkt mit Linie · Rechtsklick ziehen im Leerraum = neues Teil · Entf = Punkt löschen · Esc = abbrechen",
     angle: "Winkel: Punkt auf Schenkel 1, Scheitel, Punkt auf Schenkel 2" + EDIT,
   };
   function setTool(k) {
