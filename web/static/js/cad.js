@@ -30,7 +30,7 @@ export async function form(main) {
   let partSel = "";
   const partBox = partsList.length ? h("select", { id: "part", class: "input", onchange: e => { partSel = e.target.value; drawMeas(); } },
     h("option", { value: "" }, "Alle Teile (ein Körper)"),
-    partsList.map(t => h("option", { value: String(t.id) }, `${t.id_label} · ${t.label}`))) : null;
+    partsList.map(t => h("option", { value: String(t.id) }, `${t.id_label} · ${t.label}${t.view === "bottom" ? " (unten)" : ""}`))) : null;
   const sentMeas = () => partSel ? meas.filter(m => m.part_id == null || m.part_id === Number(partSel)) : meas;
   const measBox = h("div", { style: { display: "flex", flexDirection: "column", gap: "6px" } });
   function drawMeas() {

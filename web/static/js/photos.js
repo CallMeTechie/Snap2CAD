@@ -30,6 +30,9 @@ export function tipsDialog() {
   actions: [{ label: "Verstanden", primary: true, value: true }] });
 }
 
+const LAGEN = [[0, "seitlich umgedreht"], [180, "nach vorn umgedreht"], [90, "seitlich umgedreht, ¼ gegen den Uhrzeigersinn gedreht"],
+  [270, "seitlich umgedreht, ¼ im Uhrzeigersinn gedreht"]];
+
 export default async function (main) {
   await ensureProject();
   let selected = null, mode = "both";
@@ -44,6 +47,7 @@ export default async function (main) {
       catch (e) { fail(e); }
     }
   });
+  const viewSel = h("select", { class: "input", "aria-label": "Ansicht der nächsten Fotos" }, Object.entries(VIEW_LABEL).map(([k, v]) => h("option", { value: k }, v)));
   const fileIn = h("input", { type: "file", accept: "image/*,.heic,.heif", multiple: true, hidden: true });
   const camIn = h("input", { type: "file", accept: "image/*", capture: "environment", hidden: true });
   const drop = h("div", { class: "drop" }, icon("upload", 26),
@@ -60,7 +64,8 @@ export default async function (main) {
     h("div", { class: "head" }, h("div", { class: "t" }, h("h1", {}, "Fotos prüfen"),
       h("p", { class: "lead" }, "Marker werden erkannt, das Foto wird auf die Tischebene entzerrt. Nur Fotos mit grünem oder gelbem Status gehen in die Messung.")),
     h("div", { class: "chips", style: { alignItems: "flex-end" } }, projectPicker(() => { selected = null; draw(); }),
-      h("label", { class: "field", style: { gap: "4px" } }, h("span", { class: "label" }, "Unterlage"), fmtSel))),
+      h("label", { class: "field", style: { gap: "4px" } }, h("span", { class: "label" }, "Unterlage"), fmtSel),
+      h("label", { class: "field", style: { gap: "4px" } }, h("span", { class: "label" }, "Ansicht"), viewSel))),
     h("div", { class: "photos-layout" },
       h("aside", { "aria-label": "Hochgeladene Fotos", style: { display: "flex", flexDirection: "column", gap: "12px" } }, drop, list,
         h("button", { class: "btn ghost sm", style: { alignSelf: "flex-start" }, onclick: tipsDialog }, icon("info", 16), "Fototipps")),
@@ -86,7 +91,7 @@ export default async function (main) {
       const item = { name: f.name, progress: 0 };
       pending.push(item); drawList();
       const form = new FormData();
-      form.append("file", f); form.append("view", S.project.photos.length ? "top" : "top"); form.append("format", fmt);
+      form.append("file", f); form.append("view", viewSel.value); form.append("format", fmt);
       try {
         const ph = await upload(`/api/projects/${S.project.id}/photos`, form, p => { item.progress = p; drawList(); });
         selected = ph.id;
@@ -129,6 +134,19 @@ export default async function (main) {
     if (!S.project.photos.some(p => p.id === selected)) selected = (S.project.photos.find(p => p.status !== "nicht_auswertbar") || S.project.photos[0])?.id ?? null;
     drawList();
     drawDetail();
+  }
+
+  function alignBox(p) {
+    const al = p.bottom_align;
+    const patch = async body => { try { await api(`/api/photos/${p.id}`, { method: "PATCH", body }); await reloadProject(); drawDetail(); } catch (e) { fail(e); } };
+    const retry = /nicht berechnet/.test(p.align_note || "") ? h("button", { class: "btn sm", onclick: () => patch({ bottom_align: {} }) }, "Erneut berechnen") : null;
+    return h("section", { class: "card", style: { gap: "10px" } }, h("h3", {}, "Lage zur Draufsicht"),
+      al ? [h("figure", {}, h("img", { src: `/api/photos/${p.id}/align.jpg?v=${al.rot}-${al.dx}-${al.dy}`, alt: "Überlagerung Unteransicht auf Draufsicht" }),
+          h("figcaption", {}, `Überlappung ${num(al.iou * 100, 0)} % · ${al.auto ? "automatisch" : "von Hand"}`)),
+        al.unsure ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, "Ausrichtung unsicher – bitte prüfen und Lage wählen.")) : null,
+        h("div", { class: "seg", role: "group", "aria-label": "Lage" }, LAGEN.map(([r, t]) => h("button", { "aria-pressed": String(al.rot === r), onclick: () => patch({ bottom_align: { rot: r } }) }, t))),
+        al.auto ? null : h("button", { class: "btn sm ghost", onclick: () => patch({ bottom_align: null }) }, "Wieder automatisch")]
+        : [h("p", { class: "hint" }, p.align_note || "Draufsicht fehlt"), retry]);
   }
 
   function drawDetail() {
@@ -187,6 +205,7 @@ export default async function (main) {
       p.status === "nicht_auswertbar" ? h("div", { class: "note err" }, icon("warn"), h("span", {}, `Nur ${(a.mat_ids || []).length} Marker der Unterlage erkannt – mindestens 4 sind nötig. `,
         (a.missing_ids || []).length ? `Fehlend: ID ${a.missing_ids.join(", ")}. ` : "", "Foto mit allen Markern im Bild wiederholen.")) : null,
       p.status === "unsicher" ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, "Restfehler über 1 mm. Unterlage liegt vermutlich nicht flach oder das Foto ist unscharf – besser wiederholen.")) : null,
+      p.view === "bottom" ? alignBox(p) : null,
       h("div", { class: `duo ${figs.length === 1 ? "one" : ""}` }, figs),
       h("div", { class: "grid2", style: { gap: "24px", alignItems: "start" } },
         h("div", { style: { display: "flex", flexDirection: "column", gap: "12px" } },
