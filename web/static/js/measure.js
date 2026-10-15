@@ -3,7 +3,7 @@ import { api, h, clear, icon, num, parseNum, toast, fail, dialog, confirmDlg, dr
 import { S, ensureProject, reloadProject, projectPicker, onLeave } from "./app.js";
 import { VIEW_LABEL } from "./photos.js";
 import { createPartsLayer, partsPanel, partColor } from "./edges.js";
-import { DIM_GROUP_TEXT, r3, segDist } from "./geom.js";
+import { groupText, r3, segDist } from "./geom.js";
 
 const KIND = { length: "Strecke", height: "Höhe", diameter: "Durchmesser", radius: "Radius", angle: "Winkel", point: "Punkt" };
 const NEED = { length: 2, height: 2, diameter: 3, radius: 3, angle: 3, point: 1 };
@@ -36,7 +36,7 @@ export function compute(kind, pts, fx = 1, fy = 1) {
 }
 
 export default async function (main) {
-  await ensureProject();
+  await ensureProject(true);   // frisch laden: „Messschieber am Modell“ kann sich auf der Auftragsseite geändert haben
   if (!main.isConnected) return;  // waehrend des Ladens weg navigiert: keine Listener fuer eine fremde Seite
   main.className = "measure-layout";
   main.removeAttribute("style");
@@ -588,7 +588,8 @@ export default async function (main) {
           h("button", { class: "btn sm", onclick: async () => { try { await api(`/api/projects/${S.project.id}/measurements/accept-all`, { method: "POST" }); await reloadProject(); renderList(); dirty = true; } catch (e) { fail(e); } } }, "Alle übernehmen"),
           h("button", { class: "btn sm ghost", onclick: async () => { try { await api(`/api/projects/${S.project.id}/measurements/discard-suggestions`, { method: "POST" }); await reloadProject(); renderList(); dirty = true; } catch (e) { fail(e); } } }, "Alle verwerfen")),
         h("span", { class: "xs muted" }, "Die KI bekommt die entzerrten Fotos und deine Messungen. Übernommene Vorschläge erscheinen als normale Messung mit Herkunft „KI“."));
-    }    renderModelDims();
+    }
+    renderModelDims();
   }
 
   // Spec Stufe B §4: am 3D-Modell eingetragene Messschieberwerte, gelten für alle Aufträge des Projekts
@@ -601,13 +602,13 @@ export default async function (main) {
         h("span", { class: "xs muted" }, "am 3D-Modell eingetragen · gilt für alle Aufträge")),
       h("ul", { class: "mlist" }, md.map(r => h("li", { class: "mdrow" },
         h("span", { class: "mid" }, r.dim_id || "–"),
-        h("span", { class: "mdl" }, r.label, h("span", { class: "xs muted" }, ` · ${DIM_GROUP_TEXT[r.grp] || r.grp}${r.job_id ? ` · Auftrag ${r.job_id}` : ""}`)),
-        h("span", { class: "mval" }, `${num(r.value, 2)} mm`),
+        h("span", { class: "mdl" }, r.label, h("span", { class: "xs muted" }, ` · ${groupText(r.grp, r.grp)}${r.job_id ? ` · Auftrag ${r.job_id}` : ""}`)),
+        h("span", { class: "mval" }, `${num(r.value, 3)} mm`),
         h("button", { class: "iconbtn", style: { width: "34px", height: "34px" }, "aria-label": `${r.label} löschen`, onclick: () => delModelDim(r) }, icon("x", 16))))),
       h("span", { class: "xs muted" }, "Diese Werte gehen bei jedem Auftrag und jeder Änderung als verbindlich an die KI."));
   }
   async function delModelDim(r) {
-    if (!await confirmDlg("Messschieberwert löschen?", `${r.label}: ${num(r.value, 2)} mm geht danach nicht mehr an die KI.`, "Löschen", true)) return;
+    if (!await confirmDlg("Messschieberwert löschen?", `${r.label}: ${num(r.value, 3)} mm geht danach nicht mehr an die KI.`, "Löschen", true)) return;
     try { await api(`/api/projects/${S.project.id}/model-dims/${r.id}`, { method: "DELETE" }); await reloadProject(); renderList(); }
     catch (e) { fail(e); }
   }

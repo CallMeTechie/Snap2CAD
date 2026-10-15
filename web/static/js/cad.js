@@ -2,7 +2,8 @@
 import { api, h, clear, icon, num, bytes, toast, fail, mmss, dt, confirmDlg, copyText, fmtValue } from "./lib.js";
 import { S, ensureProject, reloadProject, go, onLeave, refreshMe, jobBadge } from "./app.js";
 import { VIEW_LABEL } from "./photos.js";
-import { DEFAULT_SEL, DIM_GROUP_TEXT, conclusionText, de, dimSel, dimState, hasAnchors, paramBanner, parseDimInput } from "./geom.js";
+import { DEFAULT_SEL, DIM_GROUP_KEYS, DIM_GROUP_LABEL, conclusionText, de, dimSel, dimState, groupText, hasAnchors, paramBanner, parseDimInput,
+  r3 } from "./geom.js";
 
 const PROC = {
   fdm: ["3D-Druck FDM", "Bohrungsausgleich, Wandstärke, Druckrichtung", "PETG"],
@@ -13,9 +14,10 @@ const RULES = { fdm: "FDM: Bohrungen +0,2–0,3 mm, Wandstärke ≥ 1,2 mm, druc
   cnc: "CNC: Innenradien, Normbohrungen, keine Hinterschnitte" };
 const CHIPS = { fdm: ["Bohrungen +0,2 mm für Schrauben", "Wandstärke 2 mm", "Ohne Stützen druckbar machen", "Fase 0,5 mm an der Unterseite"],
   sla: ["Hohl mit 2 mm Wand und Entlüftung", "Kanten 0,3 mm verrunden"], cnc: ["Bohrungen als Senkung M6", "Innenradien vergrößern", "Für FDM aufbereiten"] };
-// Gruppen der Bemaßung: Schlüssel und Schalter über dem Viewer (Spec Stufe B §3); Spalte „Gruppe“ aus DIM_GROUP_TEXT
-const DIM_GROUPS = [["aussen", "Außenmaße"], ["bohrung", "Bohrungen"], ["tiefe", "Tiefen"], ["fase", "Fasen"], ["platte", "Platten"],
-  ["sonst", "Sonstige"]];
+// Gruppen der Bemaßung: Schlüssel und Schalter über dem Viewer (Spec Stufe B §3); Spalte „Gruppe“ über groupText
+const DIM_GROUPS = DIM_GROUP_KEYS.map(k => [k, DIM_GROUP_LABEL[k]]);
+const MAX_PARAM = 20;   // Werte je Neuaufbau (jobs.PARAM_MAX)
+const LOCK_VER = "Werte sind nur in der aktuellen Version änderbar.", LOCK_RUN = "Der Auftrag läuft – bitte warten.";
 
 function flow(stage) {
   const it = (n, t, st) => h("li", { class: st }, h("span", { class: "n" }, st === "dn" ? "✓" : n), t);
@@ -213,10 +215,11 @@ export async function job(main, id) {
   let J = await api(`/api/jobs/${id}`);
   if (!main.isConnected) return;  // waehrend des Ladens weg navigiert: keine Uhr und keine Abfrage starten
   let ver = null, tab = "3d", viewer = null, timer = null, inflight = false, gone = false, fails = 0, jv = 0, liveCode = false, lastSig = "",
-    followLatest = false;   // nach einem Neuaufbau: am Ende die neue aktuelle Version zeigen
+    followLatest = false,   // nach einem Neuaufbau: am Ende die neue aktuelle Version zeigen
+    view3 = null, view3Used = false;   // 3D-Ansicht { version, box, views3 }: bleibt bei gleicher Version stehen (kein neuer Viewer)
   const root = h("div", { style: { display: "contents" } });
   main.append(root);
-  onLeave(() => { gone = true; clearTimeout(timer); clearInterval(clock); viewer?.dispose(); viewer = null; photoCache = null; });
+  onLeave(() => { gone = true; clearTimeout(timer); clearInterval(clock); dropViewer(); photoCache = null; });
   const running = () => J.status === "queued" || J.status === "running";
   // Neuaufbau ohne KI (Spec Stufe B §2): die Ergebnisansicht bleibt stehen, Felder gesperrt; Signatur ohne Protokollzeilen.
   // Nur wenn die letzte Version selbst eine laufende Param-Version ist: ein KI-Lauf nach einem Neuaufbau legt seine
@@ -224,7 +227,8 @@ export async function job(main, id) {
   const paramRunning = () => { const L = J.versions[J.versions.length - 1]; return running() && L?.trigger === "param" && L.status === "running"; };
   const sig = () => (paramRunning() ? `p|${J.versions.length}` : `${J.status}|${(J.log || []).length}|${J.versions.length}`);
   const canEdit = V => !!V && V.status === "ok" && V.version === J.current_version && !running();
-  const lockText = () => (running() ? "Der Auftrag läuft – bitte warten." : "Werte sind nur in der aktuellen Version änderbar.");
+  const lockText = () => (running() ? LOCK_RUN : LOCK_VER);
+  function dropViewer() { viewer?.dispose(); viewer = null; view3 = null; }
 
   function runStart() {
     const L = J.log || [];
@@ -254,8 +258,9 @@ export async function job(main, id) {
 
   function draw() {
     lastSig = sig();
-    viewer?.dispose(); viewer = null;
+    conclBtns = []; tableLock = null; view3Used = false;
     if (running() && !paramRunning()) drawRun(); else drawResult();
+    if (!view3Used) dropViewer();   // 3D-Ansicht nicht mehr gezeigt (anderer Tab, Fortschritt): Viewer abbauen
     if (running()) startPoll();
   }
   async function cancelJob() {
@@ -316,7 +321,7 @@ export async function job(main, id) {
     const checks = V?.checks || [];
     const nWarn = checks.filter(c => c.state === "warn").length, nFail = checks.filter(c => c.state === "fail").length;
     const verSel = h("select", { class: "input", style: { minHeight: "38px", width: "auto" }, onchange: e => { ver = Number(e.target.value); draw(); } },
-      [...vers].reverse().map(v => h("option", { value: v.version, selected: v.version === ver },
+      [...vers].reverse().map(v => h("option", { value: v.version, selected: v.version === ver, disabled: v.status === "running" },
         `v${v.version} · ${v.version === J.current_version ? "aktuell · " : ""}${v.status === "ok" ? "geprüft" : v.status === "running" ? "läuft" : v.status === "cancelled" ? "abgebrochen" : v.error ? "Sandbox-Fehler" : "fehlgeschlagen"}`)));
     const summary = !V ? h("span", { class: "badge off" }, "keine Version")
       : !ok ? h("span", { class: "badge err" }, "Version fehlerhaft")
@@ -334,7 +339,7 @@ export async function job(main, id) {
     const errNote = J.status === "failed" || J.status === "cancelled" ? h("div", { class: `note ${J.status === "failed" ? "err" : "warn"}` }, icon("warn"),
       h("div", {}, h("strong", {}, J.status === "failed" ? "Auftrag fehlgeschlagen. " : "Auftrag abgebrochen. "), J.error || "",
         J.current_version ? ` Die letzte gültige Version ist v${J.current_version}.` : "",
-        J.status === "failed" && J.project_id && vers[vers.length - 1]?.trigger === "param"
+        J.project_id && vers[vers.length - 1]?.trigger === "param" && vers[vers.length - 1].status !== "ok"
           ? " Der Wert ist trotzdem als Messschieberwert gemerkt (Messseite → löschen)." : "")) : null;
 
     // Tabs
@@ -390,20 +395,32 @@ export async function job(main, id) {
   }
 
   // ---------------------------------------------------------------- Bemaßung am Modell (Spec Stufe B §2, §3, §5)
+  // Tabelle und Labels im Viewer teilen eine Sperre: höchstens ein POST /param unterwegs (paramBusy)
+  let paramBusy = false, tableLock = null;   // tableLock: Sperre der gerade gezeigten Maßtabelle
+  function lockAll(on) {
+    tableLock?.(on);
+    const V = J.versions.find(v => v.version === view3?.version);
+    viewer?.setLocked(on || !canEdit(V), on ? LOCK_RUN : lockText());
+  }
   async function sendParam(values) {
-    if (values.length > 20) { toast("Höchstens 20 Werte auf einmal.", "err"); return false; }
+    if (paramBusy) { toast(LOCK_RUN); return false; }
+    if (values.length > MAX_PARAM) { toast(`Höchstens ${MAX_PARAM} Werte auf einmal.`, "err"); return false; }
+    paramBusy = true; lockAll(true);
     let r;
     try { r = await api(`/api/jobs/${id}/param`, { method: "POST", body: { values, base: J.current_version } }); }
-    catch (e) { if (!gone) fail(e); return false; }
+    catch (e) { paramBusy = false; if (!gone) { lockAll(false); fail(e); } return false; }
+    paramBusy = false;
+    if (gone) return true;
     if (r.learned === false) toast("Ohne Projekt – der Wert wird nicht gemerkt.");
-    try {
-      const j = await api(`/api/jobs/${id}`);
-      if (gone) return true;
-      J = j; jv++; ver = null; followLatest = true; draw();
-    } catch {   // Neuaufbau ist angenommen: die Abfrage holt den Stand nach, statt die Felder wieder freizugeben
-      if (gone) return true;
-      jv++; followLatest = true; startPoll();
-    }
+    else if (J.project_id && S.project?.id === J.project_id) reloadProject().catch(() => {});   // Messseite: neue Werte
+    // Neuaufbau angenommen: lokal als laufend markieren (Version wie auf dem Server: running), die Abfrage holt den Stand;
+    // bei gleicher Version bleibt der Viewer stehen, Tabelle und Labels sind über running() gesperrt
+    const req = values.map(v => `${v.id} = ${String(r3(v.value))} mm`).join(", ");
+    J = { ...J, status: "queued", error: null,
+      versions: [...J.versions, { version: r.version, trigger: "param", status: "running", request_text: req, meta: {}, files: {}, checks: [] }] };
+    jv++; followLatest = true; ver = null;
+    try { draw(); } catch (e) { fail(e); }
+    startPoll();
     return true;
   }
   // Änderungswunsch senden („Änderung anfordern“ und „Schlüsse ziehen“); true = angenommen
@@ -440,12 +457,11 @@ export async function job(main, id) {
         if (only || Math.abs(r.value - d.value) >= 0.0005) vals.push({ id: d.id, value: r.value });
       }
       if (!vals.length) { toast("Keine geänderten Werte."); return; }
-      const lock = on => { btn.disabled = on; inputs.forEach(([, inp]) => { inp.disabled = on; }); };
-      lock(true);
-      if (!await sendParam(vals)) lock(false);
+      await sendParam(vals);   // sperrt und entsperrt die Tabelle selbst (tableLock), auch beim Senden aus dem Viewer
     }
+    if (edit) tableLock = on => { btn.disabled = on; inputs.forEach(([, inp]) => { inp.disabled = on; }); };
     const rows = list.map(d => {
-      const old = !/^D\d+$/.test(d.id || "");          // Version vor Stufe B: measured/nominal, nicht editierbar
+      const old = typeof d.value !== "number" && ("measured" in d || "nominal" in d);   // alte Form: measured/nominal, nie editierbar
       const val = typeof d.value === "number" ? d.value : typeof d.nominal === "number" ? d.nominal : null;
       let cell = h("td", { class: "num", style: { fontWeight: 600 } }, val === null ? "–" : num(val, 2));
       if (edit && d.editable && typeof d.value === "number") {
@@ -459,23 +475,25 @@ export async function job(main, id) {
       return h("tr", { title: d.note || "", style: hl ? { cursor: "pointer" } : {}, tabindex: hl ? "0" : null, role: hl ? "button" : null,
         onclick: () => viewer?.highlight(d.id), onkeydown: e => { if (e.key === "Enter" && e.target === e.currentTarget) viewer?.highlight(d.id); } },
         h("td", { class: "mono" }, d.id || ""), h("td", {}, d.label || "", d.note ? h("div", { class: "xs muted" }, d.note) : null),
-        h("td", { class: "small" }, DIM_GROUP_TEXT[d.group] || "–"), cell, h("td", { class: "small" }, zustand));
+        h("td", { class: "small" }, groupText(d.group)), cell, h("td", { class: "small" }, zustand));
     });
     return h("section", { class: "card", style: { gap: "10px" } }, h("h2", {}, "Maße im Modell"),
       h("table", { class: "t" }, h("thead", {}, h("tr", {}, h("th", {}, "ID"), h("th", {}, "Merkmal"), h("th", {}, "Gruppe"),
         h("th", { style: { textAlign: "right" } }, "Wert"), h("th", {}, "Zustand"))), h("tbody", {}, rows)),
-      inputs.length ? h("div", { class: "chips" }, btn, h("span", { class: "xs muted" }, "Enter im Feld übernimmt nur diesen Wert · höchstens 20 auf einmal"))
-        : V.version !== J.current_version && list.some(d => d.editable) ? h("span", { class: "xs muted" }, "Werte sind nur in der aktuellen Version änderbar.") : null);
+      inputs.length ? h("div", { class: "chips" }, btn, h("span", { class: "xs muted" }, `Enter im Feld übernimmt nur diesen Wert · höchstens ${MAX_PARAM} auf einmal`))
+        : V.version !== J.current_version && list.some(d => d.editable) ? h("span", { class: "xs muted" }, LOCK_VER) : null);
   }
 
   function draw3d(panel, V) {
-    const box = h("div", { class: "viewer" });
+    view3Used = true;
+    const keep = view3?.version === V.version ? view3 : null;   // gleiche Version: Viewer (und WebGL-Kontext) behalten
+    if (!keep) dropViewer();
+    const box = keep ? keep.box : h("div", { class: "viewer" });
     const viewBtns = {};
     const vb = (k, t) => (viewBtns[k] = h("button", { "aria-pressed": String(k === "iso"), onclick: () => { viewer?.setView(k); Object.entries(viewBtns).forEach(([q, b]) => b.setAttribute("aria-pressed", String(q === k))); } }, t));
-    const views3 = h("div", { class: "views3" });
     const dims = Array.isArray(V.meta?.dimensions) ? V.meta.dimensions : [];
-    let sel = { ...DEFAULT_SEL };
-    try { sel = dimSel(localStorage.getItem("dims.groups")); } catch { /* Speicher gesperrt: Standard */ }
+    const loadSel = () => { try { return dimSel(localStorage.getItem("dims.groups")); } catch { return { ...DEFAULT_SEL }; } };   // Speicher gesperrt
+    let sel = loadSel();
     const setSel = (k, on) => {
       sel = { ...sel, [k]: on };
       try { localStorage.setItem("dims.groups", JSON.stringify(sel)); } catch { /* */ }
@@ -483,7 +501,6 @@ export async function job(main, id) {
     };
     const cb = (k, t) => h("label", { class: "check small" }, h("input", { type: "checkbox", checked: sel[k], onchange: e => setSel(k, e.target.checked) }), t);
     const pending = J.pending_param || [];
-    conclBtns = [];
     const conclBtn = () => { const b = h("button", { class: "btn claude sm", disabled: conclOff(),
       title: !S.status?.ai ? "KI nicht eingerichtet" : pending.length ? "Die KI leitet abhängige Maße aus den nachgemessenen Werten ab" : "Erst einen Wert am Modell eintragen",
       onclick: conclude }, icon("sparkle", 14), "Schlüsse ziehen"); conclBtns.push(b); return b; };
@@ -493,6 +510,13 @@ export async function job(main, id) {
     const btext = V.version === J.current_version ? paramBanner(pending.filter(p => ids.includes(p.id))) : "";
     const banner = btext ? h("div", { class: "note info", role: "status" }, icon("info"), h("span", { style: { flex: "1" } }, btext), conclBtn()) : null;
     const noProject = !J.project_id && dims.some(d => d.editable) ? h("span", { class: "xs muted" }, "Ohne Projekt – der Wert wird nicht gemerkt.") : null;
+    if (keep) {
+      clear(panel, bar, banner, noProject, box, keep.views3);
+      viewer?.setLocked(!canEdit(V), lockText());   // noch ladend: setzt die Sperre nach dem Laden (unten)
+      return;
+    }
+    const views3 = h("div", { class: "views3" });
+    view3 = { version: V.version, box, views3 };
     box.append(
       h("div", { class: "vtl" }, h("div", { class: "seg" }, vb("iso", "Iso"), vb("top", "Oben"), vb("front", "Vorn"), vb("side", "Seite"))),
       h("div", { class: "vtr" },
@@ -509,9 +533,9 @@ export async function job(main, id) {
     box.append(loading);
     import("./viewer.js").then(({ createViewer }) => createViewer(box, `/api/jobs/${id}/v/${V.version}/model.stl`, dims, { onSubmit: sendParam })).then(v => {
       loading.remove();
-      if (!box.isConnected) { v.dispose(); return; }
+      if (!box.isConnected || view3?.box !== box) { v.dispose(); return; }
       viewer = v;
-      v.setGroups(sel);
+      v.setGroups(loadSel());   // Schalter einer neu gezeichneten Leiste koennen sich waehrend des Ladens geaendert haben
       v.setLocked(!canEdit(V), lockText());
       const snaps = v.snapshots(["top", "front", "side"]);
       clear(views3, [["top", "Oben"], ["front", "Vorn"], ["side", "Seite"]].map(([k, t]) => h("figure", { onclick: () => viewBtns[k].click() },
@@ -607,7 +631,8 @@ export async function job(main, id) {
       h("div", { class: "row", style: { gap: "32px" } },
         h("div", { style: { flex: "1 1 280px", display: "flex", flexDirection: "column", gap: "10px" } },
           h("h2", { id: "it-h" }, "Verlauf"),
-          h("ol", { class: "vers" }, J.versions.map(v => h("li", { "aria-current": String(v.version === ver), onclick: () => { ver = v.version; draw(); } },
+          h("ol", { class: "vers" }, J.versions.map(v => h("li", { "aria-current": String(v.version === ver),
+            onclick: () => { if (v.status === "running") return; ver = v.version; draw(); } },   // laufende Version: noch nichts zu zeigen
             h("span", { class: "vn" }, `v${v.version}`),
             h("span", { class: "small" }, v.trigger === "create" ? "Erster Entwurf" : v.trigger === "autofix" ? "Automatische Korrektur"
               : v.trigger === "param" ? `Neuaufbau: ${v.request_text || ""}` : `Änderung: ${(v.request_text || "").slice(0, 80)}`,

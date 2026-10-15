@@ -71,15 +71,18 @@ function buildScene(geo, dims) {
   ];
   // Maße der KI mit Ankern; alte Versionen ohne a/b zeigen nur die Hauptmaße
   const c = [center.x, center.y, center.z];
-  const items = [];
+  const items = [], mats = new Map();   // ein Material je Farbe und Strichart (dispose gibt jedes einmal frei)
   for (const d of dims) {
     if (!hasAnchors(d)) continue;
     const g = dimGeometry(d.a, d.b, c, ext);
     if (!g) continue;
-    const st = dimStyle(d);
-    const mat = st.dashed
-      ? new THREE.LineDashedMaterial({ color: st.color, dashSize: Math.max(ext * 0.02, 0.8), gapSize: Math.max(ext * 0.012, 0.5) })
-      : new THREE.LineBasicMaterial({ color: st.color });
+    const st = dimStyle(d), key = `${st.color}|${st.dashed}`;
+    if (!mats.has(key)) {
+      mats.set(key, st.dashed
+        ? new THREE.LineDashedMaterial({ color: st.color, dashSize: Math.max(ext * 0.02, 0.8), gapSize: Math.max(ext * 0.012, 0.5) })
+        : new THREE.LineBasicMaterial({ color: st.color }));
+    }
+    const mat = mats.get(key);
     const grp = new THREE.Group();
     for (const seg of [g.line, ...g.ext]) grp.add(line(seg, mat));
     scene.add(grp);
@@ -129,14 +132,16 @@ export async function createViewer(box, url, dims = [], hooks = {}) {
     return e;
   });
   let w = 1, hgt = 1, frame = 0, hlDone = null;
+  let endEdit = null;   // offenes Eingabefeld eines Labels schliessen (nicht, solange sein Wert gesendet wird)
 
   function render() {
     renderer.render(S.scene, camera);
     const v = new THREE.Vector3();
     const put = (el, pos, show) => {
+      if (!show) { if (!el.hidden) el.hidden = true; return; }   // ausgeblendet: nicht projizieren
       v.copy(pos).project(camera);
-      const on = show && v.z < 1;
-      el.hidden = !on;
+      const on = v.z < 1;
+      if (el.hidden === on) el.hidden = !on;
       if (on) { el.style.left = `${(v.x + 1) / 2 * w}px`; el.style.top = `${(1 - v.y) / 2 * hgt}px`; }
     };
     S.mainLabels.forEach((l, i) => put(mainEls[i], l.pos, S.main.visible));
@@ -163,16 +168,22 @@ export async function createViewer(box, url, dims = [], hooks = {}) {
     const inp = document.createElement("input");
     inp.inputMode = "decimal"; inp.value = de(it.d.value);
     inp.setAttribute("aria-label", `${it.d.id} ${it.d.label || ""}`.trim());
+    endEdit?.();
     el.replaceChildren(inp); inp.focus(); inp.select();
-    const reset = () => el.replaceChildren(num(it.d.value, 1, false));
+    let sending = false;
+    const reset = () => { if (endEdit === close) endEdit = null; el.replaceChildren(num(it.d.value, 1, false)); };
+    const close = () => { if (!sending) reset(); };
+    endEdit = close;
     inp.addEventListener("keydown", async e => {
       e.stopPropagation();
       if (e.key === "Escape") { reset(); return; }
       if (e.key !== "Enter") return;
       const r = parseDimInput(inp.value);
       if (r.error) { toast(r.error, "err"); return; }
-      inp.disabled = true;
-      const ok = await hooks.onSubmit([{ id: it.d.id, value: r.value }]);
+      inp.disabled = true; sending = true;
+      let ok = false;
+      try { ok = await hooks.onSubmit([{ id: it.d.id, value: r.value }]); } catch { ok = false; }
+      sending = false;
       if (!ok && inp.isConnected) { inp.disabled = false; inp.focus(); }
     });
     inp.addEventListener("blur", () => { if (!inp.disabled) reset(); });
@@ -214,7 +225,9 @@ export async function createViewer(box, url, dims = [], hooks = {}) {
       const dist = r / Math.sin((camera.fov * Math.PI / 180) / 2) * 1.08; controls.target.copy(S.center); camera.position.copy(S.center).addScaledVector(dir, dist); controls.update(); req(); },
     zoom(f) { const d = camera.position.clone().sub(controls.target); camera.position.copy(controls.target).addScaledVector(d, 1 / f); controls.update(); req(); },
     setGroups(sel) { state.sel = { ...DEFAULT_SEL, ...sel }; applyGroups(); },
-    setLocked(on, text = "") { state.locked = !!on; state.lockedText = text; },
+    // Sperre wechselt oder bleibt an: offene Eingaben schliessen; ein gesendeter Wert bleibt sichtbar, bis die
+    // Sperre wieder aufgeht (Neuaufbau fehlgeschlagen) oder der Viewer der neuen Version ihn ersetzt
+    setLocked(on, text = "") { const was = state.locked; state.locked = !!on; state.lockedText = text; if (state.locked || was) endEdit?.(); },
     highlight,
     setEdges(on) { S.edges.visible = on; req(); },
     setSection,

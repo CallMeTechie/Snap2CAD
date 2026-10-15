@@ -1,8 +1,8 @@
 // Bemaßung am Modell (web/static/js/geom.js, Spec Stufe B §3/§5, B5) – Aufruf: node --test tests/js/*.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_SEL, DIM_GROUP_KEYS, DIM_GROUP_TEXT, dimSel, visibleDims, hasAnchors, dimGeometry, dimStyle, dimState, de,
-  parseDimInput, paramBanner, conclusionText } from "../../web/static/js/geom.js";
+import { DEFAULT_SEL, DIM_GROUP_KEYS, DIM_GROUP_LABEL, DIM_GROUP_TEXT, ITER_MAX, dimSel, visibleDims, hasAnchors, dimGeometry,
+  dimStyle, dimState, de, groupText, parseDimInput, paramBanner, conclusionText } from "../../web/static/js/geom.js";
 
 const near = (act, exp) => {   // flach vergleichen; -0 und Rundungsreste zaehlen nicht
   const a = act.flat(Infinity), e = exp.flat(Infinity);
@@ -110,4 +110,35 @@ test("paramBanner, conclusionText", () => {
     + "hängen), trage bei jedem geänderten Maß derived_from und eine kurze Begründung ein und ändere sonst nichts.");
   assert.equal(conclusionText([{ ...p3, old: null, old_assumed: false }]).startsWith("Nachgemessen mit dem Messschieber: D3 Dicke = 8 mm. "), true);
   assert.equal(conclusionText([]), "");
+});
+
+test("DIM_GROUP_LABEL: Schalter je Gruppe, Schlüssel wie DIM_GROUP_KEYS; groupText nur eigene Schlüssel", () => {
+  assert.deepEqual(Object.keys(DIM_GROUP_LABEL), DIM_GROUP_KEYS);
+  assert.ok(Object.isFrozen(DIM_GROUP_LABEL));
+  assert.equal(groupText("bohrung"), "Bohrung");
+  assert.equal(groupText("constructor"), "–");
+  assert.equal(groupText("__proto__", "x"), "x");
+  assert.equal(groupText(undefined), "–");
+});
+
+test("dimGeometry: Mitte bis auf Rundungsrauschen auf der Linie -> Rückfall +Z statt Rauschrichtung", () => {
+  // Anker auf 1e-3 gerundet: Mitte liegt 0,0004 mm neben der Linie (nach -Z) – der Versatz zeigt trotzdem nach +Z
+  near(dimGeometry([-5, 0, 0.0004], [5, 0, 0.0004], [0, 0, 0.0008], 100).line, [[-5, 0, 8.0004], [5, 0, 8.0004]]);
+  // echter Abstand (1 % der Größe) bestimmt weiter die Richtung
+  near(dimGeometry([-5, 0, 0], [5, 0, 0], [0, 0, 1], 100).line, [[-5, 0, -8], [5, 0, -8]]);
+});
+
+test("conclusionText: bleibt unter der Grenze des Änderungswunsches, Rest als „n weitere“", () => {
+  const list = Array.from({ length: 200 }, (_, i) => ({ id: `D${i + 1}`, label: "Bohrung Lagersitz unten links".padEnd(60, "x"),
+    value: 45.125 + i, old: 40.5, old_assumed: true }));
+  const t = conclusionText(list);
+  assert.ok(t.length <= ITER_MAX, String(t.length));
+  assert.equal(ITER_MAX, 4000);
+  const m = t.match(/; und (\d+) weitere \(siehe „Parametrisch geändert“ im Verlauf\)\. Leite daraus/);
+  assert.ok(m, t.slice(-300));
+  const shown = (t.match(/; D\d+ /g) || []).length + 1;
+  assert.equal(shown + Number(m[1]), 200);
+  assert.ok(t.endsWith("ändere sonst nichts."));
+  assert.equal(conclusionText(list.slice(0, 3)).includes("weitere"), false);
+  assert.ok(conclusionText(list, 500).length <= 500);
 });

@@ -44,6 +44,11 @@ export const DIM_GROUP_KEYS = ["aussen", "bohrung", "tiefe", "fase", "platte", "
 // Spalte „Gruppe“ der Masstabelle (cad.js) und Liste der Messseite (measure.js), gleich jobs.GROUP_TEXT
 export const DIM_GROUP_TEXT = Object.freeze({ aussen: "außen", bohrung: "Bohrung", tiefe: "Tiefe", fase: "Fase", platte: "Platte",
   sonst: "sonstige" });
+// Schalter über dem Viewer (cad.js), gleiche Schlüssel wie DIM_GROUP_KEYS
+export const DIM_GROUP_LABEL = Object.freeze({ aussen: "Außenmaße", bohrung: "Bohrungen", tiefe: "Tiefen", fase: "Fasen",
+  platte: "Platten", sonst: "Sonstige" });
+// Text der Gruppe für Tabelle und Liste; nur eigene Schlüssel (kein „constructor“ o. Ä. aus dem Prototyp)
+export const groupText = (g, fallback = "–") => (typeof g === "string" && Object.hasOwn(DIM_GROUP_TEXT, g) ? DIM_GROUP_TEXT[g] : fallback);
 export const DEFAULT_SEL = Object.freeze({ aussen: true, bohrung: false, tiefe: false, fase: false, platte: false, sonst: false,
   annahmen: true, nur_annahmen: false });
 
@@ -76,14 +81,15 @@ const vlen = a => Math.hypot(a[0], a[1], a[2]);
 const vperp = (v, u) => vsub(v, vmul(u, vdot(v, u)));
 
 // Masslinie a->b, versetzt senkrecht zur Linie und weg von der Modellmitte (8 % der Modellgroesse, mindestens 2 mm);
-// liegt die Mitte auf der Linie, zeigt der Versatz nach +Z, bei senkrechter Linie nach +X
+// liegt die Mitte auf der Linie (bis auf Rundungsrauschen der Anker, 1e-3 der Modellgroesse), zeigt der Versatz
+// nach +Z, bei senkrechter Linie nach +X
 export function dimGeometry(a, b, center, size) {
   const ab = vsub(b, a), n = vlen(ab);
   if (!(n > 1e-9)) return null;
   const u = vmul(ab, 1 / n), m = vmul(vadd(a, b), 0.5);
   const off = Math.max(0.08 * size, 2), over = off * 0.25;
   let w = vperp(vsub(m, center), u);
-  if (vlen(w) < 1e-6 * Math.max(1, size)) {
+  if (vlen(w) < 1e-3 * Math.max(1, size)) {
     for (const ax of [[0, 0, 1], [1, 0, 0], [0, 1, 0]]) { w = vperp(ax, u); if (vlen(w) > 0.1) break; }
   }
   w = vmul(w, 1 / vlen(w));
@@ -104,6 +110,7 @@ export function dimState(d) {
   return d.derived_from ? `abgeleitet von ${d.derived_from}` : "";
 }
 
+// Wert für Eingabefelder und Texte: Dezimalkomma, höchstens drei Stellen, ohne Tausenderpunkt (Gegenstück zu parseDimInput)
 export const de = v => String(r3(v)).replace(".", ",");
 
 // Eingabe im Label oder in der Tabelle: Ziffern mit Komma oder Punkt, 0 < Wert <= 5000 mm, auf 3 Stellen gerundet
@@ -124,11 +131,20 @@ export function paramBanner(list) {
   return parts.length ? parts.join("; ") + BANNER_TAIL : "";
 }
 
-// Text des Aenderungswunsches fuer „Schluesse ziehen“ (Spec §5)
-export function conclusionText(list) {
+// Obergrenze des Änderungswunsches (main.py IterIn.text max_length)
+export const ITER_MAX = 4000;
+const CONCL_HEAD = "Nachgemessen mit dem Messschieber: ";
+const CONCL_TAIL = ". Leite daraus abhängige Maße ab (Tiefen, Dicken, Abstände, die an diesen Maßen hängen), trage bei jedem "
+  + "geänderten Maß derived_from und eine kurze Begründung ein und ändere sonst nichts.";
+// Text des Aenderungswunsches fuer „Schluesse ziehen“ (Spec §5); zu lang fuer max: die ersten Maße und „n weitere“
+// (die KI kennt sie aus den Zeilen „Parametrisch geändert“ im Verlauf)
+export function conclusionText(list, max = ITER_MAX) {
   if (!list.length) return "";
   const items = list.map(p => `${p.id} ${p.label} = ${de(p.value)} mm`
     + (p.old == null ? "" : ` (vorher ${p.old_assumed ? "Annahme " : ""}${de(p.old)})`));
-  return `Nachgemessen mit dem Messschieber: ${items.join("; ")}. Leite daraus abhängige Maße ab (Tiefen, Dicken, Abstände, `
-    + "die an diesen Maßen hängen), trage bei jedem geänderten Maß derived_from und eine kurze Begründung ein und ändere sonst nichts.";
+  const text = n => CONCL_HEAD + items.slice(0, n).join("; ")
+    + (n < items.length ? `; und ${items.length - n} weitere (siehe „Parametrisch geändert“ im Verlauf)` : "") + CONCL_TAIL;
+  let n = items.length;
+  while (n > 1 && text(n).length > max) n--;
+  return text(n).slice(0, max);
 }
