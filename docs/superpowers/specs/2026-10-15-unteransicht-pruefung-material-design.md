@@ -27,7 +27,7 @@ Stufe B (eigene Spec): Textur aus den Fotos auf das Modell, GLB-Export.
 | A6 | Migration: alte Datenbank (Schema vor dieser Stufe) startet, `projects` hat danach `color, material, transparent, finish, material_user, cad_check`; ein zweiter Start ändert nichts | `pytest tests/test_parts_api.py -k migration_werkstueck -v` |
 | A7 | Bestehende Tests grün, Node-Tests grün | CI |
 | A8 | Manuell auf der DS918+ mit dem Kühlkörperblock: Unteransicht hochladen, Ausrichtung prüfen, Prüfkasten zeigt „Höhe unbekannt“, Auftrag mit erkanntem Umriss. Derselbe Auftrag wird dreimal gestartet; je Lauf notiert: Fasen x/2, Stufen x/2, Bohrungen x/12 (kein Stopp-Kriterium) | Browser |
-| A9 | `ai.call` übergibt bei CAD-Auftrag und Prüfung `temperature=0.0` an `messages.stream`, bei Vorschlägen und Teile-Zuordnung keinen Wert; `CAD_SYSTEM` enthält die neue Regel 8 („… ist verbindlich“) und Regel 9 („durchscheinende Strukturen … Innenbohrungen“). A9 prüft die Einstellung, nicht die Wirkung | `pytest tests/test_check.py -k "temperatur or prompt" -v` |
+| A9 | `ai.call` übergibt **keinen** `temperature`-Wert (geändert bei der Abnahme am 15.10.2026: Claude Opus 5.5 und Sonnet 5.5 lehnen jeden Wert außer dem Standard mit 400 ab, das Python-SDK ≥ 1.0 kennt den Parameter nicht mehr; die Streuung lässt sich nur über Ausgabeformat und Beispiele verringern – Folgearbeit); `CAD_SYSTEM` enthält die neue Regel 8 („… ist verbindlich“) und Regel 9 („durchscheinende Strukturen … Innenbohrungen“). A9 prüft die Einstellung, nicht die Wirkung | `pytest tests/test_check.py -k "temperature or prompt" -v` |
 
 ## Entscheidungen des Nutzers (15.10.2026)
 
@@ -108,7 +108,7 @@ Stufe B (eigene Spec): Textur aus den Fotos auf das Modell, GLB-Export.
 - Regel 8 wird ersetzt: „Der Umriss aus der Draufsicht (Teile-Polygone) ist verbindlich: Fasen, Stufen, Absätze und Bohrungen daraus nachbilden. Fehlt ein Maß (z. B. die Höhe einer Stufe), schätze es, kennzeichne es als Annahme und nenne es in `check_before_manufacturing`. Weglassen ist nur erlaubt, was kleiner als 0,5 mm ist. Laufzeit unter 60 Sekunden.“ (Keine Ausweichklausel bei Widerspruch zwischen Foto und Polygon: genau solche Klauseln haben das Weglassen verursacht; der Nutzer sieht die Teile in der Seitenleiste und korrigiert sie dort.)
 - Neue Regel 9: „Bei transparenten oder teiltransparenten Teilen sind durchscheinende Strukturen Innenbohrungen oder Innenkonturen, keine Rillen oder Nuten der Oberfläche. Bohrungen von unten und oben an derselben Stelle sind in der Regel ein Loch (ggf. Stufenloch).“
 - Offene Punkte: „Zu jedem offenen Punkt steht in `assumptions`, was angenommen wurde.“
-- `ai.call` bekommt `temperature: float | None = None` (wird nur gesetzt an `messages.stream` übergeben); CAD-Auftrag und Prüfung nutzen `0.0`, Vorschläge und Teile-Zuordnung keinen Wert.
+- `ai.call` übergibt keinen `temperature`-Wert (ursprünglich war `0.0` für CAD-Auftrag und Prüfung vorgesehen; die 5.5-Modelle lehnen den Parameter ab, siehe A9).
 
 ### 2.4 Oberfläche (`cad.js`)
 
