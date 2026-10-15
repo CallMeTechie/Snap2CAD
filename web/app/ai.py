@@ -417,19 +417,42 @@ def _upper(v) -> str | None:
     return v.strip().upper() if isinstance(v, str) else None
 
 
+_LEGACY_ID = re.compile(r"^M[0-9]{1,4}$")
+
+
+def _legacy_dims(raw: list) -> list[dict]:
+    """Alte Form (vor Stufe B, id = M-Nummer mit measured/nominal): nur Anzeige und Pruefpunkt, nie editierbar."""
+    out, seen = [], set()
+    for it in raw:
+        did = _upper(it.get("id")) if isinstance(it, dict) else None
+        if not did or not _LEGACY_ID.fullmatch(did) or did in seen:
+            continue
+        seen.add(did)
+        out.append({"id": did, "label": " ".join(_text(it.get("label"), 200).split())[:60] or did,
+                    "measured": _pos_num(it.get("measured")), "nominal": _pos_num(it.get("nominal")),
+                    "note": " ".join(_text(it.get("note"), 400).split())[:120], "editable": False})
+        if len(out) == MAX_DIMS:
+            break
+    return out
+
+
 def parse_dims(raw, meas_ids=frozenset()) -> list[dict]:
     """Masse der KI bereinigen (Spec Stufe B §1): D-Nummer Pflicht, erste gewinnt; ohne var/value nicht editierbar
-    und ohne Anker; ref nur mit vorhandener Messung; derived_from nur auf ein anderes Mass der Liste."""
+    und ohne Anker; ref nur mit vorhandener Messung; derived_from nur auf ein anderes Mass der Liste.
+    Enthaelt die Liste keine D-Nummer, aber M-Nummern (Antwort im alten Format, z. B. alte Auftraege), bleiben
+    diese als nicht editierbare Zeilen der alten Form stehen, statt die Tabelle stillschweigend zu leeren."""
     out, seen = [], set()
-    for it in raw if isinstance(raw, list) else []:
+    raw = raw if isinstance(raw, list) else []
+    for it in raw:
         if not isinstance(it, dict):
             continue
         did = _upper(it.get("id")) or ""
         if not _DIM_ID.fullmatch(did) or did in seen:
             continue
         seen.add(did)
-        var = it["var"] if isinstance(it.get("var"), str) and _VAR.fullmatch(it["var"]) else None
         value = _pos_num(it.get("value"))
+        # ohne eigenen value nie editierbar, auch wenn der Rueckfall nominal einen Wert liefert
+        var = it["var"] if value is not None and isinstance(it.get("var"), str) and _VAR.fullmatch(it["var"]) else None
         ref = _upper(it.get("ref"))
         d = {"id": did, "label": " ".join(_text(it.get("label"), 200).split())[:60] or did,
              "group": it.get("group") if it.get("group") in DIM_GROUPS else "sonst", "var": var,
@@ -444,6 +467,8 @@ def parse_dims(raw, meas_ids=frozenset()) -> list[dict]:
         out.append(d)
         if len(out) == MAX_DIMS:
             break
+    if not out:
+        return _legacy_dims(raw)
     ids = {d["id"] for d in out}
     for d in out:
         if d["derived_from"] not in ids or d["derived_from"] == d["id"]:

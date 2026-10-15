@@ -101,6 +101,50 @@ def test_parse_hoechstens_200_und_ohne_liste():
     assert meta["dimensions"] == []
 
 
+def test_parse_var_ohne_value_nicht_editierbar():
+    """Spec §1: fehlt value, bleibt das Mass auch mit var und nominal-Rueckfall nicht editierbar und ohne Anker."""
+    from app import ai, jobs
+    meta, code = ai.parse_cad(_answer([{"id": "D1", "label": "Länge", "var": "LENGTH", "nominal": 80,
+                                        "a": [0, 0, 0], "b": [80, 0, 0]}]))
+    jobs.mark_editable(meta, "LENGTH = 80\n" + code)
+    d = meta["dimensions"][0]
+    assert (d["var"], d["value"], d["editable"]) == (None, 80.0, False) and "a" not in d
+
+
+def test_parse_nur_m_nummern_bleibt_alte_form():
+    """Alte Auftraege: Antwort nur mit M-Nummern behaelt die Tabelle in alter Form (nicht editierbar)."""
+    from app import ai, jobs
+    meta, _ = ai.parse_cad(_answer([{"id": "m1", "label": "Länge", "measured": 79.8, "nominal": 80.0, "note": "gerundet"},
+                                    {"id": "M1", "label": "doppelt", "nominal": 1},
+                                    {"id": "M2", "label": "Breite", "var": "WIDTH", "value": 50, "a": [0, 0, 0]},
+                                    {"id": "X9", "label": "fremd"}, "kein dict"]))
+    assert meta["dimensions"] == [
+        {"id": "M1", "label": "Länge", "measured": 79.8, "nominal": 80.0, "note": "gerundet", "editable": False},
+        {"id": "M2", "label": "Breite", "measured": None, "nominal": None, "note": "", "editable": False}]
+    jobs.mark_editable(meta, "WIDTH = 50\n")
+    assert not any(d["editable"] for d in meta["dimensions"])
+    mixed, _ = ai.parse_cad(_answer([{"id": "D1", "label": "Länge", "var": "LENGTH", "value": 80},
+                                     {"id": "M1", "label": "alt", "nominal": 80}]))
+    assert [d["id"] for d in mixed["dimensions"]] == ["D1"]        # mit D-Nummern gilt nur die neue Form
+
+
+def test_ki_lauf_nur_m_nummern_tabelle_und_pruefpunkt(user, monkeypatch):
+    from app import ai
+    _fake_sandbox(monkeypatch)
+    pid = _proj(user)
+    _meas(user, pid, "Länge", 80.0, critical=True)                                   # M1
+    monkeypatch.setattr(ai, "call", lambda *a, **k: (_answer([{"id": "M1", "label": "Länge", "measured": 79.8,
+                                                                 "nominal": 80.0}]), {}))
+    r = user.post("/api/jobs", json={"project_id": pid, "name": "Alt", "request": "x"}, headers=H)
+    j = _wait(user, r.json()["id"])
+    v = j["versions"][-1]
+    assert j["status"] == "done" and v["status"] == "ok", j
+    assert [(d["id"], d["nominal"], d["editable"]) for d in v["meta"]["dimensions"]] == [("M1", 80.0, False)]
+    assert next(c for c in v["checks"] if c["id"] == "critical")["state"] == "ok"
+    assert any(x["msg"] == f"Version {v['version']}: 1 Maß ohne D-Nummer (altes Format) – am Modell nicht änderbar"
+               for x in j["log"])
+
+
 def test_parse_prompt_regeln_11_bis_13():
     from app import ai
     s = ai.CAD_SYSTEM
@@ -577,10 +621,14 @@ def test_param_fremder_nutzer(user, app, admin, monkeypatch):
     assert f.post(f"/api/invite/{tok}", json={"username": f"fremdb{jid}", "display_name": "Fremd",
                                               "password": "Schieblehre-Messing-7"}, headers=H).status_code == 200
     assert f.post(f"/api/jobs/{jid}/param", json={"values": [{"id": "D2", "value": 45}]}, headers=H).status_code == 404
+    for bad in (0, 9999):                       # Besitz vor Wertebereich: fremder Auftrag bleibt 404, nicht 422
+        assert f.post(f"/api/jobs/{jid}/param", json={"values": [{"id": "D2", "value": bad}]},
+                      headers=H).status_code == 404
+    assert user.post(f"/api/jobs/{jid}/param", json={"values": [{"id": "D2", "value": 0}]}, headers=H).status_code == 422
 
 
 def test_version_pending_param_reihenfolge(user):
-    from app import jobs
+    from app import db, jobs
     pid = _proj(user)
     m = copy.deepcopy(BLOCK_META)
     jid = _job(user, pid, BLOCK, m)
@@ -594,19 +642,26 @@ def test_version_pending_param_reihenfolge(user):
         if ids:
             out["param_ids"] = list(ids)
         return out
-    _version(jid, 2, "param", "ok", meta("D2", D2=45.0), "D2 = 45 mm")
-    _version(jid, 3, "param", "failed", meta("D1", D2=45.0, D1=50.0), "D1 = 50 mm")
-    _version(jid, 4, "param", "ok", meta("D1", D2=45.0, D1=41.0), "D1 = 41 mm")
+    def ver(n, trigger, status, mt, req=""):
+        """Version anlegen; eine ok-Version wird wie im echten Lauf aktuell."""
+        _version(jid, n, trigger, status, mt, req)
+        if status == "ok":
+            db.ex("UPDATE jobs SET current_version=? WHERE id=?", (n, jid))
+    ver(2, "param", "ok", meta("D2", D2=45.0), "D2 = 45 mm")
+    ver(3, "param", "failed", meta("D1", D2=45.0, D1=50.0), "D1 = 50 mm")
+    ver(4, "param", "ok", meta("D1", D2=45.0, D1=41.0), "D1 = 41 mm")
     assert jobs.pending_param(jid) == [
         {"id": "D2", "label": "Höhe Block", "value": 45.0, "old": 75.0, "old_assumed": True},
         {"id": "D1", "label": "Länge", "value": 41.0, "old": 40.0, "old_assumed": False}]
-    _version(jid, 5, "iterate", "failed", meta())          # fehlgeschlagene KI-Version setzt nichts zurueck
+    ver(5, "iterate", "failed", meta())          # fehlgeschlagene KI-Version setzt nichts zurueck
     assert [p["id"] for p in jobs.pending_param(jid)] == ["D2", "D1"]
-    _version(jid, 6, "iterate", "ok", meta(D2=45.0, D1=41.0))
+    _version(jid, 6, "iterate", "ok", meta(D2=45.0, D1=41.0))   # ok, aber durch Abbruch nie aktuell geworden
+    assert [p["id"] for p in jobs.pending_param(jid)] == ["D2", "D1"]
+    db.ex("UPDATE jobs SET current_version=6 WHERE id=?", (jid,))
     assert jobs.pending_param(jid) == []
-    _version(jid, 7, "param", "ok", meta("D3", D2=45.0, D1=41.0, D3=6.5), "D3 = 6.5 mm")
+    ver(7, "param", "ok", meta("D3", D2=45.0, D1=41.0, D3=6.5), "D3 = 6.5 mm")
     assert jobs.pending_param(jid) == [{"id": "D3", "label": "Bohrung", "value": 6.5, "old": 6.0, "old_assumed": False}]
-    _version(jid, 8, "param", "ok", meta(D2=45.0, D1=41.0, D3=7.0), "D3 = 7 mm")       # ohne param_ids: zaehlt nicht
+    ver(8, "param", "ok", meta(D2=45.0, D1=41.0, D3=7.0), "D3 = 7 mm")       # ohne param_ids: zaehlt nicht
     assert [p["value"] for p in jobs.pending_param(jid)] == [6.5]
 
 

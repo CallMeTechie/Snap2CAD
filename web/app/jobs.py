@@ -685,7 +685,11 @@ def _run_param(job_id: int, version: int, ev: threading.Event):
 def pending_param(job_id: int) -> list[dict]:
     """§5: Masse aus erfolgreichen Param-Versionen (meta["param_ids"]) nach der letzten erfolgreichen KI-Version."""
     vs = db.q("SELECT version, trigger, status, meta FROM job_versions WHERE job_id=? ORDER BY version", (job_id,))
-    ai_ok = [v for v in vs if v["trigger"] != "param" and v["status"] == "ok"]
+    job = db.q1("SELECT current_version FROM jobs WHERE id=?", (job_id,))
+    cur = (job or {}).get("current_version") or 0
+    # Bezug: juengste erfolgreiche KI-Version, die aktuell ist oder war (version <= current_version); eine ok-Version,
+    # die durch einen Abbruch nie aktuell wurde, setzt die Liste nicht zurueck
+    ai_ok = [v for v in vs if v["trigger"] != "param" and v["status"] == "ok" and v["version"] <= cur]
     if not ai_ok:
         return []
     last = ai_ok[-1]
@@ -805,6 +809,10 @@ def _run(job_id: int, trigger: str, request_text: str, ev: threading.Event):
             result, checks = None, []
         else:
             mark_editable(meta, code)
+            legacy = sum(1 for d in meta["dimensions"] if not str(d.get("id", "")).startswith("D"))
+            if legacy:   # Antwort im alten Format (M-Nummern): Tabelle bleibt, Werte am Modell nicht aenderbar
+                n = "1 Maß" if legacy == 1 else f"{legacy} Maße"
+                log(job_id, f"Version {version}: {n} ohne D-Nummer (altes Format) – am Modell nicht änderbar", "warn")
             learned_chk = reconcile_learned(meta, job["project_id"], job_id)   # Spec §4: nur nach KI-Laeufen
             (vdir / "model.py").write_text(code, encoding="utf-8")
             db.ex("UPDATE job_versions SET code=?, meta=? WHERE job_id=? AND version=?",
