@@ -215,7 +215,11 @@ def _photo_public(ph: dict) -> dict:
             "rect": a.get("rect"), "gauge_rect": a.get("gauge_rect"),
             "files": [n[:-4] for n in ("orig.jpg", "overlay.jpg", "rect.jpg", "gauge.jpg", "thumb.jpg")
                       if (d / n).is_file()],
-            "has_edges": (d / "edges.json").is_file()}
+            "has_edges": (d / "edges.json").is_file(),
+            "contrast": a.get("contrast"), "low_contrast": a.get("contrast") is not None and a["contrast"] < 12,
+            "bottom_align": a.get("bottom_align") if ph["view"] == "bottom" else None,
+            "align_note": a.get("align_note") if ph["view"] == "bottom" else None,
+            "bottom_rot_user": a.get("bottom_rot_user")}
 
 
 def _grid_h(fmt: str | None) -> float | None:
@@ -831,10 +835,12 @@ def project_delete(pid: int, u: dict = Depends(auth.require_user)):
 
 # ------------------------------------------------------------------ Fotos
 
-VIEWS = ("top", "tilted", "gauge", "overview")
+VIEWS = ("top", "bottom", "tilted", "gauge", "overview")
+PLANAR = ("top", "bottom")
+ALIGN_PXMM = 4.0
 
 
-def _analyze_store(phid: int, img, fmt: str | None) -> dict:
+def _analyze_store(phid: int, img, fmt: str | None, view: str, hints: dict | None = None) -> dict:
     d = _photo_dir(phid)
     a = vision.analyze(img, fmt)
     for n in ("rect.jpg", "gauge.jpg"):
@@ -851,7 +857,90 @@ def _analyze_store(phid: int, img, fmt: str | None) -> dict:
         (d / "gauge.jpg").write_bytes(vision.encode_jpg(g, 90))
         a["gauge_rect"] = {"pxmm": vision.PX_PER_MM, "x0": x0, "x1": x1, "y0": y0, "y1": y1,
                            "w": g.shape[1], "h": g.shape[0]}
+    if a.get("rect") and view in PLANAR and _detect_lock.acquire(timeout=30):
+        try:
+            res = edges.detect(rect, a["format"], hints)
+            a["outline_mm"] = res["outlines"][0]["polygon"] if res["outlines"] else None
+            a["contrast"] = res["contrast"]
+            a["outline_hints"] = hints or {}
+        except Exception:  # noqa: BLE001 – Umriss ist optional
+            a["outline_mm"] = None
+        finally:
+            _detect_lock.release()
     return a
+
+
+def _set_analysis(phid: int, a: dict):
+    db.ex("UPDATE photos SET analysis=? WHERE id=?", (db.jdump(a), phid))
+
+
+def _outline_of(ph: dict):
+    """Umriss (mm) aus analysis.outline_mm; sonst nachrechnen (unter _detect_lock). None = keiner, "timeout" = spaeter."""
+    a = db.jload(ph["analysis"], {}) or {}
+    if "outline_mm" in a:
+        return a["outline_mm"]
+    rect_path = _photo_dir(ph["id"]) / "rect.jpg"
+    if not a.get("rect") or not rect_path.is_file():
+        return None
+    if not _detect_lock.acquire(timeout=30):
+        return "timeout"
+    try:
+        img = cv2.imread(str(rect_path))
+        res = edges.detect(img, ph["format"]) if img is not None else {"outlines": [], "contrast": None}
+    except Exception:  # noqa: BLE001 – Umriss ist optional
+        res = {"outlines": [], "contrast": None}
+    finally:
+        _detect_lock.release()
+    outline = res["outlines"][0]["polygon"] if res["outlines"] else None
+    with db.atomic():  # frisch lesen: ein paralleler Formatwechsel darf nicht ueberschrieben werden
+        cur = db.q1("SELECT format, analysis FROM photos WHERE id=?", (ph["id"],))
+        if not cur or cur["format"] != ph["format"]:
+            return None
+        a2 = db.jload(cur["analysis"], {}) or {}
+        a2["outline_mm"], a2["contrast"] = outline, res["contrast"]
+        _set_analysis(ph["id"], a2)
+        ph["analysis"] = db.jdump(a2)
+    return outline
+
+
+def _align_photo(ph: dict, top: dict | None):
+    """bottom_align einer Unteransicht neu berechnen (Spec §1 „Wann“); Handwahl (bottom_rot_user) bleibt."""
+    ot = _outline_of(top) if top is not None and ph["view"] == "bottom" else None
+    ob = _outline_of(ph) if ph["view"] == "bottom" else None
+    with db.atomic():
+        cur = db.q1("SELECT * FROM photos WHERE id=?", (ph["id"],))
+        if not cur or cur["format"] != ph["format"]:
+            return   # geloescht oder paralleler Formatwechsel (der rechnet selbst neu)
+        a = db.jload(cur["analysis"], {}) or {}
+        user_rot = a.get("bottom_rot_user")
+        a.pop("bottom_align", None)
+        a.pop("align_note", None)
+        if cur["view"] == "bottom" and a.get("rect"):
+            if top is None:
+                a["align_note"] = "Draufsicht fehlt"
+            elif ot == "timeout" or ob == "timeout":
+                a["align_note"] = "Ausrichtung nicht berechnet – erneut versuchen"
+            elif not ot or not ob:
+                a["align_note"] = "Umriss nicht erkennbar"   # bottom_align bleibt null: to_top nutzt rot=0 ohne Versatz
+            else:
+                r = a["rect"]
+                al = vision.align_bottom(ot, ob, r["w_mm"], r["h_mm"], rot=user_rot)
+                if user_rot is not None:
+                    al["unsure"] = False
+                a["bottom_align"] = {**al, "auto": user_rot is None, "top_photo_id": top["id"]}
+        _set_analysis(cur["id"], a)
+
+
+def _realign_project(pid: int):
+    """Alle Unteransichten eines Projekts neu ausrichten, danach die Teile verknuepfen. Nie in db.atomic()."""
+    top = parts.reference_top(pid)
+    if top is not None and _outline_of(top) == "timeout":
+        top = {**top, "analysis": db.jdump({**(db.jload(top["analysis"], {}) or {}), "outline_mm": "timeout"})}
+        # Referenz nicht berechenbar: jede Unteransicht bekommt den Hinweis, ohne erneut zu warten
+    for ph in db.q("SELECT * FROM photos WHERE project_id=? AND view='bottom'", (pid,)):
+        _align_photo(ph, top)
+    with db.atomic():
+        parts.link_bottom(pid)
 
 
 @app.post("/api/projects/{pid}/photos")
@@ -878,13 +967,15 @@ def photo_upload(pid: int, file: UploadFile = File(...), view: str = Form("top")
     try:
         (d / "orig.jpg").write_bytes(vision.encode_jpg(img, 92))
         (d / "thumb.jpg").write_bytes(vision.encode_jpg(vision.thumbnail(img, 360), 82))
-        a = _analyze_store(phid, img, format if format in matgen.FORMATS else None)
+        a = _analyze_store(phid, img, format if format in matgen.FORMATS else None, view)
     except Exception as e:  # noqa: BLE001
         shutil.rmtree(d, ignore_errors=True)
         db.ex("DELETE FROM photos WHERE id=?", (phid,))
         raise HTTPException(400, f"Auswertung fehlgeschlagen: {e}") from None
     db.ex("UPDATE photos SET format=?, status=?, max_err=?, analysis=? WHERE id=?",
           (a.get("format"), a["status"], a.get("max_err_mm"), db.jdump(a), phid))
+    if view in PLANAR:
+        _realign_project(pid)
     return _photo_public(db.q1("SELECT * FROM photos WHERE id=?", (phid,)))
 
 
@@ -900,7 +991,7 @@ def photo_patch(phid: int, body: PhotoPatch, u: dict = Depends(auth.require_user
         db.ex("UPDATE photos SET view=? WHERE id=?", (body.view, phid))
     if body.format is not None and body.format != ph["format"]:
         img = vision.load_image((_photo_dir(phid) / "orig.jpg").read_bytes())
-        a = _analyze_store(phid, img, body.format if body.format in matgen.FORMATS else None)
+        a = _analyze_store(phid, img, body.format if body.format in matgen.FORMATS else None, ph["view"])
         with db.atomic():
             db.ex("UPDATE photos SET format=?, status=?, max_err=?, analysis=? WHERE id=?",
                   (a.get("format"), a["status"], a.get("max_err_mm"), db.jdump(a), phid))
@@ -1085,7 +1176,8 @@ def meas_create(pid: int, body: MeasIn, u: dict = Depends(auth.require_user)):
             raise HTTPException(400, "Wert fehlt")
     unc = body.unc if body.unc is not None else (parts.default_unc(photo, body.view) if source == "user" else 0.1)
     unit = "°" if body.kind == "angle" else "mm"
-    data = {"view": body.view if body.view in ("top", "gauge") else "top", "points": pts, "note": body.note}
+    bottom_ok = body.view == "bottom" and photo is not None and photo["view"] == "bottom"
+    data = {"view": body.view if body.view in ("top", "gauge") or bottom_ok else "top", "points": pts, "note": body.note}
     with db.atomic():
         seq = _next_seq(pid)
         mid = db.ex("""INSERT INTO measurements(project_id,photo_id,seq,label,kind,value,unit,unc,data,critical,caliper,fit,
@@ -1310,7 +1402,7 @@ def meas_suggest(pid: int, body: SuggestIn, request: Request, u: dict = Depends(
     n_img = 0
     for ph in photos:
         d = _photo_dir(ph["id"])
-        if used_photo is None and (d / "rect.jpg").is_file():
+        if used_photo is None and ph["view"] == "top" and (d / "rect.jpg").is_file():
             used_photo = ph
             content += ai.image_ref(d / "rect.jpg", ai.scaled_caption(
                 d / "rect.jpg", f"Draufsicht (Foto {ph['id']}), Ansicht \"top\"", vision.PX_PER_MM))

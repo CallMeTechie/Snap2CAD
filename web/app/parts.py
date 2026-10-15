@@ -358,6 +358,28 @@ def assign_holes(parts_list, holes):
 
 # ------------------------------------------------------------------ Datenbank
 
+def reference_top(project_id):
+    """Referenz-Draufsicht: view='top', rect vorhanden, status gut/brauchbar, kleinste id (Spec §1)."""
+    rows = db.q("SELECT * FROM photos WHERE project_id=? AND view='top' AND status IN ('gut','brauchbar') ORDER BY id",
+                (project_id,))
+    return next((ph for ph in rows if (db.jload(ph["analysis"], {}) or {}).get("rect")), None)
+
+
+def to_top(photo, pts):
+    """Punkte einer Unteransicht (mm) in Draufsicht-Koordinaten; ohne Ausrichtung nur die Spiegelung (rot=0)."""
+    from core import vision  # spaet: main.py setzt sys.path erst nach den App-Importen
+    a = db.jload(photo["analysis"], {}) or {}
+    r = a.get("rect")
+    if not r:   # Foto ohne Entzerrung (z. B. nach Formatwechsel): Punkte unveraendert
+        return [[float(x), float(y)] for x, y in pts]
+    al = a.get("bottom_align") or {"rot": 0, "dx": 0.0, "dy": 0.0}
+    return vision.apply_lage(vision.lage_matrix(al["rot"], al["dx"], al["dy"], r["w_mm"], r["h_mm"]), pts)
+
+
+def link_bottom(project_id):
+    """Platzhalter: Task 5 verknuepft hier die Teile der Unteransichten mit denen der Draufsicht."""
+
+
 def default_unc(photo, view):
     """Standard-Unsicherheit einer Fotomessung (vorher main._default_unc)."""
     if not photo:
