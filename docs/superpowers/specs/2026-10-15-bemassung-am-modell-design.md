@@ -71,7 +71,8 @@ Neue Regeln im `CAD_SYSTEM`:
     Werten oder ein Objekt mit `X`, `Y`, `Z` (build123d `Vector`), jeder Wert mit `float()` wandelbar und endlich.
     Ungültige Einträge werden übersprungen; ist `DIM_ANCHORS` kein dict oder wirft die Auswertung, fehlt
     `dim_anchors`. Die Auswertung steht in einem eigenen `try` außerhalb von Export und Prüfung und lässt den Lauf
-    nie scheitern. So sitzen die Linien nach jedem Neuaufbau, auch nach §2, auf dem Modell.
+    nie scheitern. Der Server filtert `dim_anchors` erneut; nur gefilterte Einträge werden gespeichert. So sitzen
+    die Linien nach jedem Neuaufbau, auch nach §2, auf dem Modell.
 
 Die bisherigen Felder `measured`/`nominal` entfallen im Antwortformat. Gespeicherte Versionen behalten ihre Meta
 unverändert; `parse_cad` betrifft nur neue Antworten. Viewer und Tabelle lesen alte Einträge (ohne `var`/`a`/`b`) als
@@ -113,10 +114,14 @@ Ablauf (in `jobs.param(user, job, values)`):
 
 1. Unter `jobs._lock`: Auftrag darf nicht `queued`/`running` sein (sonst 409 „Der Auftrag läuft noch.“), wie bei
    `iterate`. Basis ist `current_version` (sonst 409 „keine Version“). Kein `_check_quota`, kein `_check_ready` auf
-   die KI; die Sandbox muss laufen (sonst 503 wie beim Auftrag).
+   die KI; die Sandbox muss laufen (sonst 503 wie beim Auftrag). Ein Konto mit gesperrtem CAD (`cad_quota` 0) bekommt
+   403 „CAD ist für dieses Konto gesperrt.“. Grenzen statt Kontingent: höchstens ein laufender Neuaufbau je Nutzer
+   und höchstens `PARAM_PER_HOUR` (30) Neuaufbauten je Nutzer und Stunde, sonst 429.
 2. Für jede `id`: Maß in `meta["dimensions"]` der Basisversion mit `editable` suchen (sonst 400 „Maß D9 ist nicht
    editierbar“); Zeile `VAR = alt` im Code durch `VAR = neu` ersetzen (Zahl mit bis zu 3 Nachkommastellen, Kommentar
-   bleibt); `meta["dimensions"][i]` bekommt `value = neu`, `assumed = false`, `user_set = true`, `derived_from = null`.
+   bleibt); `meta["dimensions"][i]` bekommt `value = neu`, `assumed = false`, `user_set = true`, `derived_from = null`;
+   `meta["param_ids"]` listet die geänderten D-Nummern (`["D3"]`), daraus lesen der Lauf, `pending_param` und der
+   Viewer, welche Maße geändert wurden.
    Die Anker kommen nach dem Bau aus `dim_anchors` (Regel 13, über `jobs._apply_anchors`). Rückfall je Maß ohne
    Eintrag in `dim_anchors`: Ein geändertes Maß bekommt seine Anker entlang a→b auf den neuen Wert gestreckt; jedes
    andere Maß ohne Eintrag behält seine Anker und wird grau gestrichelt gezeichnet (`anchors_stale: true`), bis ein
@@ -153,7 +158,8 @@ Antwort: `{"version": n}`; der Client pollt den Auftrag wie bisher.
   Wahl liegt in `localStorage` (`dims.groups`). Die Regel ist die reine Funktion `visibleDims(dims, sel)` in `geom.js`
   (B5).
 - Klick auf ein Label: Label wird zum Eingabefeld (`<input inputmode="decimal">`, vorbelegt mit dem Wert); Enter
-  sendet §2 (nur dieses Maß), Esc bricht ab; während des Laufs ist das Feld gesperrt und der Auftragsstatus zeigt
+  sendet §2 (nur dieses Maß, auch mit unverändertem Wert: das bestätigt eine Annahme als nachgemessen), Esc bricht
+  ab; während des Laufs ist das Feld gesperrt und der Auftragsstatus zeigt
   „Neuaufbau mit D3 = 45 …“. Nicht editierbare Maße (`editable: false`) zeigen beim Klick den Hinweis „Dieses Maß ist
   im Code keine Konstante – Änderungswunsch formulieren.“ Labels editierbarer Maße tragen die Klasse `dimlabel edit`
   mit `pointer-events:auto; cursor:pointer`; Hauptmaß-Labels bleiben `pointer-events:none`, damit sie das Drehen nicht
@@ -161,7 +167,8 @@ Antwort: `{"version": n}`; der Client pollt den Auftrag wie bisher.
 - Maßtabelle unter dem Viewer (bestehende Tabelle `meta.dimensions`) bekommt Spalten Gruppe, Wert, Zustand
   (Annahme / nachgemessen / abgeleitet von …) und ein Eingabefeld je editierbarem Maß; Klick auf eine Zeile hebt die
   Linie im Viewer hervor (dicker, 1,5 s). Ein Knopf „Werte übernehmen“ unter der Tabelle sendet alle geänderten Felder
-  in einem Aufruf nach §2 (höchstens 20); Enter in einem Feld sendet nur dieses.
+  in einem Aufruf nach §2 (höchstens 20); Enter in einem Feld sendet nur dieses, auch unverändert („Annahme
+  bestätigen“).
 - Versionswechsel im Auftrag lädt die Maße der gewählten Version.
 
 ## §4 Lernen (gelernte Werte am Projekt)
@@ -170,7 +177,7 @@ Neue Tabelle `model_dims`:
 
 ```sql
 CREATE TABLE IF NOT EXISTS model_dims(
-  id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   label TEXT NOT NULL, label_norm TEXT NOT NULL,
   grp TEXT NOT NULL, value REAL NOT NULL, job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL, dim_id TEXT,
   note TEXT, created_at TEXT NOT NULL,
@@ -187,10 +194,11 @@ weicht `value` höchstens 0,01 mm ab → `user_set = true`, `assumed = false`; s
 selbst auf den gelernten Wert zurück (Marc, 15.10.2026: warnen, nicht erzwingen).
 
 - Beim Param-Aufruf (§2) wird je Maß ein Eintrag geschrieben (`job_id`, `dim_id` = D-Nummer).
-- `jobs.measurement_table` bekommt nach der bisherigen Tabelle einen Abschnitt
-  `## Messschieber am Modell (verbindlich)` mit Zeilen `- Höhe Block: 45 mm (Gruppe außen, gemessen am Auftrag 7)`;
-  Erstauftrag und Prüfung bekommen den Abschnitt über `measurement_table`; `_iterate_locked` hängt ihn an den Text
-  jedes Änderungswunsches an, wenn das Projekt des Auftrags gelernte Werte hat. `CAD_SYSTEM` Regel 11 ergänzt:
+- Ein Abschnitt `## Messschieber am Modell (verbindlich)` mit Zeilen
+  `- Höhe Block: 45 mm (Gruppe außen, gemessen am Auftrag 7)` geht an die KI: `jobs.build_initial_message` hängt ihn
+  nach der Messtabelle an (Erstauftrag und Prüfung), `jobs.measurement_table` bleibt unverändert (Vorschläge über
+  `/suggest` bekommen den Abschnitt nicht); `_iterate_locked` hängt ihn an den Text jedes Änderungswunsches an, wenn
+  das Projekt des Auftrags gelernte Werte hat. `CAD_SYSTEM` Regel 11 ergänzt:
   „Werte aus „Messschieber am Modell“ sind verbindlich und nie Annahmen.“
 - `check.cad_hash` bezieht die gelernten Werte des Projekts ein; ein neuer oder gelöschter Messschieberwert macht die
   Prüfung veraltet.
@@ -234,11 +242,11 @@ automatische KI-Folgerung ohne Klick; Bemaßung im Foto-Abgleich.
 | B1 | `parse_cad` übernimmt gültige Maße (D-Nummern, `ref` nur mit vorhandener Messung, doppelte `id` verworfen, `derived_from` nur auf eine `id` der Liste), behält Einträge ohne `var`/`value` als nicht editierbar, ergänzt `group=sonst`, `assumed=false`; `editable` nach Codeprüfung, mehrfach belegte Konstante → `editable: false`; `_apply_anchors`: Anker aus `dim_anchors` vor `a`/`b`, Abstandsprüfung, ungültige Anker entfernt, Meta erneut gespeichert | `pytest tests/test_dims.py -k "parse or anker"` |
 | B2 | Param-Ersetzung: `VAR = 75.0  # Kommentar` → `VAR = 45  # Kommentar`; mehrere Werte; nicht editierbares Maß → 400; laufender Auftrag → 409 | `pytest tests/test_dims.py -k param` |
 | B3 | Param-Version ohne KI-Aufruf (`monkeypatch` von `ai.call` mit Aufrufliste – Liste bleibt leer), `trigger=param`, Meta mit `user_set`, Anker nach dem Bau aus `dim_anchors` auf dem neuen Wert; ohne `dim_anchors`: geändertes Maß gestreckt, übrige `anchors_stale: true`; `pending_param`; Sandbox-Fehler → `failed`, Basis bleibt. Läufer: `DIM_ANCHORS` → `result.json["dim_anchors"]`; kein dict, `Vector`-Punkte, NaN, falscher Schlüssel, mehr als 200 Einträge → Lauf `ok`, nur gültige Einträge, kein `error.json` | `pytest tests/test_dims.py -k version` und `pytest tests/test_sandbox.py -k anchors` (braucht build123d; läuft in der CI über `web/requirements.txt`) |
-| B4 | Gelernte Werte: UPSERT je `label_norm`, in `measurement_table` als Abschnitt, in Auftrag/Prüfung/Änderung enthalten, Löschen | `pytest tests/test_dims.py -k lernen` |
+| B4 | Gelernte Werte: UPSERT je `label_norm`, als Abschnitt über `build_initial_message` und `_iterate_locked`, in Auftrag/Prüfung/Änderung enthalten, nicht in `measurement_table`, Löschen | `pytest tests/test_dims.py -k lernen` |
 | B5 | Viewer-Geometrie: Hilfslinienversatz, Labelposition, Gruppenfilter (reine Funktionen in `geom.js`) | `node --test tests/js/dims.test.mjs` |
 | B6 | Browser: Linien sichtbar, Gruppen schalten, Klick → Eingabe → neue Version (Testmodus), Banner, „Schlüsse ziehen“ erzeugt Änderungswunsch mit den Werten, Konsole ohne Fehler; nach dem Neuaufbau liegen die geänderte und eine abhängige Linie am neuen Wert | Playwright-Skript im Scratchpad (wie Stufe A), gegen lokalen Server mit `AI_FAKE`; dafür liefert `ai._fake_meta` `dimensions` mit `var`, `group`, `a`, `b` zu den Fake-Konstanten (`LENGTH`, `WIDTH`, `THICKNESS`, `HOLE_D`, …), mindestens ein Maß mit `assumed: true`. `_FAKE_V1` und `_FAKE_V2` enden mit `DIM_ANCHORS` zu diesen Maßen (in `_FAKE_V2` wegen `.format` mit `{{ }}`); geprüft über `dim_anchors` der Param-Version. |
 | B7 | Alte Version ohne Anker → nur Hauptmaße, keine Konsolenfehler | Playwright-Skript im Scratchpad (wie B6) |
-| B8 | Abnahme auf der DS918+ mit dem Kühlkörperblock: Höhe und Bohrungs-Ø nachmessen und eintragen (Marc), Modell folgt in < 30 s (Feld `seconds` der Param-Version), „Schlüsse ziehen“ passt Bohrtiefe/Plattendicke mit Begründung an; nach dem Eintragen der Höhe liegen Höhen- und Bohrtiefenlinie auf dem Modell (Protokoll: `dim_anchors` der Param-Version, Endpunkt Höhe = Messwert ± 0,1 mm, und Bildschirmfoto) | Protokoll |
+| B8 | Abnahme auf der DS918+ mit dem Kühlkörperblock: Höhe und Bohrungs-Ø nachmessen und eintragen (Marc), Modell folgt in < 30 s bei freiem Pool, also ohne gleichzeitig laufenden anderen Auftrag (Feld `seconds` der Param-Version), „Schlüsse ziehen“ passt Bohrtiefe/Plattendicke mit Begründung an; nach dem Eintragen der Höhe liegen Höhen- und Bohrtiefenlinie auf dem Modell (Protokoll: `dim_anchors` der Param-Version, Endpunkt Höhe = Messwert ± 0,1 mm, und Bildschirmfoto) | Protokoll |
 
 ## Auslieferung
 
