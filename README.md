@@ -33,6 +33,8 @@ Die acht Marker sitzen an bekannten Positionen. Aus ihren Ecken im Foto wird ein
 
 In der Web-App gibt es dazu drei Ergänzungen. Beim Hochladen lässt sich die Fotoart „Von unten“ wählen: Die Unteransicht wird am Umriss an der Draufsicht ausgerichtet, und die erkannte Lage lässt sich von Hand korrigieren. Vor dem CAD-Auftrag prüft ein Prüfkasten die Fotos und Maße, stellt Rückfragen oder fordert fehlende Fotos an; wer trotzdem weitermachen will, wählt „Trotzdem erzeugen“. Im Kasten „Werkstück“ lassen sich Farbe, Material und Transparenz angeben, und diese Handeingaben steuern die Kantenerkennung.
 
+Im 3D-Viewer eines Auftrags stehen die Maße des Modells als Bemaßungslinien, gruppenweise ein- und ausschaltbar (Außenmaße, Bohrungen, Tiefen, Fasen, Platten, Sonstige, Annahmen). Ein Klick auf ein Maß nimmt einen Messschieberwert an: Das Modell wird sofort ohne KI neu gebaut, der Wert gilt als „Messschieber am Modell“ für das ganze Projekt, und „Schlüsse ziehen“ lässt die KI die abhängigen Maße daraus ableiten. Die Liste der gemerkten Werte steht auf der Messseite und lässt sich dort löschen.
+
 ## Schnellstart
 
 1. **Drucken** mit *100 % / Tatsächliche Größe*. Nicht „An Seite anpassen“.
