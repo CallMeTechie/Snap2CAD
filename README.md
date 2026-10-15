@@ -31,6 +31,8 @@ Jedes PDF hat drei Seiten: Messunterlage, Höhenlehre zum Ausschneiden und eine 
 
 Die acht Marker sitzen an bekannten Positionen. Aus ihren Ecken im Foto wird eine Homographie berechnet, also die perspektivische Abbildung vom Foto auf die Tischebene. Damit lässt sich jedes Foto auf eine maßstabsgetreue Draufsicht zurückrechnen, auch wenn es leicht schräg aufgenommen wurde. Vier sichtbare Marker reichen, acht machen das Ergebnis robuster, falls das Bauteil einen Marker verdeckt.
 
+In der Web-App gibt es dazu drei Ergänzungen. Beim Hochladen lässt sich die Fotoart „Von unten“ wählen: Die Unteransicht wird am Umriss an der Draufsicht ausgerichtet, und die erkannte Lage lässt sich von Hand korrigieren. Vor dem CAD-Auftrag prüft ein Prüfkasten die Fotos und Maße, stellt Rückfragen oder fordert fehlende Fotos an; wer trotzdem weitermachen will, wählt „Trotzdem erzeugen“. Im Kasten „Werkstück“ lassen sich Farbe, Material und Transparenz angeben, und diese Handeingaben steuern die Kantenerkennung.
+
 ## Schnellstart
 
 1. **Drucken** mit *100 % / Tatsächliche Größe*. Nicht „An Seite anpassen“.
