@@ -11,14 +11,15 @@ import threading
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 import cv2
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from . import ai, auth, config, db, geom, jobs, parts, sandbox, settings
+from . import ai, auth, check, config, db, geom, jobs, parts, sandbox, settings
 
 sys.path.insert(0, str(config.ROOT))
 from core import edges, matgen, vision  # noqa: E402
@@ -204,9 +205,10 @@ def _photo_dir(phid: int) -> Path:
     return config.DATA_DIR / "photos" / str(phid)
 
 
-def _photo_public(ph: dict) -> dict:
+def _photo_public(ph: dict, hints: dict | None = None) -> dict:
     a = db.jload(ph["analysis"], {}) or {}
     d = _photo_dir(ph["id"])
+    has_edges = (d / "edges.json").is_file()
     return {"id": ph["id"], "project_id": ph["project_id"], "filename": ph["filename"], "view": ph["view"],
             "format": ph["format"], "status": ph["status"], "max_err": ph["max_err"], "created_at": ph["created_at"],
             "analysis": {k: a.get(k) for k in ("width", "height", "found_ids", "mat_ids", "missing_ids", "format_auto",
@@ -215,7 +217,12 @@ def _photo_public(ph: dict) -> dict:
             "rect": a.get("rect"), "gauge_rect": a.get("gauge_rect"),
             "files": [n[:-4] for n in ("orig.jpg", "overlay.jpg", "rect.jpg", "gauge.jpg", "thumb.jpg")
                       if (d / n).is_file()],
-            "has_edges": (d / "edges.json").is_file()}
+            "has_edges": has_edges,
+            "edges_stale": hints is not None and has_edges and (a.get("edges_hints") or {}) != hints,
+            "contrast": a.get("contrast"), "low_contrast": a.get("contrast") is not None and a["contrast"] < 12,
+            "bottom_align": a.get("bottom_align") if ph["view"] == "bottom" else None,
+            "align_note": a.get("align_note") if ph["view"] == "bottom" else None,
+            "bottom_rot_user": a.get("bottom_rot_user")}
 
 
 def _grid_h(fmt: str | None) -> float | None:
@@ -248,12 +255,13 @@ def _usage(user: dict) -> dict:
 
 AI_DAILY_LIMIT = 30
 _detect_lock = threading.Semaphore(1)  # nur um den OpenCV-Teil, nicht um den KI-Aufruf (Spec §7)
+DETECT_WAIT_S = 30   # so lange wartet eine Umrissberechnung auf _detect_lock
 
 
 def _ai_uses_today(u: dict) -> int:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return db.q1("SELECT COUNT(*) n FROM audit WHERE user_id=? AND action IN ('suggest','edges_ai') AND substr(ts,1,10)=?",
-                 (u["id"], today))["n"]
+    return db.q1("SELECT COUNT(*) n FROM audit WHERE user_id=? AND action IN ('suggest','edges_ai','cad_check')"
+                 " AND substr(ts,1,10)=?", (u["id"], today))["n"]
 
 
 # ------------------------------------------------------------------ Status & Auth
@@ -737,13 +745,15 @@ def mat_layout(format: str = "A4", u: dict = Depends(auth.require_user)):
 
 def _project_public(p: dict, detail: bool = False) -> dict:
     out = dict(p)
+    out["cad_check"] = check.public_check(p) if detail else None
     out["n_photos"] = db.q1("SELECT COUNT(*) n FROM photos WHERE project_id=?", (p["id"],))["n"]
     out["n_measurements"] = db.q1("SELECT COUNT(*) n FROM measurements WHERE project_id=? AND accepted=1", (p["id"],))["n"]
     fmt = _project_format(p["id"])
     out["format"] = fmt
     out["factors"] = _factors(p)
     if detail:
-        out["photos"] = [_photo_public(ph) for ph in db.q("SELECT * FROM photos WHERE project_id=? ORDER BY id", (p["id"],))]
+        hp = _hints(p)
+        out["photos"] = [_photo_public(ph, hp) for ph in db.q("SELECT * FROM photos WHERE project_id=? ORDER BY id", (p["id"],))]
         out["measurements"] = [_meas_public(m) for m in
                                db.q("SELECT * FROM measurements WHERE project_id=? ORDER BY seq", (p["id"],))]
         out["grid_h"] = _grid_h(fmt)
@@ -783,12 +793,30 @@ def project_get(pid: int, u: dict = Depends(auth.require_user)):
     return _project_public(_own_project(pid, u), True)
 
 
+LIGHT_COLORS = {"weiß", "weiss", "silber", "hellgrau", "beige", "natur"}
+
+
+def _hints(project: dict) -> dict:
+    """Hinweise fuer die Kantenerkennung nur aus Handeingaben (Spec §3); KI-Schaetzungen wirken nicht."""
+    if not project.get("material_user"):
+        return {}
+    h = {"transparent": project.get("transparent") or 0,
+         "light": (project.get("color") or "").strip().lower() in LIGHT_COLORS}
+    # ohne relevante Werte wirkt die Handeingabe wie keine: gleich normalisieren, sonst false-positive edges_stale
+    return h if h["transparent"] or h["light"] else {}
+
+
 class ProjectPatch(BaseModel):
     name: str | None = Field(default=None, max_length=120)
     ctrl_x: float | None = None
     ctrl_y: float | None = None
     clear_ctrl: bool = False
     archived: bool | None = None
+    color: str | None = Field(default=None, max_length=40)
+    material: str | None = Field(default=None, max_length=40)
+    transparent: int | None = Field(default=None, ge=0, le=2)
+    finish: str | None = Field(default=None, max_length=20)
+    clear_material: bool = False
 
 
 @app.patch("/api/projects/{pid}")
@@ -800,6 +828,9 @@ def project_patch(pid: int, body: ProjectPatch, u: dict = Depends(auth.require_u
         if v is not None and not (0.9 * ref <= v <= 1.1 * ref):
             raise HTTPException(400, f"Kontrollwert {v:g} mm ist unplausibel (erwartet um {ref:g} mm).")
     _finite(body.ctrl_x, "Kontrollwert"); _finite(body.ctrl_y, "Kontrollwert")  # noqa: E702
+    before = _hints(p)
+    if body.finish is not None and body.finish not in ai.FINISHES:
+        raise HTTPException(400, "Oberfläche: matt oder glaenzend")
     with db.atomic():
         if body.name is not None and body.name.strip():
             db.ex("UPDATE projects SET name=? WHERE id=?", (body.name.strip(), pid))
@@ -811,8 +842,18 @@ def project_patch(pid: int, body: ProjectPatch, u: dict = Depends(auth.require_u
             v = getattr(body, k)
             if v is not None:
                 db.ex(f"UPDATE projects SET {k}=? WHERE id=?", (v, pid))
+        if body.clear_material:
+            db.ex("UPDATE projects SET color=NULL, material=NULL, transparent=NULL, finish=NULL, material_user=0 "
+                  "WHERE id=?", (pid,))
+        for k in ("color", "material", "transparent", "finish"):                  # feste Spaltenliste
+            v = getattr(body, k)
+            if v is not None:
+                v = (v.strip() or None) if isinstance(v, str) else v
+                db.ex(f"UPDATE projects SET {k}=?, material_user=1 WHERE id=?", (v, pid))
         p = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
         _refresh(p)
+    if _hints(p) != before and db.q1("SELECT 1 FROM photos WHERE project_id=? AND view='bottom'", (pid,)):
+        _realign_project(pid)   # rechnet die Umrisse mit den neuen Hinweisen nach (nie in db.atomic())
     return _project_public(p, True)
 
 
@@ -831,10 +872,12 @@ def project_delete(pid: int, u: dict = Depends(auth.require_user)):
 
 # ------------------------------------------------------------------ Fotos
 
-VIEWS = ("top", "tilted", "gauge", "overview")
+VIEWS = ("top", "bottom", "tilted", "gauge", "overview")
+PLANAR = ("top", "bottom")
+ALIGN_PXMM = 4.0
 
 
-def _analyze_store(phid: int, img, fmt: str | None) -> dict:
+def _analyze_store(phid: int, img, fmt: str | None, view: str, hints: dict | None = None) -> dict:
     d = _photo_dir(phid)
     a = vision.analyze(img, fmt)
     for n in ("rect.jpg", "gauge.jpg"):
@@ -851,13 +894,100 @@ def _analyze_store(phid: int, img, fmt: str | None) -> dict:
         (d / "gauge.jpg").write_bytes(vision.encode_jpg(g, 90))
         a["gauge_rect"] = {"pxmm": vision.PX_PER_MM, "x0": x0, "x1": x1, "y0": y0, "y1": y1,
                            "w": g.shape[1], "h": g.shape[0]}
+    if a.get("rect") and view in PLANAR and _detect_lock.acquire(timeout=DETECT_WAIT_S):
+        try:
+            res = edges.detect(rect, a["format"], hints)
+            a["outline_mm"] = res["outlines"][0]["polygon"] if res["outlines"] else None
+            a["contrast"] = res["contrast"]
+            a["outline_hints"] = hints or {}
+        except Exception:  # noqa: BLE001 – Umriss ist optional
+            a["outline_mm"], a["outline_hints"] = None, hints or {}
+        finally:
+            _detect_lock.release()
     return a
+
+
+def _set_analysis(phid: int, a: dict):
+    db.ex("UPDATE photos SET analysis=? WHERE id=?", (db.jdump(a), phid))
+
+
+def _outline_of(ph: dict):
+    """Umriss (mm) aus analysis.outline_mm; sonst nachrechnen (unter _detect_lock). None = keiner, "timeout" = spaeter."""
+    a = db.jload(ph["analysis"], {}) or {}
+    project = db.q1("SELECT * FROM projects WHERE id=?", (ph["project_id"],))
+    hints = _hints(project or {})
+    if a.get("outline_mm") == "timeout":   # Marke aus _realign_project: Referenz war nicht berechenbar, nicht erneut warten
+        return "timeout"
+    if "outline_mm" in a and a.get("outline_hints") == hints:
+        return a["outline_mm"]
+    rect_path = _photo_dir(ph["id"]) / "rect.jpg"
+    if not a.get("rect") or not rect_path.is_file():
+        return None
+    if not _detect_lock.acquire(timeout=DETECT_WAIT_S):
+        return "timeout"
+    try:
+        img = cv2.imread(str(rect_path))
+        res = edges.detect(img, ph["format"], hints) if img is not None else {"outlines": [], "contrast": None}
+    except Exception:  # noqa: BLE001 – Umriss ist optional
+        res = {"outlines": [], "contrast": None}
+    finally:
+        _detect_lock.release()
+    outline = res["outlines"][0]["polygon"] if res["outlines"] else None
+    with db.atomic():  # frisch lesen: ein paralleler Formatwechsel darf nicht ueberschrieben werden
+        cur = db.q1("SELECT format, analysis FROM photos WHERE id=?", (ph["id"],))
+        if not cur or cur["format"] != ph["format"]:
+            return None
+        a2 = db.jload(cur["analysis"], {}) or {}
+        a2["outline_mm"], a2["contrast"], a2["outline_hints"] = outline, res["contrast"], hints
+        _set_analysis(ph["id"], a2)
+        ph["analysis"] = db.jdump(a2)
+    return outline
+
+
+def _align_photo(ph: dict, top: dict | None):
+    """bottom_align einer Unteransicht neu berechnen (Spec §1 „Wann“); Handwahl (bottom_rot_user) bleibt."""
+    ot = _outline_of(top) if top is not None and ph["view"] == "bottom" else None
+    ob = _outline_of(ph) if ph["view"] == "bottom" else None
+    with db.atomic():
+        cur = db.q1("SELECT * FROM photos WHERE id=?", (ph["id"],))
+        if not cur or cur["format"] != ph["format"]:
+            return   # geloescht oder paralleler Formatwechsel (der rechnet selbst neu)
+        a = db.jload(cur["analysis"], {}) or {}
+        user_rot = a.get("bottom_rot_user")
+        a.pop("bottom_align", None)
+        a.pop("align_note", None)
+        if cur["view"] == "bottom" and a.get("rect"):
+            if top is None:
+                a["align_note"] = "Draufsicht fehlt"
+            elif ot == "timeout" or ob == "timeout":
+                a["align_note"] = "Ausrichtung nicht berechnet – erneut versuchen"
+            elif not ot or not ob:
+                a["align_note"] = "Umriss nicht erkennbar"   # bottom_align bleibt null: to_top nutzt rot=0 ohne Versatz
+            else:
+                r = a["rect"]
+                al = vision.align_bottom(ot, ob, r["w_mm"], r["h_mm"], rot=user_rot)
+                if user_rot is not None:
+                    al["unsure"] = False
+                a["bottom_align"] = {**al, "auto": user_rot is None, "top_photo_id": top["id"]}
+        _set_analysis(cur["id"], a)
+
+
+def _realign_project(pid: int):
+    """Alle Unteransichten eines Projekts neu ausrichten, danach die Teile verknuepfen. Nie in db.atomic()."""
+    top = parts.reference_top(pid)
+    if top is not None and _outline_of(top) == "timeout":
+        top = {**top, "analysis": db.jdump({**(db.jload(top["analysis"], {}) or {}), "outline_mm": "timeout"})}
+        # Referenz nicht berechenbar: jede Unteransicht bekommt den Hinweis, ohne erneut zu warten
+    for ph in db.q("SELECT * FROM photos WHERE project_id=? AND view='bottom'", (pid,)):
+        _align_photo(ph, top)
+    with db.atomic():
+        parts.link_bottom(pid)
 
 
 @app.post("/api/projects/{pid}/photos")
 def photo_upload(pid: int, file: UploadFile = File(...), view: str = Form("top"), format: str = Form(""),
                  u: dict = Depends(auth.require_user)):
-    _own_project(pid, u)
+    p = _own_project(pid, u)
     if db.q1("SELECT COUNT(*) n FROM photos WHERE project_id=?", (pid,))["n"] >= 30:
         raise HTTPException(400, "Höchstens 30 Fotos pro Projekt.")
     data = file.file.read(config.MAX_UPLOAD_MB * 1024 * 1024 + 1)
@@ -878,37 +1008,77 @@ def photo_upload(pid: int, file: UploadFile = File(...), view: str = Form("top")
     try:
         (d / "orig.jpg").write_bytes(vision.encode_jpg(img, 92))
         (d / "thumb.jpg").write_bytes(vision.encode_jpg(vision.thumbnail(img, 360), 82))
-        a = _analyze_store(phid, img, format if format in matgen.FORMATS else None)
+        a = _analyze_store(phid, img, format if format in matgen.FORMATS else None, view, _hints(p))
     except Exception as e:  # noqa: BLE001
         shutil.rmtree(d, ignore_errors=True)
         db.ex("DELETE FROM photos WHERE id=?", (phid,))
         raise HTTPException(400, f"Auswertung fehlgeschlagen: {e}") from None
     db.ex("UPDATE photos SET format=?, status=?, max_err=?, analysis=? WHERE id=?",
           (a.get("format"), a["status"], a.get("max_err_mm"), db.jdump(a), phid))
-    return _photo_public(db.q1("SELECT * FROM photos WHERE id=?", (phid,)))
+    if view in PLANAR:
+        _realign_project(pid)
+    return _photo_public(db.q1("SELECT * FROM photos WHERE id=?", (phid,)), _hints(p))
+
+
+class AlignIn(BaseModel):
+    rot: Literal[0, 90, 180, 270] | None = None
 
 
 class PhotoPatch(BaseModel):
     view: str | None = None
     format: str | None = None
+    bottom_align: AlignIn | None = None
 
 
 @app.patch("/api/photos/{phid}")
 def photo_patch(phid: int, body: PhotoPatch, u: dict = Depends(auth.require_user)):
     ph, p = _own_photo(phid, u)
-    if body.view in VIEWS:
-        db.ex("UPDATE photos SET view=? WHERE id=?", (body.view, phid))
+    new_view = body.view if body.view in VIEWS else ph["view"]
+    if "bottom_align" in body.model_fields_set and new_view != "bottom":
+        raise HTTPException(400, "Nur für Fotos der Ansicht „Von unten“")   # vor jeder Aenderung pruefen
+    realign = False
+    if body.view in VIEWS and body.view != ph["view"]:
+        with db.atomic():
+            db.ex("UPDATE photos SET view=? WHERE id=?", (body.view, phid))
+            if (ph["view"] == "bottom") != (body.view == "bottom"):   # Nutzer-Messungen folgen top <-> bottom
+                nv, ov = ("bottom", "top") if body.view == "bottom" else ("top", "bottom")
+                for m in db.q("SELECT id, data FROM measurements WHERE photo_id=?", (phid,)):
+                    d = db.jload(m["data"], {}) or {}
+                    if d.get("view", "top") == ov:
+                        d["view"] = nv
+                        db.ex("UPDATE measurements SET data=? WHERE id=?", (db.jdump(d), m["id"]))
+        realign = body.view in PLANAR or ph["view"] in PLANAR
+        if ph["view"] == "bottom":   # bottom_align/align_note entfernen; bottom_rot_user bleibt fuer ein Zurueckschalten
+            _align_photo(db.q1("SELECT * FROM photos WHERE id=?", (phid,)), None)
+        ph = db.q1("SELECT * FROM photos WHERE id=?", (phid,))
+        _refresh(p)   # Auto-Masse bekommen die neue Ansicht (_refresh ist selbst atomar)
     if body.format is not None and body.format != ph["format"]:
         img = vision.load_image((_photo_dir(phid) / "orig.jpg").read_bytes())
-        a = _analyze_store(phid, img, body.format if body.format in matgen.FORMATS else None)
+        a = _analyze_store(phid, img, body.format if body.format in matgen.FORMATS else None, ph["view"],
+                           _hints(p))
         with db.atomic():
+            old = db.jload(db.q1("SELECT analysis FROM photos WHERE id=?", (phid,))["analysis"], {}) or {}
+            if old.get("bottom_rot_user") is not None:
+                a["bottom_rot_user"] = old["bottom_rot_user"]   # Handwahl ueberlebt den Formatwechsel
             db.ex("UPDATE photos SET format=?, status=?, max_err=?, analysis=? WHERE id=?",
                   (a.get("format"), a["status"], a.get("max_err_mm"), db.jdump(a), phid))
             parts.delete_photo_parts(phid)
             _refresh(p)
             for n in ("edges.json", "edges_ki.jpg"):  # in der Transaktion: wie photo_edges beim Schreiben
                 (_photo_dir(phid) / n).unlink(missing_ok=True)
-    return _photo_public(db.q1("SELECT * FROM photos WHERE id=?", (phid,)))
+        realign = realign or ph["view"] in PLANAR
+    if "bottom_align" in body.model_fields_set:
+        with db.atomic():
+            a = db.jload(db.q1("SELECT analysis FROM photos WHERE id=?", (phid,))["analysis"], {}) or {}
+            if body.bottom_align is None or ("rot" in body.bottom_align.model_fields_set and body.bottom_align.rot is None):
+                a.pop("bottom_rot_user", None)                       # zurueck auf automatisch
+            elif "rot" in body.bottom_align.model_fields_set:
+                a["bottom_rot_user"] = body.bottom_align.rot        # Handwahl ({} = nur neu rechnen)
+            _set_analysis(phid, a)
+        realign = True
+    if realign:
+        _realign_project(p["id"])
+    return _photo_public(db.q1("SELECT * FROM photos WHERE id=?", (phid,)), _hints(p))
 
 
 @app.delete("/api/photos/{phid}")
@@ -919,7 +1089,24 @@ def photo_delete(phid: int, u: dict = Depends(auth.require_user)):
         db.ex("DELETE FROM photos WHERE id=?", (phid,))
         _refresh(p)
     shutil.rmtree(_photo_dir(phid), ignore_errors=True)
+    _realign_project(p["id"])   # Referenz-Draufsicht kann weggefallen sein
     return {"ok": True}
+
+
+@app.get("/api/photos/{phid}/align.jpg")
+def photo_align_jpg(phid: int, u: dict = Depends(auth.require_user)):
+    ph, p = _own_photo(phid, u)
+    a = db.jload(ph["analysis"], {}) or {}
+    tid = (a.get("bottom_align") or {}).get("top_photo_id")
+    top = db.q1("SELECT * FROM photos WHERE id=?", (tid,)) if tid else parts.reference_top(p["id"])
+    img = cv2.imread(str(_photo_dir(phid) / "rect.jpg")) if a.get("rect") else None
+    if ph["view"] != "bottom" or img is None or not top:
+        raise HTTPException(404, "Keine Ausrichtung vorhanden")
+    at = db.jload(top["analysis"], {}) or {}
+    out = vision.bottom_warp(img, a, at, ALIGN_PXMM)
+    own = parts.to_top(ph, a["outline_mm"]) if a.get("outline_mm") else []
+    vision.draw_outlines(out, [at.get("outline_mm"), own], [(12, 65, 194), (178, 60, 20)], ALIGN_PXMM, at["rect"]["h_mm"])
+    return Response(vision.encode_jpg(out, 85), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/photos/{phid}/{kind}.jpg")
@@ -947,10 +1134,11 @@ def photo_edges(phid: int, body: EdgesIn, request: Request, u: dict = Depends(au
     img = cv2.imread(str(d / "rect.jpg"))
     if img is None:
         raise HTTPException(400, "Die Draufsicht ist nicht lesbar.")
+    hints = _hints(p)
     if not _detect_lock.acquire(blocking=False):
         raise HTTPException(429, "Kantenerkennung ist gerade belegt – bitte gleich erneut versuchen.")
     try:
-        res = edges.detect(img, ph["format"])
+        res = edges.detect(img, ph["format"], hints)
     finally:
         _detect_lock.release()
     if not res["outlines"]:
@@ -965,7 +1153,7 @@ def photo_edges(phid: int, body: EdgesIn, request: Request, u: dict = Depends(au
         else:
             db.audit("edges_ai", f"Foto {phid}", user_id=u["id"], actor=u["username"], ip=auth.client_ip(request))
             try:
-                detected = [x for x in parts.ai_parts(d, res) if inside(x["polygon"])]
+                detected = [x for x in parts.ai_parts(d, res, jobs.material_line(p)) if inside(x["polygon"])]
                 if not detected:
                     notice = "Die KI hat keine Teile erkannt – Teile nur aus dem Umriss."
             except ai.AIError as e:
@@ -985,9 +1173,15 @@ def photo_edges(phid: int, body: EdgesIn, request: Request, u: dict = Depends(au
                 more = "1 erkanntes Teil nicht übernommen" if skipped == 1 else f"{skipped} erkannte Teile nicht übernommen"
                 notice = f"{notice} {more} – höchstens {parts.MAX_PARTS_PER_PHOTO} Teile je Foto.".strip()
         _refresh(p)
+        a2 = db.jload(db.q1("SELECT analysis FROM photos WHERE id=?", (phid,))["analysis"], {}) or {}
+        a2["outline_mm"] = res["outlines"][0]["polygon"]
+        a2["contrast"], a2["outline_hints"], a2["edges_hints"] = res["contrast"], hints, hints
+        _set_analysis(phid, a2)
         tmp = d / "edges.json.tmp"  # innerhalb von atomic: kein zweiter Lauf und kein Loeschen dazwischen
         tmp.write_text(json.dumps(res), encoding="utf-8")
         os.replace(tmp, d / "edges.json")
+    if ph["view"] in PLANAR:
+        _realign_project(p["id"])
     return {"parts": [t for t in parts.public_list(p["id"]) if t["photo_id"] == phid], "segments": res["segments"],
             "notice": notice}
 
@@ -1085,7 +1279,8 @@ def meas_create(pid: int, body: MeasIn, u: dict = Depends(auth.require_user)):
             raise HTTPException(400, "Wert fehlt")
     unc = body.unc if body.unc is not None else (parts.default_unc(photo, body.view) if source == "user" else 0.1)
     unit = "°" if body.kind == "angle" else "mm"
-    data = {"view": body.view if body.view in ("top", "gauge") else "top", "points": pts, "note": body.note}
+    bottom_ok = body.view == "bottom" and photo is not None and photo["view"] == "bottom"
+    data = {"view": body.view if body.view in ("top", "gauge") or bottom_ok else "top", "points": pts, "note": body.note}
     with db.atomic():
         seq = _next_seq(pid)
         mid = db.ex("""INSERT INTO measurements(project_id,photo_id,seq,label,kind,value,unit,unc,data,critical,caliper,fit,
@@ -1295,6 +1490,48 @@ class SuggestIn(BaseModel):
     hint: str = Field(default="", max_length=500)
 
 
+class CheckIn(BaseModel):
+    photo_ids: list[int] | None = Field(default=None, max_length=30)
+    part_id: int | None = None
+    force: bool = False
+
+
+@app.post("/api/projects/{pid}/cad-check")
+def cad_check(pid: int, body: CheckIn, request: Request, u: dict = Depends(auth.require_user)):
+    p = _own_project(pid, u)
+    if body.part_id is not None and not db.q1("SELECT id FROM parts WHERE id=? AND project_id=?", (body.part_id, pid)):
+        raise HTTPException(400, "Teil gehört nicht zu diesem Projekt")
+    photo_ids = body.photo_ids
+    if photo_ids is not None:
+        own = {r["id"] for r in db.q("SELECT id FROM photos WHERE project_id=?", (pid,))}
+        photo_ids = sorted(set(photo_ids) & own)
+    lock = check.lock_for(pid)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(409, "Prüfung läuft bereits – Ergebnis folgt gleich.")
+    try:
+        p = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
+        h = check.cad_hash(p, photo_ids, body.part_id)
+        s = check.stored(p)
+        if s and s.get("hash") == h and not body.force:
+            if s.get("photo_ids") != photo_ids:   # gleiche Auswahl in anderer Schreibweise: speichern, sonst bleibt stale
+                s["photo_ids"] = photo_ids
+                db.ex("UPDATE projects SET cad_check=? WHERE id=?", (db.jdump(s), pid))
+            return {**s, "stale": False}
+        if not settings.ai_enabled():
+            raise HTTPException(503, "KI ist nicht eingerichtet (Verwaltung → Einstellungen).")
+        with db.atomic():
+            if u["role"] != "admin" and _ai_uses_today(u) >= AI_DAILY_LIMIT:
+                raise HTTPException(429, f"Tageslimit für KI-Funktionen erreicht ({AI_DAILY_LIMIT}).")
+            db.audit("cad_check", f"Projekt {pid}", user_id=u["id"], actor=u["username"], ip=auth.client_ip(request))
+        try:
+            out = check.run_check(p, photo_ids, body.part_id, h)
+        except ai.AIError as e:
+            raise HTTPException(502, str(e)) from None
+    finally:
+        lock.release()
+    return {**out, "stale": False}
+
+
 @app.post("/api/projects/{pid}/suggest")
 def meas_suggest(pid: int, body: SuggestIn, request: Request, u: dict = Depends(auth.require_user)):
     p = _own_project(pid, u)
@@ -1310,7 +1547,7 @@ def meas_suggest(pid: int, body: SuggestIn, request: Request, u: dict = Depends(
     n_img = 0
     for ph in photos:
         d = _photo_dir(ph["id"])
-        if used_photo is None and (d / "rect.jpg").is_file():
+        if used_photo is None and ph["view"] == "top" and (d / "rect.jpg").is_file():
             used_photo = ph
             content += ai.image_ref(d / "rect.jpg", ai.scaled_caption(
                 d / "rect.jpg", f"Draufsicht (Foto {ph['id']}), Ansicht \"top\"", vision.PX_PER_MM))
@@ -1362,14 +1599,16 @@ def _csv(pid: int) -> str:
 
     lines = ["ID;Bezeichnung;Art;Wert;Einheit;Unsicherheit;Messschieber;kritisch;Passung;Quelle;Ansicht;Punkte (mm);Teil;Nennmaß"]
     seq = {t["id"]: t["seq"] for t in db.q("SELECT id, seq FROM parts WHERE project_id=?", (pid,))}
+    photos = {p["id"]: p for p in db.q("SELECT * FROM photos WHERE project_id=?", (pid,))}
     for m in rows:
         d = db.jload(m["data"], {}) or {}
-        pts = " ".join(f"{p[0]:.2f}/{p[1]:.2f}" for p in d.get("points") or [])
+        tag, tpts = jobs.top_points(m, d, photos)
+        pts = " ".join(f"{p[0]:.2f}/{p[1]:.2f}" for p in tpts)
         safe_txt = lambda t: ("'" + t) if t[:1] in ("=", "+", "-", "@", "\t", "\r") else t  # noqa: E731
         cells = [f"M{m['seq']}", safe_txt(m["label"]), KIND_LABEL.get(m["kind"], m["kind"]), n(m["value"]), m["unit"],
                  n(m["unc"]),
                  n(m["caliper"]), "ja" if m["critical"] else "", safe_txt(m["fit"] or ""),
-                 jobs.SOURCE_LABEL.get(m["source"], m["source"]), d.get("view", ""), pts,
+                 jobs.SOURCE_LABEL.get(m["source"], m["source"]), f"{d.get('view', '')} {tag}".strip(), pts,
                  f"T{seq[m['part_id']]}" if m["part_id"] in seq else "", n(d.get("nominal"))]
         lines.append(";".join('"' + str(c).replace('"', '""') + '"' if any(x in str(c) for x in ';"\n') else str(c)
                               for c in cells))
@@ -1386,6 +1625,17 @@ def meas_csv(pid: int, u: dict = Depends(auth.require_user)):
 
 # ------------------------------------------------------------------ CAD-Auftraege
 
+class CheckItem(BaseModel):
+    kind: Literal[*ai.CHECK_KINDS]
+    severity: Literal["block", "warn"]
+    text: str = Field(max_length=200)
+
+    @field_validator("text")
+    @classmethod
+    def _einzeilig(cls, v: str) -> str:
+        return " ".join(v.split())
+
+
 class JobIn(BaseModel):
     project_id: int | None = None
     name: str = Field(default="", max_length=120)
@@ -1393,7 +1643,8 @@ class JobIn(BaseModel):
     process: str = "fdm"
     material: str = Field(default="", max_length=80)
     tolerance: str = Field(default="", max_length=80)
-    photo_ids: list[int] | None = None
+    photo_ids: list[int] | None = Field(default=None, max_length=30)
+    check_items: list[CheckItem] = Field(default=[], max_length=8)
     cutter_d: float | None = None
     setups: str = Field(default="", max_length=40)
     fits: list[dict] | None = None
@@ -1415,7 +1666,7 @@ def job_create(body: JobIn, u: dict = Depends(auth.require_user)):
     jid = jobs.create(u, project, name, body.request, {
         "process": body.process, "material": body.material.strip(), "tolerance": body.tolerance.strip(),
         "photo_ids": body.photo_ids, "part_id": body.part_id, "cutter_d": body.cutter_d, "setups": body.setups.strip(),
-        "fits": fits,
+        "fits": fits, "check_items": [i.model_dump() for i in body.check_items],
         "extra": body.extra.strip()})
     return jobs.job_public(db.q1("SELECT * FROM jobs WHERE id=?", (jid,)), True)
 

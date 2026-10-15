@@ -28,6 +28,10 @@ Eingaben
   das Nennmaß ist nur ein Vorschlag, Regel 2 gilt weiter.
 - Entzerrte Fotos der Messunterlage (Draufsicht) und ggf. der Höhenlehre (Seitenansicht). Der Maßstab steht
   jeweils dabei. Ursprung der Draufsicht: linke untere Ecke des Rasters, x nach rechts, y nach oben.
+- Ggf. eine Unteransicht (entzerrt, gespiegelt auf Draufsicht-Koordinaten: Bohrungen von unten und oben liegen
+  übereinander) und Schrägansichten ohne Maßstab (nur für Form, Seitenflächen und Höhenverhältnis).
+- Eine Zeile „Fotografiertes Original“ (Farbe, Material, Transparenz, Oberfläche des Teils – nicht das
+  Fertigungsmaterial) und ggf. „Offene Punkte der Prüfung“.
 - Fertigungsverfahren, Material und Wünsche des Nutzers.
 
 Regeln für den Code
@@ -43,7 +47,13 @@ Regeln für den Code
 6. `from build123d import *` und `import math` sind bereits ausgeführt. Keine weiteren Imports, kein Datei-Zugriff,
    kein Export, kein print, keine Netzwerkzugriffe – der Code läuft in einer Sandbox, die das blockiert.
 7. Verrundungen und Fasen zuletzt und nur dort, wo sie sicher gelingen (Radius kleiner als angrenzende Wände).
-8. Halte das Modell so einfach wie möglich, aber vollständig. Laufzeit unter 60 Sekunden.
+8. Der Umriss aus der Draufsicht (Teile-Polygone) ist verbindlich: Fasen, Stufen, Absätze und Bohrungen daraus
+   nachbilden. Fehlt ein Maß (z. B. die Höhe einer Stufe), schätze es, kennzeichne es als Annahme und nenne es in
+   `check_before_manufacturing`. Weglassen ist nur erlaubt, was kleiner als 0,5 mm ist. Laufzeit unter 60 Sekunden.
+9. Bei transparenten oder teiltransparenten Teilen sind durchscheinende Strukturen Innenbohrungen oder Innenkonturen,
+   keine Rillen oder Nuten der Oberfläche. Bohrungen von unten und oben an derselben Stelle sind in der Regel ein
+   Loch (ggf. Stufenloch).
+10. Zu jedem offenen Punkt der Prüfung steht in `assumptions`, was angenommen wurde.
 
 Antwortformat – genau zwei Codeblöcke, sonst höchstens zwei kurze Sätze:
 ```json
@@ -94,6 +104,27 @@ Antworte ausschließlich mit einem JSON-Array, ohne Text davor oder danach:
   "note": "kurz, woran erkannt"}]
 role ist "body" (Grundkörper) oder "mounted" (montiertes Teil). edges = die Kandidaten, die zu diesem Teil gehören.
 Höchstens 6 Teile, je 3 bis 32 Punkte."""
+
+CHECK_SYSTEM = """Du prüfst vor dem CAD-Modellieren, ob die Unterlagen reichen. Du bekommst dieselben Fotos und Maße
+wie der Konstrukteur: entzerrte Draufsicht (Maßstab steht dabei), ggf. Unteransicht (gespiegelt auf
+Draufsicht-Koordinaten), Höhenlehre, Schrägansichten ohne Maßstab, Messtabelle, Teile-Umrisse.
+
+Nenne, was zum vollständigen Nachbilden fehlt oder unsicher ist, je Punkt mit Art und Stufe:
+kind: height (Höhe/Dicke unbekannt), bottom (Unterseite fehlt oder unklar), photo (weiteres Foto nötig, z. B.
+Seite), measure (ein Maß fehlt oder widerspricht), sharpness (Kante unscharf, verdeckt oder im Schatten), other.
+severity: block = ohne diese Angabe wird das Modell geraten; warn = die Genauigkeit leidet.
+Jeder Text sagt, was der Nutzer tun soll (z. B. „Höhenlehre fotografieren oder Höhe als Maß eingeben“).
+Höchstens 8 Punkte, keine Punkte zu Dingen, die schon in der Messtabelle stehen.
+
+Schätze außerdem das fotografierte Teil: color (ein Wort, z. B. silber, schwarz, weiß), material (z. B. Aluminium,
+Stahl, Kunststoff, Holz, Glas), transparent (0 nein, 1 teilweise, 2 ja), finish (matt oder glaenzend), note (ein Satz).
+
+Antworte ausschließlich mit einem JSON-Objekt:
+{"items": [{"kind": "height", "severity": "block", "text": "…"}],
+ "material": {"color": "…", "material": "…", "transparent": 0, "finish": "matt", "note": "…"}}"""
+
+CHECK_KINDS = ("height", "bottom", "photo", "measure", "sharpness", "other")
+FINISHES = ("matt", "glaenzend")                                    # zulaessige Oberflaechen am Werkstueck
 
 
 class AIError(Exception):
@@ -296,24 +327,61 @@ def parse_cad(text: str) -> tuple[dict, str]:
     return meta, code
 
 
-def _json_array(text: str, what: str) -> list:
-    """JSON-Array aus einer KI-Antwort (auch in einem Codeblock oder mit Text drumherum)."""
+def _json_span(text: str, lo: str, hi: str) -> str | None:
+    """Teilstring von erstem lo bis letztem hi (auch in einem Codeblock oder mit Text drumherum)."""
     t = text.strip()
     m = _BLOCK.search(t)
     if m:
         t = m.group(2)
-    i, j = t.find("["), t.rfind("]")
-    if i < 0 or j < i:
+    i, j = t.find(lo), t.rfind(hi)
+    return t[i:j + 1] if i >= 0 and j >= i else None
+
+
+def _json_array(text: str, what: str) -> list:
+    """JSON-Array aus einer KI-Antwort."""
+    span = _json_span(text, "[", "]")
+    if span is None:
         raise AIError(f"Die Antwort enthielt keine {what}.")
     try:
-        return json.loads(t[i:j + 1])
+        return json.loads(span)
     except ValueError as e:
         raise AIError(f"Die {what} war kein gültiges JSON.") from e
+
+
+def _json_object(text: str) -> dict | None:
+    span = _json_span(text, "{", "}")
+    try:
+        o = json.loads(span) if span else None
+    except (ValueError, RecursionError):
+        return None
+    return o if isinstance(o, dict) else None
 
 
 def _text(v, n: int, default: str = "") -> str:
     """Nur echte Texte uebernehmen: str() wuerde aus einer Liste oder Zahl der KI ein Label wie "['x']" machen."""
     return (v.strip()[:n] or default) if isinstance(v, str) else default
+
+
+def parse_check(text: str) -> dict:
+    """Pruefergebnis defensiv lesen (Spec §2.1): unbekannte Art -> other, fehlende Stufe -> warn, Texte einzeilig."""
+    o = _json_object(text) or {}
+    items = []
+    for it in o.get("items") if isinstance(o.get("items"), list) else []:
+        if not isinstance(it, dict) or not isinstance(it.get("text"), str) or not it["text"].strip():
+            continue
+        items.append({"kind": it.get("kind") if it.get("kind") in CHECK_KINDS else "other",
+                      "severity": it.get("severity") if it.get("severity") in ("block", "warn") else "warn",
+                      "text": " ".join(it["text"].split())[:200]})
+        if len(items) == 8:
+            break
+    mat, material = o.get("material"), None
+    if isinstance(mat, dict):
+        tr = mat.get("transparent")
+        material = {"color": _text(mat.get("color"), 40) or None, "material": _text(mat.get("material"), 40) or None,
+                    "transparent": tr if tr in (0, 1, 2) else None,
+                    "finish": mat.get("finish") if mat.get("finish") in FINISHES else None,
+                    "note": _text(mat.get("note"), 300)}
+    return {"items": items, "material": material}
 
 
 def parse_suggestions(text: str) -> list[dict]:
@@ -434,6 +502,13 @@ def _fake(system, messages, cancel):
         m = re.search(r"Umriss 1: (.*)", txt)
         pts = [[float(a), float(b)] for a, b in re.findall(r"\((-?[\d.]+), (-?[\d.]+)\)", m.group(1))] if m else []
         return json.dumps([{"label": "Quader", "role": "body", "polygon": pts, "edges": [], "note": "Testmodus"}]), usage
+    if system == CHECK_SYSTEM:
+        return json.dumps({"items": [
+            {"kind": "height", "severity": "block",
+             "text": "Höhe des Grundkörpers unbekannt – Höhenlehre fotografieren oder Höhe als Maß eingeben."},
+            {"kind": "bottom", "severity": "warn", "text": "Unterseite fehlt – Teil umdrehen und als „Von unten“ hochladen."}],
+            "material": {"color": "silber", "material": "Aluminium", "transparent": 0, "finish": "matt", "note": "Testmodus"}},
+            ensure_ascii=False), usage
     if system == SUGGEST_SYSTEM:
         return json.dumps([
             {"label": "Gesamtlänge", "kind": "length", "value": 79.8, "unc": 0.4, "view": "top",

@@ -12,6 +12,7 @@ const TOOLS = [
   ["point", "Punkt mit Koordinate", "P", "point"], ["angle", "Winkel", "A", "angle"], ["edges", "Kanten", "E", "edges"],
 ];
 const BLUE = "#1F6FB2", ORANGE = "#C2410C", DARK = "#17212B";
+const planar = v => v === "top" || v === "bottom";
 
 // ------------------------------------------------------------------ Geometrie (wie app/geom.py)
 export function circle3(a, b, c) {
@@ -69,6 +70,8 @@ export default async function (main) {
   const suggBox = h("section", { class: "sugg", "aria-labelledby": "ki-h", hidden: true });
   const suggBtn = h("button", { class: "btn claude sm", onclick: suggest, disabled: !S.status?.ai, title: S.status?.ai ? "" : "KI nicht eingerichtet" }, icon("sparkle", 16), "KI-Vorschläge");
   const edgeBtn = h("button", { class: "btn sm", onclick: detectEdges, title: "Kanten und Teile auf diesem Foto erkennen" }, icon("edges", 16), "Kanten erkennen");
+  const staleEl = h("span", { class: "xs", style: { color: "var(--warn)" }, hidden: true }, "Werkstück geändert – Kanten neu erkennen");
+  const upStale = () => { staleEl.hidden = !(src && planar(src.view) && S.project.photos.find(p => p.id === src.photo.id)?.edges_stale); };
   const partsBox = h("div");
   let edgeDrag = false;
 
@@ -80,7 +83,7 @@ export default async function (main) {
       h("div", { class: "toolbar", "aria-label": "Werkzeuge" },
         h("label", { class: "grp" }, h("span", { class: "small muted" }, "Foto"), photoSel),
         h("div", { class: "grp", role: "toolbar" }, Object.values(toolBtns)),
-        edgeBtn,
+        edgeBtn, staleEl,
         h("label", { class: "check small" }, snapCb, "Kantenfang"),
         h("label", { class: "check small" }, loupeCb, "Lupe"),
         h("div", { class: "grp" },
@@ -103,7 +106,7 @@ export default async function (main) {
   const ctx = canvas.getContext("2d");
   const layer = createPartsLayer({
     ctx: () => ctx, scr: (ix, iy) => scr(ix, iy), toPX: (X, Y) => src.toPX(X, Y), cursorMM: () => cursor?.mm || null,
-    photoId: () => (src && src.view === "top" ? src.photo.id : null), active: () => tool === "edges",
+    photoId: () => (src && planar(src.view) ? src.photo.id : null), active: () => tool === "edges",
     redraw: () => { dirty = true; }, changed: () => { renderList(); dirty = true; }, selectPart: () => renderList(),
   });
 
@@ -111,7 +114,8 @@ export default async function (main) {
   function buildSources() {
     sources = [];
     for (const p of S.project.photos) {
-      if (p.files.includes("rect") && p.rect) sources.push({ key: `${p.id}:top`, photo: p, view: "top", url: `/api/photos/${p.id}/rect.jpg`,
+      const view = p.view === "bottom" ? "bottom" : "top";
+      if (p.files.includes("rect") && p.rect) sources.push({ key: `${p.id}:${view}`, photo: p, view, url: `/api/photos/${p.id}/rect.jpg`,
         label: `${p.filename.replace(/\.\w+$/, "")} · ${VIEW_LABEL[p.view] || "Draufsicht"}`,
         toMM: (x, y) => [x / p.rect.pxmm, p.rect.h_mm - y / p.rect.pxmm], toPX: (X, Y) => [X * p.rect.pxmm, (p.rect.h_mm - Y) * p.rect.pxmm] });
       if (p.files.includes("gauge") && p.gauge_rect) { const g = p.gauge_rect; sources.push({ key: `${p.id}:gauge`, photo: p, view: "gauge", url: `/api/photos/${p.id}/gauge.jpg`,
@@ -126,6 +130,7 @@ export default async function (main) {
     src = x; pts = []; pixels = null; img = null;  // kein Messen auf dem alten Bild, solange das neue laedt
     layer.reset();
     renderList();
+    upStale();
     if (!x) { dirty = true; return; }
     photoSel.value = x.key;
     const im = new Image();
@@ -137,7 +142,7 @@ export default async function (main) {
     if (!keepView) fit();
     setTool(tool);
     const cur = S.project.photos.find(p => p.id === x.photo.id);  // aktueller Stand: x.photo stammt aus init()
-    if (x.view === "top" && cur?.has_edges) api(`/api/photos/${x.photo.id}/edges.json`)
+    if (planar(x.view) && cur?.has_edges) api(`/api/photos/${x.photo.id}/edges.json`)
       .then(r => { if (src === x) layer.setSegments(r.segments); }).catch(e => { if (src === x && e.status !== 404) fail(e); });
     // Graustufen fuer den Kantenfang im Hintergrund vorbereiten (1 Byte je Pixel statt RGBA)
     setTimeout(() => {
@@ -510,7 +515,7 @@ export default async function (main) {
       ["diameter", "radius"].map(k => h("button", { type: "button", "aria-pressed": String(m.kind === k), onclick: () => patch(m, { kind: k }) }, KIND[k]))) : null;
     const allParts = S.project.parts || [];
     const own = allParts.find(p => p.id === m.part_id);
-    const autoOk = m.source !== "manual" && (m.data?.view || "top") === "top" && m.kind !== "height";
+    const autoOk = m.source !== "manual" && planar(m.data?.view || "top") && m.kind !== "height";
     const partSel = m.source === "auto" ? null : h("select", { class: "input", "aria-label": "Teil", onchange: e => {
       const v = e.target.value; patch(m, { part_id: v === "auto" ? -1 : v === "none" ? null : Number(v) }); } },
       autoOk ? h("option", { value: "auto", selected: !m.data?.part_fixed }, "automatisch") : null,
@@ -537,7 +542,7 @@ export default async function (main) {
     return { panel, focus: () => { lbl.focus(); lbl.select(); } };
   }
   function renderList(focusNew = false) {
-    clear(partsBox, partsPanel({ photoId: src && src.view === "top" ? src.photo.id : null, selected: layer.selected,
+    clear(partsBox, partsPanel({ photoId: src && planar(src.view) ? src.photo.id : null, selected: layer.selected,
       onSelect: id => { if (id) setTool("edges"); layer.select(id); }, onNew: () => { setTool("edges"); layer.startNew(); },
       onChanged: () => { renderList(); dirty = true; } }));
     const partOf = m => (S.project.parts || []).find(p => p.id === m.part_id);
@@ -607,7 +612,7 @@ export default async function (main) {
   }
 
   async function detectEdges() {
-    if (!src || src.view !== "top") { toast("Kanten lassen sich nur auf einer Draufsicht erkennen", "err"); return; }
+    if (!src || !planar(src.view)) { toast("Kanten lassen sich nur auf einer Draufsicht erkennen", "err"); return; }
     if ((S.project.parts || []).some(p => p.photo_id === src.photo.id) &&
       !await confirmDlg("Kanten neu erkennen?", "Teile dieses Fotos werden neu erkannt. Wiedergefundene Teile behalten Bezeichnung und Messschieber-Referenzen.", "Neu erkennen")) return;
     const old = [...edgeBtn.childNodes], phid = src.photo.id;
@@ -615,6 +620,7 @@ export default async function (main) {
     try {
       const r = await api(`/api/photos/${phid}/edges`, { method: "POST", body: { use_ai: true } });
       await reloadProject();
+      upStale();
       if (src?.photo.id === phid) { layer.setSegments(r.segments); setTool("edges"); }
       renderList(); dirty = true;
       toast(r.notice || `${r.parts.length} Teil${r.parts.length === 1 ? "" : "e"} erkannt`, r.notice ? "" : "ok");
@@ -647,7 +653,7 @@ export default async function (main) {
     }
     let pref = null;
     try { pref = sessionStorage.getItem("mu.src"); } catch { /* */ }
-    await loadSource(sources.find(x => x.key === pref) || sources.find(x => x.photo.view === "top") || sources[0]);
+    await loadSource(sources.find(x => x.key === pref) || sources.find(x => planar(x.photo.view)) || sources[0]);
   }
   photoSel.addEventListener("change", () => { try { sessionStorage.setItem("mu.src", photoSel.value); } catch { /* */ } });
   resize();

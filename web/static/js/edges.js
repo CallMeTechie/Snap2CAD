@@ -197,7 +197,7 @@ export function partsPanel({ photoId, selected, onSelect, onNew, onChanged }) {
       h("span", { class: "mid", style: { color: col } }, p.id_label),
       h("span", { style: { fontWeight: 500, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, p.label),
       h("span", { class: "mval" }, p.rect && p.size ? `${num(p.size[0], 2)} × ${num(p.size[1], 2)} mm` : `${p.n_edges} Kanten`),
-      h("span", { class: "msub" }, ROLE[p.role],
+      h("span", { class: "msub" }, ROLE[p.role], p.view === "bottom" ? " · unten" + (p.same_as ? ` = T${(S.project.parts.find(q => q.id === p.same_as) || {}).seq ?? "?"}` : "") : "",
         scaled ? h("span", {}, ` · Maßstab × ${num(p.scale, 3)}${p.refs.length ? ` aus ${p.refs.join(", ")}` : ""} `,
           h("button", { class: "btn sm ghost", style: { minHeight: "24px", padding: "0 6px" }, onclick: e => { e.stopPropagation(); patchPart(p, { reset_scale: true }); } }, "Zurücksetzen")) : null),
       p.warn ? h("span", { class: "msub", style: { color: "var(--warn)" } }, p.warn) : null,

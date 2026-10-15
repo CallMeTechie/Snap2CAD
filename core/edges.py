@@ -29,6 +29,16 @@ GRID_PAPER = 0.6       # Anteil der Papier-Rasterstaerke: darueber sicher Papier
 GRID_OBJECT = 0.35     # darunter Objektinneres
 FILL_MM2 = 300.0       # Inseln (Schraubenkoepfe) im Rasterkriterium bis zu dieser Flaeche fuellen
 HOLE_MAX_MM2 = 2000.0  # groessere runde Luecken gelten nicht als Bohrung
+COLOR_MIN_DIFF = 18.0  # Mindest-Farbabstand zum Papier (uint8-Skala), falls Otsu sehr niedrig liegt
+GRID_FINE_MM = 2.0     # feines Fenster (Mittelung und Glaettung) fuer das Schatten-Veto: Raster dicht an der Objektkante
+SHADOW_CHROMA = 6.0    # bis zu diesem Farbabstand (a/b) gilt ein Unterschied als reiner Helligkeitsunterschied (Schatten)
+TRANSP_MIN_DIFF = 9.0  # Mindest-Farbabstand bei transparent = 2 (durchsichtiges Teil: Raster scheint durch)
+TRANSP_DIFF_FACTOR = 0.5   # transparent = 2: Anteil der Otsu-Schwelle fuer den Farbabstand
+TRANSP_CLOSE_MM = 3.0      # transparent = 2: Luecken der Farbmaske bis zu dieser Breite schliessen
+PART_TRANSP_GRID_FACTOR = 0.5  # transparent = 1: Rasterkriterium strenger (Raster scheint teilweise durch)
+LIGHT_DIFF_FACTOR = 0.6    # light: Anteil der Otsu-Schwelle fuer den Farbabstand (helles Teil, wenig Kontrast)
+LIGHT_MIN_DIFF = 12.0      # light: Mindest-Farbabstand statt COLOR_MIN_DIFF
+LIGHT_GRID_FACTOR = 1.3    # light: Rasterkriterium grosszuegiger (schwaches Raster gilt schon als Objekt)
 
 
 def _odd(n: float) -> int:
@@ -86,13 +96,12 @@ def _grabcut(mask: np.ndarray, img: np.ndarray, sure_fg: np.ndarray, sure_bg: np
     return out if int(out.sum()) >= 0.5 * int(mask.sum()) else mask
 
 
-def _grid_energy(rect: np.ndarray) -> np.ndarray:
-    """Staerke des 1-mm-Rasters je Ort (auf WORK_PXMM), phasenrichtig gemittelt. Papier ~ hoch, Objekt ~ 0.
+def _grid_demod(rect: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Gabor-Antwort auf das 1-mm-Raster, mit der Rasterperiode demoduliert: (Real, Imaginaer) je Richtung.
 
-    In der entzerrten Draufsicht liegen die Rasterlinien an festen Positionen (Periode PX_PER_MM px). Die
-    Antwort eines Gabor-Filters wird mit dieser Periode demoduliert und dann flaechig gemittelt: Beim Papier
-    bleibt die Phase konstant, bei Metall-, Holz- oder Kunststofftextur loescht sie sich aus. So bleiben
-    auch helle, papierfarbene Flaechen (Blech) als Objekt erkennbar."""
+    In der entzerrten Draufsicht liegen die Rasterlinien an festen Positionen (Periode PX_PER_MM px). Beim
+    Papier bleibt die Phase der demodulierten Antwort konstant, bei Metall-, Holz- oder Kunststofftextur
+    wechselt sie und loescht sich beim Mitteln aus (siehe _grid_energy)."""
     g = cv2.cvtColor(rect, cv2.COLOR_BGR2GRAY).astype(np.float32)
     H, W = g.shape
     n = _odd(4 * PX_PER_MM)
@@ -100,20 +109,31 @@ def _grid_energy(rect: np.ndarray) -> np.ndarray:
     win = np.hanning(n).astype(np.float32)
     kc = np.cos(2 * np.pi * t / PX_PER_MM) * win
     ks = np.sin(2 * np.pi * t / PX_PER_MM) * win
-    box = _odd(GRID_WIN_MM * PX_PER_MM)
-    mags = []
+    out = []
     for horiz in (True, False):
         c = cv2.filter2D(g, -1, kc[None, :] if horiz else kc[:, None])
         s_ = cv2.filter2D(g, -1, ks[None, :] if horiz else ks[:, None])
         pos = (np.arange(W, dtype=np.float32)[None, :] if horiz else np.arange(H, dtype=np.float32)[:, None])
         ph = 2 * np.pi * pos / PX_PER_MM
-        re = c * np.cos(ph) - s_ * np.sin(ph)
-        im = c * np.sin(ph) + s_ * np.cos(ph)
-        mags.append(cv2.magnitude(cv2.boxFilter(re, -1, (box, box)), cv2.boxFilter(im, -1, (box, box))))
+        out.append((c * np.cos(ph) - s_ * np.sin(ph), c * np.sin(ph) + s_ * np.cos(ph)))
+    return out
+
+
+def _grid_energy(rect: np.ndarray, win_mm: float = GRID_WIN_MM, smooth_mm: float = GRID_SMOOTH_MM,
+                 demod: list | None = None) -> np.ndarray:
+    """Staerke des 1-mm-Rasters je Ort (auf WORK_PXMM), phasenrichtig gemittelt. Papier ~ hoch, Objekt ~ 0.
+
+    Die demodulierte Gabor-Antwort (_grid_demod) wird ueber win_mm flaechig gemittelt und danach ueber
+    smooth_mm geglaettet. So bleiben auch helle, papierfarbene Flaechen (Blech) als Objekt erkennbar.
+    demod: bereits berechnetes _grid_demod(rect), wenn mehrere Fenster auf dasselbe Bild angewandt werden."""
+    H, W = rect.shape[:2]
+    box = _odd(win_mm * PX_PER_MM)
+    mags = [cv2.magnitude(cv2.boxFilter(re, -1, (box, box)), cv2.boxFilter(im, -1, (box, box)))
+            for re, im in (demod or _grid_demod(rect))]
     e = np.minimum(*mags)  # Papier hat Linien in beiden Richtungen, eine einzelne Kante nur in einer
     small = cv2.resize(e, (int(round(W * WORK_PXMM / PX_PER_MM)), int(round(H * WORK_PXMM / PX_PER_MM))),
                        interpolation=cv2.INTER_AREA)
-    k = _odd(GRID_SMOOTH_MM * WORK_PXMM)
+    k = _odd(smooth_mm * WORK_PXMM)
     return cv2.boxFilter(small, -1, (k, k))
 
 
@@ -147,9 +167,16 @@ def _paper_fit(lab: np.ndarray, sample: np.ndarray) -> np.ndarray:
     return (design(gx, gy) @ coef).astype(np.float32)
 
 
-def _mask(rect: np.ndarray, fmt: str) -> tuple[np.ndarray, np.ndarray]:
+def _mask(rect: np.ndarray, fmt: str, hints: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Objektmaske auf WORK_PXMM (255 = Objekt), Spec §1.1–1.4: Farbabstand zum Papier plus Rasterkriterium.
-    Zweiter Rueckgabewert: reine Farbmaske (fuer Bohrungen; das Rasterkriterium fuellt kleine Loecher auf)."""
+    Zweiter Rueckgabewert: reine Farbmaske (fuer Bohrungen; das Rasterkriterium fuellt kleine Loecher auf),
+    dritter: Farbabstand zum Papier (uint8, fuer den Kontrastwert).
+
+    hints: {"transparent": 0|1|2, "light": bool}. Ohne Transparenz-Hinweis wird das Rasterkriterium auf die
+    oertliche Helligkeit normiert und ein Schatten-Veto angewandt: Papier, das nur dunkler ist (kaum Farbabstand)
+    und dessen Raster im feinen Fenster sichtbar bleibt, ist Schlagschatten und kein Objekt."""
+    t = hints.get("transparent", 0)
+    light = bool(hints.get("light", False))
     s = WORK_PXMM / PX_PER_MM
     small = cv2.resize(rect, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
     h, w = small.shape[:2]
@@ -164,29 +191,65 @@ def _mask(rect: np.ndarray, fmt: str) -> tuple[np.ndarray, np.ndarray]:
     band[:, :b] = True
     band[:, -b:] = True
     band &= valid > 0
-    en = _grid_energy(rect)[:h, :w]
-    ref = float(np.median(en[band])) or 1.0
-    paperish = (en > GRID_PAPER * ref) & (valid > 0)          # Raster deutlich sichtbar: Papier
-    paper = _paper_fit(lab, paperish | band)
-    dl = np.clip(paper[..., 0] - lab[..., 0], 0, None)
-    dc = np.hypot(lab[..., 1] - paper[..., 1], lab[..., 2] - paper[..., 2])
-    diff = np.clip(dl + 2 * dc, 0, 255).astype(np.uint8)
-    diff[valid == 0] = 0
-    th, _ = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
-    color = diff > max(th, 18.0)
     # sicher Papier erst eine Fensterbreite vom Objekt entfernt (an Objektecken sieht das Fenster viel Papier)
     k_bg = _odd((GRID_WIN_MM + GRID_SMOOTH_MM) * WORK_PXMM)
-    sure_bg = cv2.erode(paperish.astype(np.uint8) * 255, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_bg, k_bg))) > 0
-    # Rasterkriterium nur, wo das Mittelungsfenster ganz auf der freien Messflaeche liegt (nicht an Rand/Markern)
-    inner = cv2.erode(np.pad(valid, 1), cv2.getStructuringElement(cv2.MORPH_RECT, (k_bg, k_bg)))[1:-1, 1:-1] > 0
-    nogrid = np.where((en < GRID_OBJECT * ref) & inner, 255, 0).astype(np.uint8)
-    nogrid = _fill_small(_drop_small(nogrid, WORK_PXMM), FILL_MM2)
-    mask = np.where((color & ~sure_bg) | (nogrid > 0), 255, 0).astype(np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
-    sure_fg = cv2.erode(nogrid, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))) > 0
-    out = _grabcut(_drop_small(mask, WORK_PXMM), closed, sure_fg, sure_bg)
-    return _fill_unround(out, valid), np.where(color, 255, 0).astype(np.uint8)
+    demod = _grid_demod(rect)
+    en_raw = _grid_energy(rect, demod=demod)[:h, :w]
+    if t == 0:
+        # Helligkeitsnormierung: im Schatten ist das Raster dunkler und schwaecher, gemessen wird relativ zur Umgebung
+        lloc = cv2.boxFilter(lab[..., 0], -1, (k_bg, k_bg))
+        gain = float(np.median(lloc[band])) / np.maximum(lloc, 1)
+        fine = _grid_energy(rect, GRID_FINE_MM, GRID_FINE_MM, demod)[:h, :w] * gain
+        ref_f = float(np.median(fine[band])) or 1.0
+
+    def attempt(veto: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Ein Durchlauf; veto = Helligkeitsnormierung und Schatten-Veto anwenden (nur bei t == 0 moeglich)."""
+        en = en_raw * gain if veto else en_raw
+        ref = float(np.median(en[band])) or 1.0
+        paperish = (en > GRID_PAPER * ref) & (valid > 0)          # Raster deutlich sichtbar: Papier
+        paper = _paper_fit(lab, paperish | band)
+        dl = np.clip(paper[..., 0] - lab[..., 0], 0, None)
+        dc = np.hypot(lab[..., 1] - paper[..., 1], lab[..., 2] - paper[..., 2])
+        diff = np.clip(dl + 2 * dc, 0, 255).astype(np.uint8)
+        diff[valid == 0] = 0
+        th, _ = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+        if t == 2:  # nur Farbabstand: ohne Rasterkriterium, ohne sicheres Papier, ohne Schatten-Veto
+            color = diff > max(TRANSP_DIFF_FACTOR * th, TRANSP_MIN_DIFF)
+            return _mask_transparent(color, valid), np.where(color, 255, 0).astype(np.uint8), diff
+        color = diff > (max(LIGHT_DIFF_FACTOR * th, LIGHT_MIN_DIFF) if light else max(th, COLOR_MIN_DIFF))
+        if veto:  # Schatten-Veto: nur dunkler (kaum Farbabstand), Raster im feinen Fenster sichtbar -> Papier
+            color &= ~((dc < SHADOW_CHROMA) & (fine > GRID_PAPER * ref_f))
+        sure_bg = cv2.erode(paperish.astype(np.uint8) * 255, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_bg, k_bg))) > 0
+        # Rasterkriterium nur, wo das Mittelungsfenster ganz auf der freien Messflaeche liegt (nicht an Rand/Markern)
+        inner = cv2.erode(np.pad(valid, 1), cv2.getStructuringElement(cv2.MORPH_RECT, (k_bg, k_bg)))[1:-1, 1:-1] > 0
+        grid_obj = GRID_OBJECT * (PART_TRANSP_GRID_FACTOR if t == 1 else 1.0) * (LIGHT_GRID_FACTOR if light else 1.0)
+        nogrid = np.where((en < grid_obj * ref) & inner, 255, 0).astype(np.uint8)
+        nogrid = _fill_small(_drop_small(nogrid, WORK_PXMM), FILL_MM2)
+        mask = np.where((color & ~sure_bg) | (nogrid > 0), 255, 0).astype(np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+        sure_fg = cv2.erode(nogrid, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))) > 0
+        out = _grabcut(_drop_small(mask, WORK_PXMM), closed, sure_fg, sure_bg)
+        return _fill_unround(out, valid), np.where(color, 255, 0).astype(np.uint8), diff
+
+    res = attempt(t == 0)
+    if t == 0 and not light and not _drop_small(res[0], WORK_PXMM).any():
+        res = attempt(False)  # Rueckfall ohne Hinweise: Verhalten vor Normierung und Schatten-Veto
+    return res
+
+
+def _mask_transparent(color: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    """Maske fuer durchsichtige Teile (transparent = 2): Farbmaske schliessen, Luecken fuellen, groesste
+    Komponente. Kein GrabCut, weil das durchscheinende Raster dort Papier vortaeuscht."""
+    k = _odd(TRANSP_CLOSE_MM * WORK_PXMM)
+    m = cv2.morphologyEx(np.where(color, 255, 0).astype(np.uint8), cv2.MORPH_CLOSE,
+                         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    m = _fill_unround(m, valid)
+    n, lbl, stats, _ = cv2.connectedComponentsWithStats(m)
+    if n <= 1:
+        return m
+    i = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    return np.where(lbl == i, 255, 0).astype(np.uint8)
 
 
 def _fill_unround(mask: np.ndarray, valid: np.ndarray) -> np.ndarray:
@@ -377,10 +440,14 @@ def _segments(gray: np.ndarray, mask_full: np.ndarray, gh: float) -> list:
     return sorted(segs, key=_seg_len, reverse=True)[:MAX_SEGMENTS]
 
 
-def detect(rect: np.ndarray, fmt: str) -> dict:
-    """Umrisse, Bohrungen und Kanten-Kandidaten (Spec §1). Leere Listen, wenn kein Objekt gefunden wurde."""
+def detect(rect: np.ndarray, fmt: str, hints: dict | None = None) -> dict:
+    """Umrisse, Bohrungen und Kanten-Kandidaten (Spec §1). Leere Listen, wenn kein Objekt gefunden wurde.
+
+    hints: {"transparent": 0|1|2, "light": bool} (Materialhinweise des Nutzers, siehe _mask). Zusaetzlich
+    zurueck: contrast (mittlerer Farbabstand im Objekt, 0–100; None ohne Umriss) und die verwendeten hints."""
+    hints = hints or {}
     gh = float(spec(fmt)["grid_mm"][1])
-    mask, color = _mask(rect, fmt)
+    mask, color, diff = _mask(rect, fmt, hints)
     gray = cv2.morphologyEx(cv2.cvtColor(rect, cv2.COLOR_BGR2GRAY), cv2.MORPH_CLOSE,
                             cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7)))
     gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
@@ -425,7 +492,10 @@ def detect(rect: np.ndarray, fmt: str) -> dict:
     for x1, y1, x2, y2 in segs:
         n += 1
         segments.append({"id": f"K{n}", "a": [round(x1, 3), round(y1, 3)], "b": [round(x2, 3), round(y2, 3)], "kind": "inner"})
-    return {"outlines": outlines, "holes": holes if outlines else [], "segments": segments, "px_per_mm": PX_PER_MM}
+    # Kontrast: Farbabstand von uint8 (0–255) auf 0–100 umgerechnet
+    contrast = round(float(np.mean(diff[mask > 0])) * 100 / 255, 1) if outlines else None
+    return {"outlines": outlines, "holes": holes if outlines else [], "segments": segments, "px_per_mm": PX_PER_MM,
+            "contrast": contrast, "hints": hints}
 
 
 def draw_candidates(rect: np.ndarray, res: dict) -> np.ndarray:

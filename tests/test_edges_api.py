@@ -227,10 +227,10 @@ def test_cad_auftrag_fuer_ein_teil(two, monkeypatch, user):
     project = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
     msg = jobs.build_initial_message(project, "Platte nachbauen", {"part_id": pl["id"], "name": "P"})
     text = msg[0]["content"][0]["text"]
-    assert "Modelliert wird nur Teil T2 „Platte“ (montiertes Teil)" in text
+    assert "Modelliert wird nur Teil T2 „Platte“ (montiertes Teil, Draufsicht): Umriss (mm) (" in text
     assert "| Teil |" in text and "| Messschieber |" in text
     alle = jobs.build_initial_message(project, "alles", {"name": "A"})[0]["content"][0]["text"]
-    assert "Teile im Foto: T1 Quader (Grundkörper), T2 Platte (montiertes Teil)" in alle
+    assert "Teile im Foto (Umrisse verbindlich): T1 „Quader“ (Grundkörper, Draufsicht): Umriss (mm) (" in alle
     _, rows = jobs.measurement_table(pid, pl["id"])
     assert rows and all(m["part_id"] != q["id"] for m in rows)
     other = user.post("/api/projects", json={"name": "x"}, headers=H).json()["id"]
@@ -252,3 +252,47 @@ def test_ki_entartetes_polygon_laesst_teile(two, monkeypatch):
         res = c.post(f"/api/photos/{phid}/edges", json={}, headers=H).json()
         assert [p["id"] for p in res["parts"]] == [p["id"] for p in first], junk
         assert "keine Teile" in res["notice"]
+
+
+def test_hints_in_edges_json_und_veraltet(two):
+    c, pid, phid = two
+    c.patch(f"/api/projects/{pid}", json={"transparent": 2, "color": "silber"}, headers=H)
+    c.post(f"/api/photos/{phid}/edges", json={"use_ai": False}, headers=H)
+    assert c.get(f"/api/photos/{phid}/edges.json").json()["hints"] == {"transparent": 2, "light": True}
+    ph = next(p for p in c.get(f"/api/projects/{pid}").json()["photos"] if p["id"] == phid)
+    assert ph["edges_stale"] is False
+    c.patch(f"/api/projects/{pid}", json={"transparent": 0}, headers=H)
+    ph = next(p for p in c.get(f"/api/projects/{pid}").json()["photos"] if p["id"] == phid)
+    assert ph["edges_stale"] is True
+    c.patch(f"/api/projects/{pid}", json={"clear_material": True}, headers=H)
+    c.post(f"/api/projects/{pid}/cad-check", json={"force": True}, headers=H)   # KI-Schaetzung aendert hints nicht
+    ph = next(p for p in c.get(f"/api/projects/{pid}").json()["photos"] if p["id"] == phid)
+    assert ph["edges_stale"] is True   # hints {} vs. gespeichert transparent=2
+
+
+def test_handeingabe_ohne_wirkung_laesst_kanten_aktuell(two):
+    c, pid, phid = two
+    c.post(f"/api/photos/{phid}/edges", json={"use_ai": False}, headers=H)
+    c.patch(f"/api/projects/{pid}", json={"material": "Stahl", "color": "schwarz"}, headers=H)
+    ph = next(p for p in c.get(f"/api/projects/{pid}").json()["photos"] if p["id"] == phid)
+    assert ph["edges_stale"] is False
+
+
+def test_kontrastwarnung(user):
+    pid, phid = _upload(user, [{"rect": [60, 80, 60, 40], "gray": 225}])
+    ph = user.get(f"/api/projects/{pid}").json()["photos"][0]
+    assert ph["low_contrast"] is True and ph["contrast"] < 20
+
+
+def test_ki_zuordnung_bekommt_werkstueckzeile(two, monkeypatch):
+    from app import ai
+    c, pid, phid = two
+    c.patch(f"/api/projects/{pid}", json={"transparent": 2, "color": "klar"}, headers=H)
+    seen = []
+
+    def fake(system, messages, **kw):
+        seen.append(" ".join(b.get("text", "") for b in messages[0]["content"]))
+        return KI_ZWEI, {}
+    monkeypatch.setattr(ai, "call", fake)
+    assert c.post(f"/api/photos/{phid}/edges", json={}, headers=H).status_code == 200
+    assert "Fotografiertes Original" in seen[0] and "transparent: ja" in seen[0] and "Innenbohrungen" in seen[0]

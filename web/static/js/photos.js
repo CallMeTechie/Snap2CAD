@@ -2,7 +2,7 @@
 import { api, upload, h, clear, icon, num, parseNum, toast, fail, dialog, confirmDlg } from "./lib.js";
 import { S, ensureProject, reloadProject, projectPicker, go, onLeave } from "./app.js";
 
-export const VIEW_LABEL = { top: "Draufsicht", tilted: "Gekippt (Höhe)", gauge: "Höhenlehre", overview: "Übersicht" };
+export const VIEW_LABEL = { top: "Draufsicht", bottom: "Von unten", tilted: "Gekippt (Höhe)", gauge: "Höhenlehre", overview: "Übersicht" };
 export const STATUS = {
   gut: ["gut", "ok"], brauchbar: ["brauchbar", "warn"], unsicher: ["unsicher – wiederholen", "err"],
   nicht_auswertbar: ["nicht auswertbar", "err"],
@@ -30,6 +30,9 @@ export function tipsDialog() {
   actions: [{ label: "Verstanden", primary: true, value: true }] });
 }
 
+const LAGEN = [[0, "seitlich umgedreht"], [180, "nach vorn umgedreht"], [90, "seitlich umgedreht, ¼ gegen den Uhrzeigersinn gedreht"],
+  [270, "seitlich umgedreht, ¼ im Uhrzeigersinn gedreht"]];
+
 export default async function (main) {
   await ensureProject();
   let selected = null, mode = "both";
@@ -44,6 +47,7 @@ export default async function (main) {
       catch (e) { fail(e); }
     }
   });
+  const viewSel = h("select", { class: "input", "aria-label": "Ansicht der nächsten Fotos" }, Object.entries(VIEW_LABEL).map(([k, v]) => h("option", { value: k }, v)));
   const fileIn = h("input", { type: "file", accept: "image/*,.heic,.heif", multiple: true, hidden: true });
   const camIn = h("input", { type: "file", accept: "image/*", capture: "environment", hidden: true });
   const drop = h("div", { class: "drop" }, icon("upload", 26),
@@ -53,6 +57,7 @@ export default async function (main) {
       h("button", { class: "btn", type: "button", onclick: () => camIn.click() }, icon("camera"), "Foto aufnehmen")),
     h("span", { class: "hint" }, `JPG, PNG, HEIC · Originalauflösung · bis ${S.status?.max_upload_mb || 25} MB`), fileIn, camIn);
   const list = h("ul", { class: "plist" });
+  const ws = werkstueck();
   const detail = h("section", { class: "card", "aria-labelledby": "det-h" });
   const pending = [];
 
@@ -60,9 +65,10 @@ export default async function (main) {
     h("div", { class: "head" }, h("div", { class: "t" }, h("h1", {}, "Fotos prüfen"),
       h("p", { class: "lead" }, "Marker werden erkannt, das Foto wird auf die Tischebene entzerrt. Nur Fotos mit grünem oder gelbem Status gehen in die Messung.")),
     h("div", { class: "chips", style: { alignItems: "flex-end" } }, projectPicker(() => { selected = null; draw(); }),
-      h("label", { class: "field", style: { gap: "4px" } }, h("span", { class: "label" }, "Unterlage"), fmtSel))),
+      h("label", { class: "field", style: { gap: "4px" } }, h("span", { class: "label" }, "Unterlage"), fmtSel),
+      h("label", { class: "field", style: { gap: "4px" } }, h("span", { class: "label" }, "Ansicht"), viewSel))),
     h("div", { class: "photos-layout" },
-      h("aside", { "aria-label": "Hochgeladene Fotos", style: { display: "flex", flexDirection: "column", gap: "12px" } }, drop, list,
+      h("aside", { "aria-label": "Hochgeladene Fotos", style: { display: "flex", flexDirection: "column", gap: "12px" } }, drop, ws, list,
         h("button", { class: "btn ghost sm", style: { alignSelf: "flex-start" }, onclick: tipsDialog }, icon("info", 16), "Fototipps")),
       detail));
 
@@ -81,12 +87,13 @@ export default async function (main) {
   async function send(files) {
     files = files.filter(f => f.type.startsWith("image/") || /\.(heic|heif)$/i.test(f.name));
     const max = (S.status?.max_upload_mb || 25) * 1048576;
+    const view = viewSel.value;   // gilt fuer den ganzen Stapel, auch wenn die Auswahl waehrenddessen wechselt
     for (const f of files) {
       if (f.size > max) { toast(`${f.name}: zu groß`, "err"); continue; }
       const item = { name: f.name, progress: 0 };
       pending.push(item); drawList();
       const form = new FormData();
-      form.append("file", f); form.append("view", S.project.photos.length ? "top" : "top"); form.append("format", fmt);
+      form.append("file", f); form.append("view", view); form.append("format", fmt);
       try {
         const ph = await upload(`/api/projects/${S.project.id}/photos`, form, p => { item.progress = p; drawList(); });
         selected = ph.id;
@@ -127,8 +134,59 @@ export default async function (main) {
 
   function draw() {
     if (!S.project.photos.some(p => p.id === selected)) selected = (S.project.photos.find(p => p.status !== "nicht_auswertbar") || S.project.photos[0])?.id ?? null;
+    ws.update();
     drawList();
     drawDetail();
+  }
+
+  // Werkstueck-Box: einmal gebaut; draw() setzt nur Werte, Statuszeile und Knopf (Tippen und Fokus bleiben erhalten)
+  function werkstueck() {
+    const mk = ph => h("input", { class: "input", placeholder: ph, maxlength: 40 });
+    const color = mk("z. B. silber"), material = mk("z. B. Aluminium");
+    const transp = h("select", { class: "input" }, [["", "unbekannt"], ["0", "nein"], ["1", "teilweise"], ["2", "ja"]].map(([v, t]) => h("option", { value: v }, t)));
+    const finish = h("select", { class: "input" }, [["", "unbekannt"], ["matt", "matt"], ["glaenzend", "glänzend"]].map(([v, t]) => h("option", { value: v }, t)));
+    const status = h("span", { class: "xs muted" });
+    let saveSeq = 0;
+    const patch = async body => {
+      const n = ++saveSeq, pid = S.project.id;
+      try {
+        const p = await api(`/api/projects/${pid}`, { method: "PATCH", body });
+        if (n !== saveSeq || S.project?.id !== pid || !main.isConnected) return;   // neuere Eingabe oder Projekt gewechselt
+        S.project = p; draw();
+      } catch (e) { if (n === saveSeq && main.isConnected) fail(e); }
+    };
+    const save = () => {
+      const body = { color: color.value.trim(), material: material.value.trim() };
+      if (transp.value !== "") body.transparent = Number(transp.value);
+      if (finish.value) body.finish = finish.value;
+      return patch(body);
+    };
+    [color, material, transp, finish].forEach(el => el.addEventListener("change", save));
+    const resetBtn = h("button", { class: "btn sm ghost", style: { alignSelf: "flex-start" }, onclick: () => patch({ clear_material: true }) }, "Zurücksetzen");
+    const box = h("section", { class: "card", style: { gap: "8px" } }, h("div", { class: "card-head" }, h("h3", {}, "Werkstück"), status),
+      h("div", { class: "grid2" }, h("label", { class: "field" }, h("span", { class: "flabel" }, "Farbe"), color), h("label", { class: "field" }, h("span", { class: "flabel" }, "Material"), material),
+        h("label", { class: "field" }, h("span", { class: "flabel" }, "Transparent"), transp), h("label", { class: "field" }, h("span", { class: "flabel" }, "Oberfläche"), finish)),
+      h("span", { class: "xs muted" }, "Vor „Kanten erkennen“ setzen – die Erkennung nutzt diese Angaben."), resetBtn);
+    box.update = () => {
+      const P = S.project, set = (el, v) => { if (document.activeElement !== el) el.value = v; };
+      set(color, P.color || ""); set(material, P.material || ""); set(transp, String(P.transparent ?? "")); set(finish, P.finish || "");
+      status.textContent = P.material_user ? "von Hand gesetzt" : (P.material ? "von der KI geschätzt" : "noch nicht gesetzt");
+      resetBtn.style.display = P.material_user ? "" : "none";
+    };
+    return box;
+  }
+
+  function alignBox(p) {
+    const al = p.bottom_align;
+    const patch = async body => { try { await api(`/api/photos/${p.id}`, { method: "PATCH", body }); await reloadProject(); drawDetail(); } catch (e) { fail(e); } };
+    const retry = /nicht berechnet/.test(p.align_note || "") ? h("button", { class: "btn sm", onclick: () => patch({ bottom_align: {} }) }, "Erneut berechnen") : null;
+    return h("section", { class: "card", style: { gap: "10px" } }, h("h3", {}, "Lage zur Draufsicht"),
+      al ? [h("figure", {}, h("img", { src: `/api/photos/${p.id}/align.jpg?v=${al.rot}-${al.dx}-${al.dy}`, alt: "Überlagerung Unteransicht auf Draufsicht" }),
+          h("figcaption", {}, `Überlappung ${num(al.iou * 100, 0)} % · ${al.auto ? "automatisch" : "von Hand"}`)),
+        al.unsure ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, "Ausrichtung unsicher – bitte prüfen und Lage wählen.")) : null,
+        h("div", { class: "seg", role: "group", "aria-label": "Lage" }, LAGEN.map(([r, t]) => h("button", { "aria-pressed": String(al.rot === r), onclick: () => patch({ bottom_align: { rot: r } }) }, t))),
+        al.auto ? null : h("button", { class: "btn sm ghost", onclick: () => patch({ bottom_align: null }) }, "Wieder automatisch")]
+        : [h("p", { class: "hint" }, p.align_note || "Draufsicht fehlt"), retry]);
   }
 
   function drawDetail() {
@@ -187,6 +245,8 @@ export default async function (main) {
       p.status === "nicht_auswertbar" ? h("div", { class: "note err" }, icon("warn"), h("span", {}, `Nur ${(a.mat_ids || []).length} Marker der Unterlage erkannt – mindestens 4 sind nötig. `,
         (a.missing_ids || []).length ? `Fehlend: ID ${a.missing_ids.join(", ")}. ` : "", "Foto mit allen Markern im Bild wiederholen.")) : null,
       p.status === "unsicher" ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, "Restfehler über 1 mm. Unterlage liegt vermutlich nicht flach oder das Foto ist unscharf – besser wiederholen.")) : null,
+      p.low_contrast ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, "Geringer Kontrast zur Unterlage – Licht seitlich, Schatten vermeiden, bei Glas oder Klarsicht ein Blatt Papier unterlegen.")) : null,
+      p.view === "bottom" ? alignBox(p) : null,
       h("div", { class: `duo ${figs.length === 1 ? "one" : ""}` }, figs),
       h("div", { class: "grid2", style: { gap: "24px", alignItems: "start" } },
         h("div", { style: { display: "flex", flexDirection: "column", gap: "12px" } },

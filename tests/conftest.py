@@ -97,11 +97,14 @@ def _render_page(fmt: str, page: int, px_per_mm: float = 6.0):
 
 
 def synthetic_photo(fmt: str = "A4", page: int = 0, tilt: float = 0.06, blur: bool = True,
-                    objects: list[dict] | None = None) -> bytes:
+                    objects: list[dict] | None = None, shadow: dict | None = None) -> bytes:
     """Gerendertes Blatt perspektivisch verzerrt auf grauem Grund – wie ein leicht schraeges Handyfoto.
 
     objects: Objekte in mm der Rasterflaeche (Ursprung unten links), z. B. {"rect": [x, y, w, h], "gray": 150}
-    oder {"circle": [cx, cy, d], "gray": 235}. None = ein dunkles Rechteck mittig (bisheriges Verhalten)."""
+    oder {"circle": [cx, cy, d], "gray": 235}. None = ein dunkles Rechteck mittig (bisheriges Verhalten).
+    Optional je Objekt "alpha" (0..1): Pixel = alpha * gray + (1 - alpha) * Blatt (durchscheinendes Teil).
+    shadow: Schlagschatten, z. B. {"mm": 8, "sides": ("left", "bottom"), "dark": 0.8}: Streifen der Breite mm an
+    den genannten Seiten der Bounding-Box jedes rect-/polygon-Objekts, dort Blatt * dark (Raster bleibt sichtbar)."""
     import cv2
     import numpy as np
 
@@ -117,14 +120,41 @@ def synthetic_photo(fmt: str = "A4", page: int = 0, tilt: float = 0.06, blur: bo
 
         def P(x, y):
             return int(round((x + ox) * px)), int(round((page_h - (y + oy)) * px))
-        for o in objects:
-            g = (o["gray"],) * 3
+        for o in objects if shadow else []:  # Schatten zuerst zeichnen, das Objekt ueberdeckt ihn
             if "rect" in o:
                 x, y, rw, rh = o["rect"]
-                cv2.rectangle(sheet, P(x, y + rh), P(x + rw, y), g, -1)
+            elif "polygon" in o:
+                xs, ys = [q[0] for q in o["polygon"]], [q[1] for q in o["polygon"]]
+                x, y, rw, rh = min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)
+            else:
+                continue
+            m, sides = shadow["mm"], shadow["sides"]
+            # jeder Streifen reicht um mm in die Ecke zur anderen Schattenseite: dort ueberlappen sie (dark ** 2)
+            xl, xr = x - m * ("left" in sides), x + rw + m * ("right" in sides)
+            yb, yt = y - m * ("bottom" in sides), y + rh + m * ("top" in sides)
+            regions = [(x - m, yb, x, yt)] if "left" in sides else []
+            regions += [(x + rw, yb, x + rw + m, yt)] if "right" in sides else []
+            regions += [(xl, y - m, xr, y)] if "bottom" in sides else []
+            regions += [(xl, y + rh, xr, y + rh + m)] if "top" in sides else []
+            for x0, y0, x1, y1 in regions:
+                (a0, b1), (a1, b0) = P(x0, y0), P(x1, y1)
+                sheet[b0:b1, a0:a1] = (sheet[b0:b1, a0:a1].astype(np.float32) * shadow["dark"]).astype(np.uint8)
+        for o in objects:
+            g = (o["gray"],) * 3
+            alpha = o.get("alpha", 1.0)
+            layer = sheet.copy() if alpha < 1 else sheet
+            if "rect" in o:
+                x, y, rw, rh = o["rect"]
+                cv2.rectangle(layer, P(x, y + rh), P(x + rw, y), g, -1)
             if "circle" in o:
                 cx, cy, d = o["circle"]
-                cv2.circle(sheet, P(cx, cy), int(round(d / 2 * px)), g, -1, cv2.LINE_AA)
+                cv2.circle(layer, P(cx, cy), int(round(d / 2 * px)), g, -1, cv2.LINE_AA)
+            if "polygon" in o:
+                pts = np.array([P(x, y) for x, y in o["polygon"]], np.int32)
+                cv2.fillPoly(layer, [pts], g, cv2.LINE_AA)
+            if alpha < 1:  # nur in der Objektmaske mischen
+                inside = (layer != sheet).any(axis=2)
+                sheet[inside] = cv2.addWeighted(layer, alpha, sheet, 1 - alpha, 0)[inside]
     W, H_ = int(w * 1.3), int(h * 1.2)
     dx, dy = w * tilt, h * tilt * 0.5
     src = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
@@ -151,3 +181,25 @@ def photo_a3() -> bytes:
 @pytest.fixture(scope="session")
 def photo_gauge() -> bytes:
     return synthetic_photo("A4", 1, tilt=0.03)
+
+
+def bottom_of(objects: list[dict], rot: int, dx: float = 0.0, dy: float = 0.0, fmt: str = "A4") -> list[dict]:
+    """Objekte so umrechnen, wie sie in der Unteransicht liegen: Umkehrung von vision.lage_matrix."""
+    import numpy as np
+
+    from core import vision
+    gw, gh = vision.spec(fmt)["grid_mm"]
+    inv = np.linalg.inv(vision.lage_matrix(rot, dx, dy, gw, gh))
+    out = []
+    for o in objects:
+        rest = {k: v for k, v in o.items() if k not in ("rect", "polygon", "circle")}
+        if "rect" in o:
+            x, y, w, h = o["rect"]
+            out.append({**rest, "polygon": vision.apply_lage(inv, [[x, y], [x + w, y], [x + w, y + h], [x, y + h]])})
+        elif "polygon" in o:
+            out.append({**rest, "polygon": vision.apply_lage(inv, o["polygon"])})
+        elif "circle" in o:
+            cx, cy, d = o["circle"]
+            (nx, ny), = vision.apply_lage(inv, [[cx, cy]])
+            out.append({**rest, "circle": [nx, ny, d]})
+    return out

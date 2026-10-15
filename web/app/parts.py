@@ -358,6 +358,39 @@ def assign_holes(parts_list, holes):
 
 # ------------------------------------------------------------------ Datenbank
 
+def reference_top(project_id):
+    """Referenz-Draufsicht: view='top', rect vorhanden, status gut/brauchbar, kleinste id (Spec §1)."""
+    rows = db.q("SELECT * FROM photos WHERE project_id=? AND view='top' AND status IN ('gut','brauchbar') ORDER BY id",
+                (project_id,))
+    return next((ph for ph in rows if (db.jload(ph["analysis"], {}) or {}).get("rect")), None)
+
+
+def to_top(photo, pts):
+    """Punkte einer Unteransicht (mm) in Draufsicht-Koordinaten; ohne Ausrichtung nur die Spiegelung (rot=0)."""
+    from core import vision  # spaet: main.py setzt sys.path erst nach den App-Importen
+    a = db.jload(photo["analysis"], {}) or {}
+    r = a.get("rect")
+    if not r:   # Foto ohne Entzerrung (z. B. nach Formatwechsel): Punkte unveraendert
+        return [[float(x), float(y)] for x, y in pts]
+    al = a.get("bottom_align") or {"rot": 0, "dx": 0.0, "dy": 0.0}
+    return vision.apply_lage(vision.lage_matrix(al["rot"], al["dx"], al["dy"], r["w_mm"], r["h_mm"]), pts)
+
+
+def link_bottom(project_id):
+    """Unteransicht-Teile mit dem ueberlagerten Teil der Referenz-Draufsicht verknuepfen (Spec §1, same_as)."""
+    top = reference_top(project_id)
+    photos = {p["id"]: p for p in db.q("SELECT * FROM photos WHERE project_id=?", (project_id,))}
+    rows = db.q("SELECT * FROM parts WHERE project_id=?", (project_id,))
+    tops = [(r["id"], _data(r)["polygon"]) for r in rows if top and r["photo_id"] == top["id"]]
+    for r in rows:
+        ph, d, same = photos.get(r["photo_id"]), _data(r), None
+        if ph and ph["view"] == "bottom" and tops and (db.jload(ph["analysis"], {}) or {}).get("bottom_align"):
+            same = match_parts(tops, [(r["id"], to_top(ph, d["polygon"]))]).get(r["id"])
+        if d.get("same_as") != same:
+            d["same_as"] = same
+            db.ex("UPDATE parts SET data=? WHERE id=?", (db.jdump(d), r["id"]))
+
+
 def default_unc(photo, view):
     """Standard-Unsicherheit einer Fotomessung (vorher main._default_unc)."""
     if not photo:
@@ -470,6 +503,7 @@ def reset_scale(part_id):
 def _sync_auto(part, photo, fx, fy):
     """Auto-Masse eines Teils an sein Polygon anpassen (Spec §3)."""
     d = _data(part)
+    view = "bottom" if photo and photo["view"] == "bottom" else "top"
     want = {x["key"]: x for x in auto_dims(d, fx, fy) if x["key"] not in (d.get("dropped") or [])}
     have = {}
     for m in db.q("SELECT * FROM measurements WHERE part_id=? AND source='auto' ORDER BY id", (part["id"],)):
@@ -485,14 +519,14 @@ def _sync_auto(part, photo, fx, fy):
         m = have.get(key)
         if m:
             md = _data(m)
-            md.update(points=x["points"], auto_raw=x["raw"], warn=x["warn"])
+            md.update(view=view, points=x["points"], auto_raw=x["raw"], warn=x["warn"])
             db.ex("UPDATE measurements SET kind=?, data=? WHERE id=?", (x["kind"], db.jdump(md), m["id"]))
         else:
-            md = {"view": "top", "points": x["points"], "auto_key": key, "auto_raw": x["raw"], "warn": x["warn"], "note": None}
+            md = {"view": view, "points": x["points"], "auto_key": key, "auto_raw": x["raw"], "warn": x["warn"], "note": None}
             db.ex("""INSERT INTO measurements(project_id,photo_id,part_id,seq,label,kind,value,unit,unc,data,critical,source,
                      accepted,created_at) VALUES (?,?,?,?,?,?,?,'mm',?,?,0,'auto',1,?)""",
                   (part["project_id"], part["photo_id"], part["id"], _next_seq("measurements", part["project_id"]),
-                   auto_label(part["label"], key), x["kind"], x["raw"], default_unc(photo, "top"), db.jdump(md), db.now()))
+                   auto_label(part["label"], key), x["kind"], x["raw"], default_unc(photo, view), db.jdump(md), db.now()))
     for key, m in have.items():
         if key in want:
             continue
@@ -524,7 +558,7 @@ def refresh(project, fx, fy):
         if m["source"] == "auto" or d.get("part_fixed"):
             continue
         new = None
-        if m["source"] != "manual" and d.get("view", "top") == "top" and m["kind"] != "height" and d.get("points") \
+        if m["source"] != "manual" and d.get("view", "top") in ("top", "bottom") and m["kind"] != "height" and d.get("points") \
                 and m["photo_id"] in by_photo:
             new = assign(d["points"], by_photo[m["photo_id"]])
         if new != m["part_id"]:
@@ -541,7 +575,8 @@ def refresh(project, fx, fy):
     for part in parts:  # 3. Massstab je Teil
         refs = [(m["id"], m["caliper"] / raw[m["id"]]) for m in rows
                 if m["part_id"] == part["id"] and m["caliper"] is not None and m["kind"] in SCALED_KINDS
-                and datas[m["id"]].get("ref") is not False and datas[m["id"]].get("view", "top") == "top" and raw.get(m["id"])]
+                and datas[m["id"]].get("ref") is not False and raw.get(m["id"])
+                and datas[m["id"]].get("view", "top") in ("top", "bottom")]
         k, good, bad, warn = scale_of(refs)
         kmap[part["id"]] = k
         for mid in bad:
@@ -554,7 +589,7 @@ def refresh(project, fx, fy):
         r = raw.get(m["id"])
         value = m["value"]
         if _computed(m, d) and r is not None:
-            k = kmap.get(m["part_id"], 1.0) if m["kind"] in SCALED_KINDS and d.get("view", "top") == "top" else 1.0
+            k = kmap.get(m["part_id"], 1.0) if m["kind"] in SCALED_KINDS and d.get("view", "top") in ("top", "bottom") else 1.0
             value = round(r * k, 3)
             d["raw"] = round(r, 3)
         else:
@@ -563,6 +598,7 @@ def refresh(project, fx, fy):
         d["nominal"] = nominal(value, m["unc"], m["caliper"]) if m["kind"] in MM_KINDS else None
         if value != m["value"] or d != datas[m["id"]]:
             db.ex("UPDATE measurements SET value=?, data=? WHERE id=?", (value, db.jdump(d), m["id"]))
+    link_bottom(pid)
 
 
 def part_public(part):
@@ -572,10 +608,12 @@ def part_public(part):
     by_key = {_data(x).get("auto_key"): x["value"] for x in ms}
     seq = {x["id"]: x["seq"] for x in ms}
     rect = is_rect(poly)
+    ph = db.q1("SELECT view FROM photos WHERE id=?", (part["photo_id"],))
     return {"id": part["id"], "seq": part["seq"], "id_label": f"T{part['seq']}", "photo_id": part["photo_id"],
             "label": part["label"], "role": part["role"], "source": part["source"], "scale": part["scale"],
             "polygon": poly, "edge_ids": d["edge_ids"], "hidden": d.get("hidden") or [], "holes": d.get("holes") or [],
             "warn": d.get("warn"), "note": d.get("note") or "", "rect": rect,
+            "same_as": d.get("same_as"), "view": ph["view"] if ph else "top",
             "size": [by_key["L"], by_key["B"]] if rect and "L" in by_key and "B" in by_key else None,
             "n_edges": len(poly), "refs": [f"M{seq[i]}" for i in d.get("refs") or [] if i in seq]}
 
@@ -648,11 +686,13 @@ def plausible(poly, outlines, min_area=25.0):
     return P.intersection(U).area >= 0.5 * P.area
 
 
-def ai_parts(photo_dir, res):
+def ai_parts(photo_dir, res, material_text=""):
     """Teile per KI zuordnen und auf die Kandidaten einrasten. Leere Liste = KI hat nichts Brauchbares geliefert."""
     img = candidate_image(photo_dir, res)
     content = ai.image_ref(img, ai.scaled_caption(img, "Draufsicht mit nummerierten Kanten-Kandidaten", res["px_per_mm"]))
-    content.append({"type": "text", "text": candidate_text(res)})
+    content.append({"type": "text", "text": candidate_text(res) + (
+        "\n" + material_text + "\nBei transparenten Teilen sind durchscheinende Strukturen Innenbohrungen, keine Rillen."
+        if material_text else "")})
     text, _ = ai.call(ai.PARTS_SYSTEM, [{"role": "user", "content": content}], max_tokens=4000)
     out = []
     for it in ai.parse_parts(text):
@@ -665,17 +705,43 @@ def ai_parts(photo_dir, res):
     return out
 
 
+def _poly_text(part, photo):
+    d, unten = _data(part), bool(photo and photo["view"] == "bottom")
+    pts = to_top(photo, d["polygon"]) if unten else d["polygon"]
+    s = "Umriss (mm) " + " ".join(f"({x:.1f}, {y:.1f})" for x, y in pts)
+    if d.get("hidden"):
+        s += "; verdeckte Kanten: " + ", ".join(f"K{e}" for e in d["hidden"])
+    if d.get("holes"):
+        cs = to_top(photo, [h["c"] for h in d["holes"]]) if unten else [h["c"] for h in d["holes"]]
+        s += "; Bohrungen: " + ", ".join(f"Ø {h['d']:.1f} bei ({c[0]:.1f}, {c[1]:.1f})"
+                                         for h, c in zip(d["holes"], cs, strict=True))
+    return s
+
+
 def cad_text(project_id, part_id=None):
-    """Hinweis fuer die CAD-KI, welche Teile es gibt und welches modelliert wird (Spec §5)."""
+    """Teile fuer die CAD-KI: Umrisse verbindlich (Spec §2.2); Unteransicht-Teile in Draufsicht-Koordinaten."""
     rows = db.q("SELECT * FROM parts WHERE project_id=? ORDER BY seq", (project_id,))
     if not rows:
         return ""
+    photos = {p["id"]: p for p in db.q("SELECT * FROM photos WHERE project_id=?", (project_id,))}
+    seq = {r["id"]: r["seq"] for r in rows}
+
+    def where(r):
+        ph = photos.get(r["photo_id"])
+        if not ph or ph["view"] != "bottom":
+            return "Draufsicht"
+        same = _data(r).get("same_as")
+        tail = f"; derselbe Körper wie T{seq[same]}, kein zusätzliches Teil" if same in seq else ""
+        return "von unten, in Draufsicht-Koordinaten" + tail
+
+    def line(r):
+        return f"T{r['seq']} „{r['label']}“ ({ROLE_TEXT[r['role']]}, {where(r)}): {_poly_text(r, photos.get(r['photo_id']))}"
     if part_id:
         t = next((r for r in rows if r["id"] == part_id), None)
         if not t:
             return ""
-        pts = " ".join(f"({x:.1f}, {y:.1f})" for x, y in _data(t)["polygon"])
-        return (f"Modelliert wird nur Teil T{t['seq']} „{t['label']}“ ({ROLE_TEXT[t['role']]}). "
-                f"Umriss in der Draufsicht (mm): {pts}. Maße anderer Teile sind nicht enthalten.")
-    names = ", ".join(f"T{r['seq']} {r['label']} ({ROLE_TEXT[r['role']]})" for r in rows)
-    return f"Teile im Foto: {names}. Alle Teile als ein Körper modellieren."
+        extra = [line(r) for r in rows if _data(r).get("same_as") == part_id]
+        return ("Modelliert wird nur Teil " + line(t) + "." + (" Dazu " + "; ".join(extra) + "." if extra else "")
+                + " Maße anderer Teile sind nicht enthalten.")
+    return ("Teile im Foto (Umrisse verbindlich): " + "; ".join(line(r) for r in rows)
+            + ". Alle Teile als ein Körper modellieren.")

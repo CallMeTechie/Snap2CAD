@@ -28,6 +28,28 @@ def test_migration_ergaenzt_part_id(tmp_path, monkeypatch):
         db._conn.close()
 
 
+OLD_PROJECTS = """CREATE TABLE projects (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, name TEXT NOT NULL, created_at TEXT NOT NULL,
+  archived INTEGER NOT NULL DEFAULT 0, ctrl_x REAL, ctrl_y REAL);"""
+
+
+def test_migration_werkstueck(tmp_path, monkeypatch):
+    from app import config, db
+    path = tmp_path / "alt2.db"
+    con = sqlite3.connect(path)
+    con.executescript(OLD_PROJECTS + OLD_MEAS)
+    con.close()
+    monkeypatch.setattr(config, "DB_PATH", path)
+    monkeypatch.setattr(db, "_conn", None)
+    try:
+        cols = {r["name"] for r in db.q("PRAGMA table_info(projects)")}
+        assert {"color", "material", "transparent", "finish", "material_user", "cad_check"} <= cols
+        db._migrate(db.conn())                                                  # zweiter Start aendert nichts
+        assert {r["name"] for r in db.q("PRAGMA table_info(projects)")} == cols
+    finally:
+        db._conn.close()
+
+
 def test_atomic_rollback_und_verschachtelt():
     from app import db
     db.ex("CREATE TABLE IF NOT EXISTS t_atomic (v INTEGER)")
