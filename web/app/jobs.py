@@ -615,18 +615,19 @@ def param(user: dict, job: dict, values: list[dict], base: int | None = None) ->
 
 def _run_param(job_id: int, version: int, ev: threading.Event):
     """Sandbox-Lauf genau der Param-Version `version`: kein KI-Aufruf, kein Autofix; Fehler -> failed, Basis bleibt."""
-    v = db.q1("SELECT * FROM job_versions WHERE job_id=? AND version=?", (job_id, version))
-    job = db.q1("SELECT * FROM jobs WHERE id=?", (job_id,))
-    if not job:
-        return
-    if not v or v["status"] != "running":       # Version wurde zwischenzeitlich beendet: Auftrag nicht queued lassen
-        if _current(job_id, ev):
-            _set(job_id, status="failed", error="Neuaufbau abgebrochen.")
-        return
-    if job["status"] == "cancelled" or ev.is_set():
-        db.ex("UPDATE job_versions SET status='cancelled' WHERE job_id=? AND version=?", (job_id, version))
-        return
-    _set(job_id, status="running")
+    with _lock:   # Pruefen und status=running atomar: ein cancel() dazwischen wird nicht ueberschrieben
+        v = db.q1("SELECT * FROM job_versions WHERE job_id=? AND version=?", (job_id, version))
+        job = db.q1("SELECT * FROM jobs WHERE id=?", (job_id,))
+        if not job:
+            return
+        if not v or v["status"] != "running":       # Version wurde zwischenzeitlich beendet: Auftrag nicht queued lassen
+            if _current(job_id, ev):
+                _set(job_id, status="failed", error="Neuaufbau abgebrochen.")
+            return
+        if job["status"] == "cancelled" or ev.is_set():
+            db.ex("UPDATE job_versions SET status='cancelled' WHERE job_id=? AND version=?", (job_id, version))
+            return
+        _set(job_id, status="running")
     code, req = v["code"] or "", v["request_text"] or ""
     meta = db.jload(v["meta"], {}) or {}
     vdir = version_dir(job_id, version)
@@ -648,8 +649,16 @@ def _run_param(job_id: int, version: int, ev: threading.Event):
         _apply_anchors(meta, result, changed=set(meta.get("param_ids") or []))
     checks = compute_checks(result, meta, job["project_id"]) if result else []
     failed = err is not None or any(c["state"] == "fail" for c in checks)
-    with _lock:   # cancel() setzt ev unter _lock: nach einem Abbruch wird die Version nie ok/failed (O-2)
-        if ev.is_set():
+    why = ""
+    if err:
+        where = f" (Zeile {err['line']})" if err.get("line") else ""
+        why = f"{err.get('type')}{where}: {str(err.get('message'))[:200]}"
+    elif failed:
+        why = "Prüfung nicht bestanden – " + "; ".join(c["label"] for c in checks if c["state"] == "fail")
+    # Ein Block unter _lock (cancel() setzt ev unter _lock): Abbruch pruefen, Version schreiben und bei Erfolg
+    # Gespraechszeile, done und current_version – eine abgebrochene Version wird nie ok ohne aktuell zu werden.
+    with _lock:
+        if not _current(job_id, ev):
             db.ex("UPDATE job_versions SET status='cancelled' WHERE job_id=? AND version=?", (job_id, version))
             log(job_id, "Abgebrochen", "warn")
             return
@@ -657,26 +666,20 @@ def _run_param(job_id: int, version: int, ev: threading.Event):
               "WHERE job_id=? AND version=?",
               ("failed" if failed else "ok", db.jdump(err) if err else None, db.jdump(result) if result else None,
                db.jdump(checks), res.get("seconds"), db.jdump(meta), job_id, version))
-    if failed:
-        if err:
-            where = f" (Zeile {err['line']})" if err.get("line") else ""
-            why = f"{err.get('type')}{where}: {str(err.get('message'))[:200]}"
-        else:
-            why = "Prüfung nicht bestanden – " + "; ".join(c["label"] for c in checks if c["state"] == "fail")
-        log(job_id, f"Version {version}: Neuaufbau mit {req} fehlgeschlagen – {why}", "warn")
-        if _current(job_id, ev):
+        if failed:
             _set(job_id, status="failed", error=f"Neuaufbau mit {req} fehlgeschlagen – {why}")
+        else:   # Gespraechszeile nur bei Erfolg: spaetere KI-Aenderungen kennen den Stand
+            row = db.q1("SELECT messages FROM jobs WHERE id=?", (job_id,))
+            msgs = db.jload(row["messages"], []) if row else []
+            msgs.append({"role": "user", "content": [{"type": "text",
+                                                      "text": f"Parametrisch geändert: {req} (Version {version})"}]})
+            _set(job_id, messages=db.jdump(msgs), status="done", current_version=version, error=None)
+    if failed:
+        log(job_id, f"Version {version}: Neuaufbau mit {req} fehlgeschlagen – {why}", "warn")
         return
     bb = result["bbox"]
     log(job_id, f"Version {version} fertig (Neuaufbau ohne KI): {_de(bb[0])} × {_de(bb[1])} × {_de(bb[2])} mm, "
                 f"{_de(res['seconds'], 1)} s", "ok")
-    with _lock:   # Gespraechszeile nur bei Erfolg und nur fuer den aktuellen Lauf: spaetere KI-Aenderungen kennen den Stand
-        if not _current(job_id, ev):
-            return
-        row = db.q1("SELECT messages FROM jobs WHERE id=?", (job_id,))
-        msgs = db.jload(row["messages"], []) if row else []
-        msgs.append({"role": "user", "content": [{"type": "text", "text": f"Parametrisch geändert: {req} (Version {version})"}]})
-        _set(job_id, messages=db.jdump(msgs), status="done", current_version=version, error=None)
 
 
 def pending_param(job_id: int) -> list[dict]:
@@ -768,10 +771,11 @@ def _run(job_id: int, trigger: str, request_text: str, ev: threading.Event):
     if trigger == "param":   # Spec Stufe B §2: Neuaufbau ohne KI und ohne Autofix; request_text = Versionsnummer
         _run_param(job_id, int(request_text), ev)
         return
-    job = db.q1("SELECT * FROM jobs WHERE id=?", (job_id,))
-    if not job or job["status"] == "cancelled" or ev.is_set():
-        return
-    _set(job_id, status="running")
+    with _lock:   # Pruefen und status=running atomar: ein cancel() dazwischen wird nicht ueberschrieben
+        job = db.q1("SELECT * FROM jobs WHERE id=?", (job_id,))
+        if not job or job["status"] == "cancelled" or ev.is_set():
+            return
+        _set(job_id, status="running")
     msgs = db.jload(job["messages"], [])
     fixes = 0
     while True:
