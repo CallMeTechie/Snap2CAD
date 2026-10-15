@@ -425,10 +425,10 @@ def parse_dims(raw, meas_ids=frozenset()) -> list[dict]:
         if not isinstance(it, dict):
             continue
         did = _upper(it.get("id")) or ""
-        if not _DIM_ID.match(did) or did in seen:
+        if not _DIM_ID.fullmatch(did) or did in seen:
             continue
         seen.add(did)
-        var = it["var"] if isinstance(it.get("var"), str) and _VAR.match(it["var"]) else None
+        var = it["var"] if isinstance(it.get("var"), str) and _VAR.fullmatch(it["var"]) else None
         value = _pos_num(it.get("value"))
         ref = _upper(it.get("ref"))
         d = {"id": did, "label": " ".join(_text(it.get("label"), 200).split())[:60] or did,
