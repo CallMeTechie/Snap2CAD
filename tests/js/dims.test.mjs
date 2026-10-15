@@ -40,6 +40,14 @@ test("visibleDims: Gruppen, Annahmen, Nur Annahmen, unbekannte Gruppe = sonst", 
   assert.deepEqual(ids({ ...DEFAULT_SEL, aussen: false, annahmen: false, sonst: true }), ["D4", "D5"]);
 });
 
+test("visibleDims: vom Nutzer gesetztes Maß gilt wie eine Annahme", () => {
+  const dims = [{ id: "D1", group: "aussen" }, { id: "D3", group: "platte", user_set: true }, { id: "D4", group: "platte" }];
+  const ids = sel => visibleDims(dims, sel).map(d => d.id);
+  assert.deepEqual(ids(DEFAULT_SEL), ["D1", "D3"]);
+  assert.deepEqual(ids({ ...DEFAULT_SEL, annahmen: false }), ["D1"]);
+  assert.deepEqual(ids({ ...DEFAULT_SEL, nur_annahmen: true }), ["D3"]);
+});
+
 test("DIM_GROUP_TEXT: ein Text je Gruppe, wie jobs.GROUP_TEXT", () => {
   assert.deepEqual(Object.keys(DIM_GROUP_TEXT), DIM_GROUP_KEYS);
   assert.equal(DIM_GROUP_TEXT.aussen, "außen");

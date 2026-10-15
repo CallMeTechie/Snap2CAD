@@ -57,10 +57,12 @@ export function dimSel(raw) {
 }
 
 const groupOf = d => (DIM_GROUP_KEYS.includes(d.group) ? d.group : "sonst");
-// sichtbar: Gruppe an oder (Annahme und „Annahmen“ an); „Nur Annahmen“: nur Annahmen, gleich welche Gruppe
+// sichtbar: Gruppe an oder (Annahme bzw. vom Nutzer gesetzt und „Annahmen & nachgemessen“ an);
+// „Nur Annahmen“: nur Annahmen und vom Nutzer gesetzte Maße, gleich welche Gruppe
+const flagged = d => d.assumed === true || d.user_set === true;
 export function visibleDims(dims, sel) {
-  if (sel.nur_annahmen) return dims.filter(d => d.assumed === true);
-  return dims.filter(d => sel[groupOf(d)] === true || (d.assumed === true && sel.annahmen === true));
+  if (sel.nur_annahmen) return dims.filter(flagged);
+  return dims.filter(d => sel[groupOf(d)] === true || (flagged(d) && sel.annahmen === true));
 }
 
 const fin3 = p => Array.isArray(p) && p.length === 3 && p.every(v => typeof v === "number" && Number.isFinite(v));

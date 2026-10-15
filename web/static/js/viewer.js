@@ -114,13 +114,15 @@ export async function createViewer(box, url, dims = [], hooks = {}) {
   controls.enableDamping = false;
   controls.screenSpacePanning = true;
   controls.zoomToCursor = true;
-  const state = { edges: false, section: false, locked: false, lockedText: "", sel: { ...DEFAULT_SEL }, hl: null };
+  const state = { locked: false, lockedText: "", sel: { ...DEFAULT_SEL }, hl: null };
   const mkLabel = (cls, text) => { const e = document.createElement("span"); e.className = cls; e.textContent = text; box.append(e); return e; };
   const mainEls = S.mainLabels.map(l => mkLabel("dimlabel", l.text));
   const itemEls = S.items.map(it => {
     const e = mkLabel(`dimlabel ${it.d.editable ? "edit" : "info"}`, num(it.d.value, 1, false));
     e.dataset.dim = it.d.id;
-    e.title = `${it.d.id} · ${it.d.label || ""}`;
+    e.title = `${it.d.id} · ${it.d.label || ""}${it.d.editable ? "" : ` – ${NOT_EDITABLE}`}`;
+    e.tabIndex = 0; e.setAttribute("role", "button");
+    e.addEventListener("keydown", ev => { if (ev.key === "Enter" && ev.target === e) { ev.preventDefault(); startEdit(it, e); } });
     e.style.color = it.st.color; e.style.borderColor = it.st.color;
     if (it.st.dashed) e.style.borderStyle = "dashed";
     e.addEventListener("click", () => startEdit(it, e));
@@ -200,7 +202,6 @@ export async function createViewer(box, url, dims = [], hooks = {}) {
   applyGroups();
 
   function setSection(on) {
-    state.section = on;
     const planes = on ? [S.clip] : [];
     S.front.clippingPlanes = planes; S.back.clippingPlanes = planes; S.edges.material.clippingPlanes = planes;
     [S.front, S.back, S.edges.material].forEach(m => { m.needsUpdate = true; });
@@ -215,7 +216,7 @@ export async function createViewer(box, url, dims = [], hooks = {}) {
     setGroups(sel) { state.sel = { ...DEFAULT_SEL, ...sel }; applyGroups(); },
     setLocked(on, text = "") { state.locked = !!on; state.lockedText = text; },
     highlight,
-    setEdges(on) { state.edges = on; S.edges.visible = on; req(); },
+    setEdges(on) { S.edges.visible = on; req(); },
     setSection,
     snapshots(views = ["top", "front", "side"], W = 480, H = 360) {
       const r2 = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
@@ -232,7 +233,8 @@ export async function createViewer(box, url, dims = [], hooks = {}) {
     dispose() {
       hlDone?.(); cancelAnimationFrame(frame); frame = -1;   // -1: keine neuen Bilder nach dem Abbau
       ro.disconnect(); controls.dispose(); renderer.dispose(); renderer.forceContextLoss?.(); geo.dispose();
-      S.items.forEach(it => { it.mat.dispose(); it.grp.children.forEach(ln => ln.geometry.dispose()); });
+      const gone = new Set();   // alle Geometrien und Materialien der Szene (Linien, Raster, Kanten), jedes einmal
+      S.scene.traverse(o => { for (const x of [o.geometry, ...[o.material].flat()]) if (x?.dispose && !gone.has(x)) { gone.add(x); x.dispose(); } });
       renderer.domElement.remove(); mainEls.forEach(e => e.remove()); itemEls.forEach(e => e.remove());
     },
   };

@@ -260,7 +260,7 @@ export async function job(main, id) {
   }
   async function cancelJob() {
     if (!await confirmDlg("Auftrag abbrechen?", "Der laufende Schritt wird beendet. Bereits fertige Versionen bleiben erhalten.", "Abbrechen", true)) return;
-    try { J = await api(`/api/jobs/${id}/cancel`, { method: "POST" }); if (gone) return; jv++; draw(); } catch (e) { fail(e); }
+    try { J = await api(`/api/jobs/${id}/cancel`, { method: "POST" }); if (gone) return; jv++; draw(); } catch (e) { if (!gone) fail(e); }
   }
 
   // ---------------------------------------------------------------- Fortschritt
@@ -394,7 +394,7 @@ export async function job(main, id) {
     if (values.length > 20) { toast("Höchstens 20 Werte auf einmal.", "err"); return false; }
     let r;
     try { r = await api(`/api/jobs/${id}/param`, { method: "POST", body: { values, base: J.current_version } }); }
-    catch (e) { fail(e); return false; }
+    catch (e) { if (!gone) fail(e); return false; }
     if (r.learned === false) toast("Ohne Projekt – der Wert wird nicht gemerkt.");
     try {
       const j = await api(`/api/jobs/${id}`);
@@ -413,12 +413,17 @@ export async function job(main, id) {
       refreshMe().catch(() => {});
       if (!gone) { jv++; ver = null; draw(); }
       return true;
-    } catch (e) { fail(e); return false; }
+    } catch (e) { if (!gone) fail(e); return false; }
   }
+  // „Schlüsse ziehen“: bis zur Antwort gesperrt (Doppelklick), Knöpfe der aktuellen Ansicht in conclBtns
+  let concluding = false, conclBtns = [];
+  const conclOff = () => concluding || !(J.pending_param || []).length || running() || !S.status?.ai;
   async function conclude() {
     const text = conclusionText(J.pending_param || []);
-    if (!text || running() || !S.status?.ai) return;
-    await submitIterate(text);
+    if (concluding || !text || running() || !S.status?.ai) return;
+    concluding = true; conclBtns.forEach(b => { b.disabled = true; });
+    try { await submitIterate(text); }
+    finally { concluding = false; conclBtns.forEach(b => { b.disabled = conclOff(); }); }
   }
   function dimTable(V, list) {
     const edit = canEdit(V), inputs = [];
@@ -450,7 +455,9 @@ export async function job(main, id) {
         cell = h("td", { class: "num" }, inp);
       }
       const zustand = old ? (typeof d.measured === "number" ? `gemessen ${num(d.measured, 2)}` : "") : dimState(d);
-      return h("tr", { title: d.note || "", style: hasAnchors(d) ? { cursor: "pointer" } : {}, onclick: () => viewer?.highlight(d.id) },
+      const hl = hasAnchors(d);
+      return h("tr", { title: d.note || "", style: hl ? { cursor: "pointer" } : {}, tabindex: hl ? "0" : null, role: hl ? "button" : null,
+        onclick: () => viewer?.highlight(d.id), onkeydown: e => { if (e.key === "Enter" && e.target === e.currentTarget) viewer?.highlight(d.id); } },
         h("td", { class: "mono" }, d.id || ""), h("td", {}, d.label || "", d.note ? h("div", { class: "xs muted" }, d.note) : null),
         h("td", { class: "small" }, DIM_GROUP_TEXT[d.group] || "–"), cell, h("td", { class: "small" }, zustand));
     });
@@ -476,11 +483,12 @@ export async function job(main, id) {
     };
     const cb = (k, t) => h("label", { class: "check small" }, h("input", { type: "checkbox", checked: sel[k], onchange: e => setSel(k, e.target.checked) }), t);
     const pending = J.pending_param || [];
-    const conclBtn = () => h("button", { class: "btn claude sm", disabled: !pending.length || running() || !S.status?.ai,
+    conclBtns = [];
+    const conclBtn = () => { const b = h("button", { class: "btn claude sm", disabled: conclOff(),
       title: !S.status?.ai ? "KI nicht eingerichtet" : pending.length ? "Die KI leitet abhängige Maße aus den nachgemessenen Werten ab" : "Erst einen Wert am Modell eintragen",
-      onclick: conclude }, icon("sparkle", 14), "Schlüsse ziehen");
+      onclick: conclude }, icon("sparkle", 14), "Schlüsse ziehen"); conclBtns.push(b); return b; };
     const bar = h("div", { class: "dimbar", role: "group", "aria-label": "Maße anzeigen" },
-      DIM_GROUPS.map(([k, t]) => cb(k, t)), cb("annahmen", "Annahmen"), cb("nur_annahmen", "Nur Annahmen"), h("span", { style: { flex: "1" } }), conclBtn());
+      DIM_GROUPS.map(([k, t]) => cb(k, t)), cb("annahmen", "Annahmen & nachgemessen"), cb("nur_annahmen", "Nur Annahmen"), h("span", { style: { flex: "1" } }), conclBtn());
     const ids = V.trigger === "param" && Array.isArray(V.meta?.param_ids) ? V.meta.param_ids : [];
     const btext = V.version === J.current_version ? paramBanner(pending.filter(p => ids.includes(p.id))) : "";
     const banner = btext ? h("div", { class: "note info", role: "status" }, icon("info"), h("span", { style: { flex: "1" } }, btext), conclBtn()) : null;

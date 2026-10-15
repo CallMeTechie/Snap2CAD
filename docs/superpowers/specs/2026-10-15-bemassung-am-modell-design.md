@@ -156,7 +156,7 @@ Antwort: `{"version": n}`; der Client pollt den Auftrag wie bisher.
   und `Annahmen` an ist. `Nur Annahmen` als Kontrollkästchen: wenn an, sind nur Maße mit `assumed` sichtbar, gleich
   welche Gruppe; aus → die Gruppenregel gilt wieder unverändert. Standard: `Außenmaße` und `Annahmen` an, Rest aus; die
   Wahl liegt in `localStorage` (`dims.groups`). Die Regel ist die reine Funktion `visibleDims(dims, sel)` in `geom.js`
-  (B5).
+  (B5). Vom Nutzer gesetzte Maße (`user_set`) gelten für die Sichtbarkeit wie Annahmen.
 - Klick auf ein Label: Label wird zum Eingabefeld (`<input inputmode="decimal">`, vorbelegt mit dem Wert); Enter
   sendet §2 (nur dieses Maß, auch mit unverändertem Wert: das bestätigt eine Annahme als nachgemessen), Esc bricht
   ab; während des Laufs ist das Feld gesperrt und der Auftragsstatus zeigt
