@@ -90,23 +90,25 @@ export async function form(main) {
   const submit = h("button", { class: "btn primary big wide", type: "submit", form: "cadform", disabled: !!blocked }, icon("cube"), "CAD-Modell erzeugen");
 
   // Pruefung vor dem Modellieren (Spec Stufe A): laeuft automatisch, solange sich die Grundlage geaendert hat
-  let chk = P.cad_check, checking = false, again = false;
+  let chk = P.cad_check, checking = false, again = false, retryTimer = null;
+  onLeave(() => clearTimeout(retryTimer));
   const sel = () => ({ photo_ids: [...picked], part_id: partSel ? Number(partSel) : null });
   const same = (a, b) => JSON.stringify([...(a || [])].sort()) === JSON.stringify([...(b || [])].sort());
   const needCheck = () => !chk || chk.error || chk.stale || !same(chk.photo_ids, sel().photo_ids) || (chk.part_id ?? null) !== sel().part_id;
   // Auswahl geaendert: laeuft gerade eine Pruefung, danach in jedem Fall neu vergleichen (needCheck prueft dort gegen das neue Ergebnis)
-  function onSel() { if (checking) again = true; else if (needCheck()) runCheck(); }
+  function onSel() { if (!st.ai) return; if (checking) again = true; else if (needCheck()) runCheck(); }
   async function runCheck(force = false) {
     if (checking) { again = true; return; }
+    clearTimeout(retryTimer);
     checking = true; drawCheck();
     try { chk = await api(`/api/projects/${P.id}/cad-check`, { method: "POST", body: { ...sel(), force } }); await reloadProject().catch(() => {}); }
     catch (e) {
-      if (e.status === 409) { again = false; setTimeout(() => { if (main.isConnected) runCheck(false); }, 3000); return; }
+      if (e.status === 409) { again = false; clearTimeout(retryTimer); retryTimer = setTimeout(() => { if (main.isConnected) runCheck(false); }, 3000); return; }
       chk = { error: e.message, items: [], images: [] };
     } finally {
       checking = false; drawCheck();
       const rerun = again && !chk?.error; again = false;
-      if (rerun && needCheck()) runCheck();
+      if (rerun && main.isConnected && needCheck()) runCheck();
     }
   }
   const IMG_KIND = { top: "Draufsicht", bottom: "Von unten", gauge: "Höhenlehre", tilted: "Schrägfoto (Original)" };
@@ -186,7 +188,7 @@ export async function form(main) {
   drawMeas();
   setProc(proc);
   drawCheck();
-  if (needCheck()) runCheck();
+  if (st.ai && needCheck()) runCheck();
   zweck.focus();
 }
 
