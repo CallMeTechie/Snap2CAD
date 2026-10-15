@@ -125,6 +125,9 @@ def synthetic_photo(fmt: str = "A4", page: int = 0, tilt: float = 0.06, blur: bo
             if "circle" in o:
                 cx, cy, d = o["circle"]
                 cv2.circle(sheet, P(cx, cy), int(round(d / 2 * px)), g, -1, cv2.LINE_AA)
+            if "polygon" in o:
+                pts = np.array([P(x, y) for x, y in o["polygon"]], np.int32)
+                cv2.fillPoly(sheet, [pts], g, cv2.LINE_AA)
     W, H_ = int(w * 1.3), int(h * 1.2)
     dx, dy = w * tilt, h * tilt * 0.5
     src = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
@@ -151,3 +154,25 @@ def photo_a3() -> bytes:
 @pytest.fixture(scope="session")
 def photo_gauge() -> bytes:
     return synthetic_photo("A4", 1, tilt=0.03)
+
+
+def bottom_of(objects: list[dict], rot: int, dx: float = 0.0, dy: float = 0.0, fmt: str = "A4") -> list[dict]:
+    """Objekte so umrechnen, wie sie in der Unteransicht liegen: Umkehrung von vision.lage_matrix."""
+    import numpy as np
+
+    from core import vision
+    gw, gh = vision.spec(fmt)["grid_mm"]
+    inv = np.linalg.inv(vision.lage_matrix(rot, dx, dy, gw, gh))
+    out = []
+    for o in objects:
+        rest = {k: v for k, v in o.items() if k not in ("rect", "polygon", "circle")}
+        if "rect" in o:
+            x, y, w, h = o["rect"]
+            out.append({**rest, "polygon": vision.apply_lage(inv, [[x, y], [x + w, y], [x + w, y + h], [x, y + h]])})
+        elif "polygon" in o:
+            out.append({**rest, "polygon": vision.apply_lage(inv, o["polygon"])})
+        elif "circle" in o:
+            cx, cy, d = o["circle"]
+            (nx, ny), = vision.apply_lage(inv, [[cx, cy]])
+            out.append({**rest, "circle": [nx, ny, d]})
+    return out
