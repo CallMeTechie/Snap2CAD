@@ -226,3 +226,28 @@ def test_werkstueck_aendert_umriss_und_lage(pair):
     c.patch(f"/api/projects/{pid}", json={"transparent": 1}, headers=HDR)
     a = db.jload(db.q1("SELECT analysis FROM photos WHERE id=?", (b["id"],))["analysis"])
     assert a["outline_hints"] == {"transparent": 1, "light": False} and a["bottom_align"]["rot"] == 90
+
+
+def test_belegte_erkennung_wartet_nur_einmal_auf_die_referenz(pair, monkeypatch):
+    import threading
+
+    from app import db, main
+    c, pid, t, b = pair
+    db.ex("UPDATE projects SET material_user=1, transparent=1 WHERE id=?", (pid,))   # Umrisse sind jetzt veraltet
+    monkeypatch.setattr(main, "DETECT_WAIT_S", 0.2)
+
+    class Zaehler:
+        n = 0
+        lock = threading.Semaphore(0)   # belegt: jeder acquire laeuft in den Timeout
+
+        def acquire(self, *a, **kw):
+            Zaehler.n += 1
+            return self.lock.acquire(*a, **kw)
+
+        def release(self):
+            self.lock.release()
+    monkeypatch.setattr(main, "_detect_lock", Zaehler())
+    main._realign_project(pid)
+    assert Zaehler.n == 2   # Referenz einmal, die Unteransicht einmal – nicht noch einmal die Referenz je Unteransicht
+    a = db.jload(db.q1("SELECT analysis FROM photos WHERE id=?", (b["id"],))["analysis"])
+    assert "nicht berechnet" in a["align_note"] and "bottom_align" not in a

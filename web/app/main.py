@@ -208,6 +208,7 @@ def _photo_dir(phid: int) -> Path:
 def _photo_public(ph: dict, hints: dict | None = None) -> dict:
     a = db.jload(ph["analysis"], {}) or {}
     d = _photo_dir(ph["id"])
+    has_edges = (d / "edges.json").is_file()
     return {"id": ph["id"], "project_id": ph["project_id"], "filename": ph["filename"], "view": ph["view"],
             "format": ph["format"], "status": ph["status"], "max_err": ph["max_err"], "created_at": ph["created_at"],
             "analysis": {k: a.get(k) for k in ("width", "height", "found_ids", "mat_ids", "missing_ids", "format_auto",
@@ -216,8 +217,8 @@ def _photo_public(ph: dict, hints: dict | None = None) -> dict:
             "rect": a.get("rect"), "gauge_rect": a.get("gauge_rect"),
             "files": [n[:-4] for n in ("orig.jpg", "overlay.jpg", "rect.jpg", "gauge.jpg", "thumb.jpg")
                       if (d / n).is_file()],
-            "has_edges": (d / "edges.json").is_file(),
-            "edges_stale": hints is not None and (d / "edges.json").is_file() and (a.get("edges_hints") or {}) != hints,
+            "has_edges": has_edges,
+            "edges_stale": hints is not None and has_edges and (a.get("edges_hints") or {}) != hints,
             "contrast": a.get("contrast"), "low_contrast": a.get("contrast") is not None and a["contrast"] < 12,
             "bottom_align": a.get("bottom_align") if ph["view"] == "bottom" else None,
             "align_note": a.get("align_note") if ph["view"] == "bottom" else None,
@@ -254,6 +255,7 @@ def _usage(user: dict) -> dict:
 
 AI_DAILY_LIMIT = 30
 _detect_lock = threading.Semaphore(1)  # nur um den OpenCV-Teil, nicht um den KI-Aufruf (Spec §7)
+DETECT_WAIT_S = 30   # so lange wartet eine Umrissberechnung auf _detect_lock
 
 
 def _ai_uses_today(u: dict) -> int:
@@ -848,7 +850,7 @@ def project_patch(pid: int, body: ProjectPatch, u: dict = Depends(auth.require_u
                 db.ex(f"UPDATE projects SET {k}=?, material_user=1 WHERE id=?", (v, pid))
         p = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
         _refresh(p)
-    if _hints(p) != before:
+    if _hints(p) != before and db.q1("SELECT 1 FROM photos WHERE project_id=? AND view='bottom'", (pid,)):
         _realign_project(pid)   # rechnet die Umrisse mit den neuen Hinweisen nach (nie in db.atomic())
     return _project_public(p, True)
 
@@ -890,7 +892,7 @@ def _analyze_store(phid: int, img, fmt: str | None, view: str, hints: dict | Non
         (d / "gauge.jpg").write_bytes(vision.encode_jpg(g, 90))
         a["gauge_rect"] = {"pxmm": vision.PX_PER_MM, "x0": x0, "x1": x1, "y0": y0, "y1": y1,
                            "w": g.shape[1], "h": g.shape[0]}
-    if a.get("rect") and view in PLANAR and _detect_lock.acquire(timeout=30):
+    if a.get("rect") and view in PLANAR and _detect_lock.acquire(timeout=DETECT_WAIT_S):
         try:
             res = edges.detect(rect, a["format"], hints)
             a["outline_mm"] = res["outlines"][0]["polygon"] if res["outlines"] else None
@@ -912,12 +914,14 @@ def _outline_of(ph: dict):
     a = db.jload(ph["analysis"], {}) or {}
     project = db.q1("SELECT * FROM projects WHERE id=?", (ph["project_id"],))
     hints = _hints(project or {})
+    if a.get("outline_mm") == "timeout":   # Marke aus _realign_project: Referenz war nicht berechenbar, nicht erneut warten
+        return "timeout"
     if "outline_mm" in a and a.get("outline_hints") == hints:
         return a["outline_mm"]
     rect_path = _photo_dir(ph["id"]) / "rect.jpg"
     if not a.get("rect") or not rect_path.is_file():
         return None
-    if not _detect_lock.acquire(timeout=30):
+    if not _detect_lock.acquire(timeout=DETECT_WAIT_S):
         return "timeout"
     try:
         img = cv2.imread(str(rect_path))
