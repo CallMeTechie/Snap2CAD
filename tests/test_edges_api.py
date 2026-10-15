@@ -135,6 +135,73 @@ def test_parse_parts_defensiv():
     assert len(items) == 1 and items[0]["role"] == "body" and len(items[0]["label"]) == 80 and items[0]["edges"] == ["K1", "3"]
 
 
+
+def test_parse_parts_nur_text_uebernehmen():
+    from app import ai
+    poly = [[0, 0], [10, 0], [10, 10]]
+    items = ai.parse_parts(json.dumps([{"label": ["Platte"], "note": {"x": 1}, "polygon": poly, "edges": ["K1", True, 2]},
+                                       {"label": "  Quader  ", "note": "  oben  ", "polygon": poly}]))
+    assert [(p["label"], p["note"]) for p in items] == [("Teil", ""), ("Quader", "oben")]
+    assert items[0]["edges"] == ["K1", "2"]
+
+
+def test_erneute_erkennung_beachtet_teilegrenze(two, monkeypatch):
+    """Handteile und erkannte Teile zusammen hoechstens 12 je Foto (MAX_PARTS_PER_PHOTO); ein nicht wiedergefundenes
+    Teil macht vorher Platz."""
+    c, pid, phid = two
+    for i in range(10):
+        r = c.post(f"/api/projects/{pid}/parts", json={"photo_id": phid, "label": f"Hand {i}",
+                                                       "polygon": [[5, 150 + i], [30, 150 + i], [30, 151 + i]]}, headers=H)
+        assert r.status_code == 200, r.text
+    zwei = json.loads(KI_ZWEI)
+    extra = {"label": "Extra", "role": "mounted", "polygon": [[65, 85], [80, 85], [80, 100], [65, 100]], "edges": []}
+
+    def detect(items):
+        _ki(monkeypatch, json.dumps(items))
+        res = c.post(f"/api/photos/{phid}/edges", json={}, headers=H).json()
+        return res, {p["label"]: p["id"] for p in res["parts"] if p["source"] != "user"}, len(res["parts"])
+    res, first, n = detect(zwei)
+    assert n == 12 and set(first) == {"Quader", "Platte"} and res["notice"] == ""
+    res, ids, n = detect([*zwei, extra])                                   # kein Platz: Extra wird nicht angelegt
+    assert n == 12 and ids == first
+    assert "1 erkanntes Teil nicht übernommen" in res["notice"] and "höchstens 12 Teile je Foto" in res["notice"]
+    res, ids, n = detect([zwei[0], extra])                                 # Platte weg: Platz fuer Extra
+    assert n == 12 and set(ids) == {"Quader", "Extra"} and ids["Quader"] == first["Quader"] and res["notice"] == ""
+
+
+def test_foto_meldet_erkannte_kanten(two):
+    """Die Messseite fragt edges.json nur ab, wenn es sie gibt: kein 404 in der Browser-Konsole."""
+    c, pid, phid = two
+
+    def photo():
+        return next(p for p in c.get(f"/api/projects/{pid}").json()["photos"] if p["id"] == phid)
+    assert photo()["has_edges"] is False
+    c.post(f"/api/photos/{phid}/edges", json={"use_ai": False}, headers=H)
+    assert photo()["has_edges"] is True
+    c.patch(f"/api/photos/{phid}", json={"format": "A3"}, headers=H)
+    assert photo()["has_edges"] is False
+
+
+def test_formatwechsel_loescht_kanten_in_der_transaktion(two, monkeypatch):
+    """edges.json verschwindet in der Transaktion der Formataenderung: nicht danach (eine Erkennung mit neuem Format
+    verloere ihre Datei) und nicht davor (eine Erkennung mit altem Format koennte sie wieder anlegen)."""
+    from pathlib import Path
+
+    from app import db, main
+    c, pid, phid = two
+    c.post(f"/api/photos/{phid}/edges", json={"use_ai": False}, headers=H)
+    f = main._photo_dir(phid) / "edges.json"
+    assert f.is_file()
+    seen, orig = [], Path.unlink
+
+    def unlink(self, *a, **kw):
+        if self.name == "edges.json":
+            seen.append(db.conn().in_transaction)
+        return orig(self, *a, **kw)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    assert c.patch(f"/api/photos/{phid}", json={"format": "A3"}, headers=H).status_code == 200
+    assert seen == [True] and not f.exists()
+
 def test_leeres_foto_422(user):
     pid, phid = _upload(user, [])
     r = user.post(f"/api/photos/{phid}/edges", json={}, headers=H)

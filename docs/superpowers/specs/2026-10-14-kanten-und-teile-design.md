@@ -99,7 +99,7 @@ Höchstens 6 Teile, je 3–32 Punkte. `parse_parts` prüft defensiv wie `parse_s
 
 **Testmodus (`AI_FAKE`)**: liefert deterministisch ein Teil „Quader“ aus dem ersten Umriss der Kandidatenliste.
 
-**Erneute Erkennung** desselben Fotos: Alte und neue Teile werden über die Überlappung abgeglichen (IoU der Polygone mit shapely ≥ 0,5, beste Paare zuerst, jedes Teil höchstens einmal). Ein wiedergefundenes Teil behält id, Nummer, Bezeichnung, Rolle und `dropped`; die neue Erkennung wirkt wie eine Polygonänderung (§3, Kanten-Kennungen werden übertragen). Nicht wiedergefundene alte Teile werden wie bei `DELETE /api/parts/{id}` entfernt, nicht zugeordnete neue Teile neu angelegt.
+**Erneute Erkennung** desselben Fotos: Alte und neue Teile werden über die Überlappung abgeglichen (IoU der Polygone mit shapely ≥ 0,5, beste Paare zuerst, jedes Teil höchstens einmal). Ein wiedergefundenes Teil behält id, Nummer, Bezeichnung, Rolle und `dropped`; die neue Erkennung wirkt wie eine Polygonänderung (§3, Kanten-Kennungen werden übertragen). Nicht wiedergefundene alte Teile werden wie bei `DELETE /api/parts/{id}` entfernt, nicht zugeordnete neue Teile neu angelegt, solange das Foto dabei höchstens 12 Teile hat (Handteile mitgezählt); neue Teile darüber hinaus werden nicht angelegt und im Hinweis genannt.
 
 ## 3. Bemaßung und Schlussfolgerung (`web/app/parts.py`)
 

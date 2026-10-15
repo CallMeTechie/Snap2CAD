@@ -20,6 +20,7 @@ SPREAD_MAX = 0.01
 SCALED_KINDS = ("length", "diameter", "radius")
 MM_KINDS = ("length", "height", "diameter", "radius")
 ROLE_TEXT = {"body": "Grundkörper", "mounted": "montiertes Teil"}
+MAX_PARTS_PER_PHOTO = 12
 
 
 # ------------------------------------------------------------------ Geometrie (ohne Datenbank)
@@ -86,6 +87,16 @@ def circle_points(c, d):
     return [[round(c[0] + r * math.cos(a), 3), round(c[1] + r * math.sin(a), 3)] for a in (0, 2 * math.pi / 3, 4 * math.pi / 3)]
 
 
+def auto_name(key):
+    """Name eines Auto-Masses aus seinem Schluessel: L, B, E<Kante>, H<Bohrung>."""
+    return {"L": "Länge", "B": "Breite"}.get(key) or f"{'Kante' if key[:1] == 'E' else 'Bohrung'} {key[1:]}"
+
+
+def auto_label(part_label, key):
+    """Label eines Auto-Masses; bei langen Teilnamen auf 80 Zeichen gekuerzt."""
+    return f"{part_label} {auto_name(key)}"[:80]
+
+
 def auto_dims(data, fx=1.0, fy=1.0):
     """Auto-Masse eines Teils (Spec §3). raw = Fotowert ohne Teil-Massstab, mit Kontrollmass-Faktoren."""
     poly, ids, hidden = data["polygon"], data["edge_ids"], set(data.get("hidden") or [])
@@ -106,18 +117,19 @@ def auto_dims(data, fx=1.0, fy=1.0):
             else:
                 warns.append(None)
         first = 0 if raws[0] >= raws[1] else 1
-        for key, name, pi in (("L", "Länge", first), ("B", "Breite", 1 - first)):
+        for key, pi in (("L", first), ("B", 1 - first)):
             use = picks[pi]
             horiz = _angle_diff(_angle(*E[use[0]]), 0.0) < 45
             side = min(use, key=lambda k: _mid(E[k])[1] if horiz else _mid(E[k])[0])
-            out.append({"key": key, "kind": "length", "name": name, "raw": round(raws[pi], 3),
+            out.append({"key": key, "kind": "length", "name": auto_name(key), "raw": round(raws[pi], 3),
                         "points": [list(E[side][0]), list(E[side][1])], "warn": warns[pi]})
     else:
         for (a, b), eid in zip(E, ids, strict=True):
-            out.append({"key": f"E{eid}", "kind": "length", "name": f"Kante {eid}", "raw": geom.compute("length", [a, b], fx, fy),
+            out.append({"key": f"E{eid}", "kind": "length", "name": auto_name(f"E{eid}"),
+                        "raw": geom.compute("length", [a, b], fx, fy),
                         "points": [list(a), list(b)], "warn": "verdeckt, geschätzt" if eid in hidden else None})
     for hole in data.get("holes") or []:
-        out.append({"key": f"H{hole['id']}", "kind": "diameter", "name": f"Bohrung {hole['id']}",
+        out.append({"key": f"H{hole['id']}", "kind": "diameter", "name": auto_name(f"H{hole['id']}"),
                     "raw": geom.compute("diameter", circle_points(hole["c"], hole["d"]), fx, fy),
                     "points": circle_points(hole["c"], hole["d"]), "warn": None})
     return out
@@ -437,9 +449,15 @@ def rename(part, label):
     label = (label or "").strip()[:80] or "Teil"
     old = part["label"]
     db.ex("UPDATE parts SET label=? WHERE id=?", (label, part["id"]))
-    for m in db.q("SELECT id, label FROM measurements WHERE part_id=? AND source='auto'", (part["id"],)):
-        if m["label"].startswith(old + " "):
-            db.ex("UPDATE measurements SET label=? WHERE id=?", ((label + m["label"][len(old):])[:80], m["id"]))
+    for m in db.q("SELECT id, label, data FROM measurements WHERE part_id=? AND source='auto'", (part["id"],)):
+        key = _data(m).get("auto_key")
+        if key and m["label"] == auto_label(old, key):  # unveraendert, auch wenn der alte Name gekuerzt wurde
+            new = auto_label(label, key)
+        elif m["label"].startswith(old + " "):  # vom Nutzer ergaenzt: nur den Teilnamen tauschen
+            new = (label + m["label"][len(old):])[:80]
+        else:
+            continue
+        db.ex("UPDATE measurements SET label=? WHERE id=?", (new, m["id"]))
 
 
 def reset_scale(part_id):
@@ -474,7 +492,7 @@ def _sync_auto(part, photo, fx, fy):
             db.ex("""INSERT INTO measurements(project_id,photo_id,part_id,seq,label,kind,value,unit,unc,data,critical,source,
                      accepted,created_at) VALUES (?,?,?,?,?,?,?,'mm',?,?,0,'auto',1,?)""",
                   (part["project_id"], part["photo_id"], part["id"], _next_seq("measurements", part["project_id"]),
-                   f"{part['label']} {x['name']}"[:80], x["kind"], x["raw"], default_unc(photo, "top"), db.jdump(md), db.now()))
+                   auto_label(part["label"], key), x["kind"], x["raw"], default_unc(photo, "top"), db.jdump(md), db.now()))
     for key, m in have.items():
         if key in want:
             continue
@@ -567,7 +585,8 @@ def public_list(project_id):
 
 
 def replace_detected(project_id, photo_id, detected):
-    """Ergebnis einer Erkennung uebernehmen: Abgleich ueber IoU (Spec §2), sonst neu bzw. loeschen."""
+    """Ergebnis einer Erkennung uebernehmen: Abgleich ueber IoU (Spec §2), sonst neu bzw. loeschen.
+    Rueckgabe: Zahl der neuen Teile, die wegen MAX_PARTS_PER_PHOTO nicht angelegt wurden."""
     old = db.q("SELECT * FROM parts WHERE photo_id=? AND source!='user' ORDER BY seq", (photo_id,))  # Handteile bleiben
     m = match_parts([(o["id"], _data(o)["polygon"]) for o in old], [(i, x["polygon"]) for i, x in enumerate(detected)])
     kept = set(m.values())
@@ -575,12 +594,18 @@ def replace_detected(project_id, photo_id, detected):
         if o["id"] not in kept:
             delete_part(o)
     by_id = {o["id"]: o for o in old}
+    room = MAX_PARTS_PER_PHOTO - db.q1("SELECT COUNT(*) n FROM parts WHERE photo_id=?", (photo_id,))["n"]
+    skipped = 0
     for i, x in enumerate(detected):
         if i in m:
             set_polygon(by_id[m[i]], x["polygon"], hidden_flags=x.get("hidden"), holes=x.get("holes") or [], redetect=True)
-        else:
+        elif room > 0:
             create_part(project_id, photo_id, x["label"], x["role"], x["polygon"], hidden_flags=x.get("hidden"),
                         holes=x.get("holes") or [], source=x.get("source", "auto"), note=x.get("note", ""))
+            room -= 1
+        else:
+            skipped += 1
+    return skipped
 
 
 def outline_parts(res):
