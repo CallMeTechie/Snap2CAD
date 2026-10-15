@@ -1,4 +1,6 @@
 """Lage der Unteransicht (Spec 2026-10-15 §1, A1)."""
+import json
+
 import numpy as np
 import pytest
 
@@ -23,6 +25,23 @@ def test_lage_matrix_festwerte():
     assert vision.apply_lage(vision.lage_matrix(180, 0, 0, W, H), [[10, 20]])[0] == pytest.approx([10, 210])
 
 
+def _flat(pts):
+    return [v for p in pts for v in p]
+
+
+def test_lage_matrix_feinwinkel():
+    P = [[10, 20], [150, 60]]
+    # phi dreht nach rot um die Bildmitte, vor der Verschiebung: rot=0/phi=90 == rot=90/phi=0
+    assert _flat(vision.apply_lage(vision.lage_matrix(0, 0, 0, W, H, 90), P)) == pytest.approx(
+        _flat(vision.apply_lage(vision.lage_matrix(90, 0, 0, W, H), P)))
+    assert _flat(vision.apply_lage(vision.lage_matrix(90, 0, 0, W, H, 0.0), P)) == pytest.approx(
+        _flat(vision.apply_lage(vision.lage_matrix(90, 0, 0, W, H), P)))
+    assert vision.apply_lage(vision.lage_matrix(90, -30, 5, W, H, 5), [[W / 2, H / 2]])[0] == pytest.approx(
+        [W / 2 - 30, H / 2 + 5])                                       # Bildmitte bleibt unter phi fest, nur dx/dy schieben
+    A = vision.apply_lage(vision.lage_matrix(180, 0, 0, W, H, 4), P)
+    assert _flat(A) == pytest.approx(_flat(vision.apply_lage(vision.lage_matrix(0, 0, 0, W, H, 184), P)))
+
+
 def test_bottom_warp_festwert():
     rect = {"pxmm": 10.0, "w_mm": 190.0, "h_mm": 230.0, "w": 1900, "h": 2300}
     M = vision.bottom_warp_matrix({"rect": rect, "bottom_align": {"rot": 90, "dx": 0, "dy": 0}}, {"rect": rect}, 10.0)
@@ -45,6 +64,26 @@ def test_align_bottom_vorgegebene_lage():
     inv = np.linalg.inv(vision.lage_matrix(90, 0, 0, W, H))
     r = vision.align_bottom(L_SHAPE, vision.apply_lage(inv, L_SHAPE), W, H, rot=270)
     assert r["rot"] == 270 and r["iou_next"] >= 0.9   # beste der uebrigen ist die richtige Lage 90
+
+
+@pytest.mark.parametrize("rot,phi", [(0, 5.0), (90, 5.0), (180, -7.5), (270, 3.5), (90, 0.0)])
+def test_align_bottom_feinwinkel(rot, phi):
+    dx, dy = (25.0, -20.0) if rot in (0, 180) else (-30.0, 22.0)
+    inv = np.linalg.inv(vision.lage_matrix(rot, dx, dy, W, H, phi))
+    r = vision.align_bottom(L_SHAPE, vision.apply_lage(inv, L_SHAPE), W, H)
+    assert r["rot"] == rot and r["phi"] == pytest.approx(phi, abs=0.5) and r["iou"] > 0.97 and not r["unsure"]
+    assert r["iou"] - r["iou_next"] >= 0.2
+    hole_b = vision.apply_lage(inv, [HOLE["circle"][:2]])[0]
+    back = vision.apply_lage(vision.lage_matrix(r["rot"], r["dx"], r["dy"], W, H, r["phi"]), [hole_b])[0]
+    assert back == pytest.approx(HOLE["circle"][:2], abs=1.0)
+
+
+def test_align_bottom_feinwinkel_vorgegebene_lage():
+    inv = np.linalg.inv(vision.lage_matrix(90, -30, 22, W, H, 5))
+    r = vision.align_bottom(L_SHAPE, vision.apply_lage(inv, L_SHAPE), W, H, rot=90)
+    assert r["rot"] == 90 and r["phi"] == pytest.approx(5.0, abs=0.5) and r["iou"] > 0.97
+    r = vision.align_bottom(L_SHAPE, vision.apply_lage(inv, L_SHAPE), W, H, rot=270)       # Handwahl: phi wird dazu gesucht
+    assert r["rot"] == 270 and abs(r["phi"]) <= 10 and r["iou"] < 0.7 and r["iou_next"] > 0.97
 
 
 def test_rechteck_unsicher():
@@ -115,6 +154,55 @@ def test_draufsicht_spaeter(user):
     _up(user, pid, TOP, "top")
     b1 = next(p for p in user.get(f"/api/projects/{pid}").json()["photos"] if p["id"] == b["id"])
     assert b1["bottom_align"]["rot"] == 180
+
+
+def test_to_top_und_warp_mit_phi():
+    from app import parts
+    rect = {"w_mm": W, "h_mm": H, "pxmm": 10.0}
+    pt = [[30.0, 50.0]]
+    al = {"rot": 90, "dx": -30.0, "dy": 22.0, "phi": 5.0}
+    ph = {"analysis": json.dumps({"rect": rect, "bottom_align": al})}
+    want = vision.apply_lage(vision.lage_matrix(90, -30.0, 22.0, W, H, 5.0), pt)
+    assert _flat(parts.to_top(ph, pt)) == pytest.approx(_flat(want))
+    back = vision.apply_lage(np.linalg.inv(vision.lage_matrix(90, -30.0, 22.0, W, H, 5.0)), want)         # Round-Trip
+    assert _flat(back) == pytest.approx(_flat(pt), abs=0.01)
+    M = vision.bottom_warp_matrix({"rect": rect, "bottom_align": al}, {"rect": rect}, 10.0)
+    u, v = (M @ np.array([30 * 10.0, (H - 50) * 10.0, 1.0]))[:2]
+    assert (u / 10, H - v / 10) == pytest.approx(want[0], abs=0.01)
+    alt = {"rot": 90, "dx": -30.0, "dy": 22.0}                                  # Altdatensatz ohne phi: wie bisher
+    ph0 = {"analysis": json.dumps({"rect": rect, "bottom_align": alt})}
+    assert _flat(parts.to_top(ph0, pt)) == pytest.approx(_flat(vision.apply_lage(vision.lage_matrix(90, -30.0, 22.0, W, H), pt)))
+    M0 = vision.bottom_warp_matrix({"rect": rect, "bottom_align": alt}, {"rect": rect}, 10.0)
+    M1 = vision.bottom_warp_matrix({"rect": rect, "bottom_align": {**alt, "phi": 0.0}}, {"rect": rect}, 10.0)
+    assert M0 == pytest.approx(M1)
+
+
+def test_pipeline_verdrehte_unteransicht(user):
+    pid = user.post("/api/projects", json={"name": "Fein"}, headers=HDR).json()["id"]
+    _up(user, pid, TOP, "top")
+    b = _up(user, pid, bottom_of(TOP, 90, -30, 22, phi=5.0), "bottom")
+    al = b["bottom_align"]
+    assert al["rot"] == 90 and al["phi"] == pytest.approx(5.0, abs=0.5) and al["iou"] > 0.9 and not al["unsure"]
+    r = user.patch(f"/api/photos/{b['id']}", json={"bottom_align": {"rot": 90}}, headers=HDR).json()     # Handwahl: phi bleibt
+    assert r["bottom_align"]["phi"] == pytest.approx(5.0, abs=0.5)
+
+
+def test_pruefsumme_kennt_phi(pair):
+    from app import check, db
+    c, pid, t, b = pair
+    project = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
+    ph = db.q1("SELECT * FROM photos WHERE id=?", (b["id"],))
+    a = db.jload(ph["analysis"])
+    base = check.cad_hash(project, None, None)
+    a["bottom_align"].pop("phi", None)
+    db.ex("UPDATE photos SET analysis=? WHERE id=?", (db.jdump(a), b["id"]))
+    alt = check.cad_hash(project, None, None)
+    a["bottom_align"]["phi"] = 0.0
+    db.ex("UPDATE photos SET analysis=? WHERE id=?", (db.jdump(a), b["id"]))
+    assert check.cad_hash(project, None, None) == alt                       # Altdatensatz und phi=0 gleich
+    a["bottom_align"]["phi"] = 2.5
+    db.ex("UPDATE photos SET analysis=? WHERE id=?", (db.jdump(a), b["id"]))
+    assert check.cad_hash(project, None, None) != alt and base                # anderer Feinwinkel -> Pruefung veraltet
 
 
 def test_messung_von_unten_und_to_top(pair):

@@ -178,21 +178,27 @@ def rectify_gauge(img: np.ndarray, gauge: dict, pxmm: float = PX_PER_MM):
 LAGEN = (0, 90, 180, 270)
 ALIGN_MIN_IOU = 0.6
 ALIGN_MIN_GAP = 0.05
+PHI_MAX = 10.0    # Feinwinkel in Grad: -PHI_MAX..+PHI_MAX
+PHI_STEP = 0.5
 
 
-def lage_matrix(rot: int, dx: float, dy: float, w: float, h: float) -> np.ndarray:
+def lage_matrix(rot: int, dx: float, dy: float, w: float, h: float, phi: float = 0.0) -> np.ndarray:
     """Lage einer Unteransicht in Draufsicht-Koordinaten (mm, y nach oben): Spiegelung x -> w - x,
-    Drehung um rot Grad gegen den Uhrzeigersinn um die Bildmitte (w/2, h/2), Verschiebung (dx, dy)."""
+    Drehung um rot Grad (0/90/180/270) gegen den Uhrzeigersinn um die Bildmitte (w/2, h/2), dann Feinwinkel phi
+    (Grad, ebenfalls um die Bildmitte), dann Verschiebung (dx, dy)."""
     if rot not in LAGEN:
         raise ValueError(f"rot muss in {LAGEN} liegen")
     mirror = np.array([[-1, 0, w], [0, 1, 0], [0, 0, 1]], np.float64)
     a = np.deg2rad(rot)
     c, s = np.cos(a), np.sin(a)
+    f = np.deg2rad(phi)
+    cf, sf = np.cos(f), np.sin(f)
     to_c = np.array([[1, 0, -w / 2], [0, 1, -h / 2], [0, 0, 1]], np.float64)
     rotm = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], np.float64)
+    fine = np.array([[cf, -sf, 0], [sf, cf, 0], [0, 0, 1]], np.float64)
     from_c = np.array([[1, 0, w / 2], [0, 1, h / 2], [0, 0, 1]], np.float64)
     shift = np.array([[1, 0, dx], [0, 1, dy], [0, 0, 1]], np.float64)
-    return shift @ from_c @ rotm @ to_c @ mirror
+    return shift @ from_c @ fine @ rotm @ to_c @ mirror
 
 
 def apply_lage(M: np.ndarray, pts) -> list[list[float]]:
@@ -202,8 +208,10 @@ def apply_lage(M: np.ndarray, pts) -> list[list[float]]:
 
 
 def align_bottom(top_outline, bottom_outline, bot_w: float, bot_h: float, rot: int | None = None) -> dict:
-    """Beste Lage der Unteransicht zur Draufsicht: IoU je Lage nach Schwerpunkt-Verschiebung.
-    rot=None: alle vier Lagen; sonst nur diese (iou_next = beste der uebrigen drei)."""
+    """Beste Lage der Unteransicht zur Draufsicht: je Lage Schwerpunkt-Verschiebung, dazu der Feinwinkel phi
+    (-PHI_MAX..+PHI_MAX, Schritt PHI_STEP) mit dem hoechsten IoU. rot=None: alle vier Lagen; sonst nur diese
+    (iou_next = beste der uebrigen drei). Die Lage wird nach dem IoU mit bestem phi gewaehlt; iou_next gilt
+    ebenfalls fuer die uebrigen Lagen mit deren bestem phi (so bleibt der Abstand ehrlich)."""
     from shapely.geometry import Polygon  # nur hier: core/ bleibt ohne harte shapely-Abhaengigkeit
 
     def valid(p):
@@ -211,27 +219,37 @@ def align_bottom(top_outline, bottom_outline, bot_w: float, bot_h: float, rot: i
             return Polygon()
         g = Polygon(p)
         return g if g.is_valid else g.buffer(0)
-    unsure = {"rot": rot or 0, "dx": 0.0, "dy": 0.0, "iou": 0.0, "iou_next": 0.0, "unsure": True}
+    unsure = {"rot": rot or 0, "dx": 0.0, "dy": 0.0, "phi": 0.0, "iou": 0.0, "iou_next": 0.0, "unsure": True}
     T = valid(top_outline)
     if T.is_empty or T.area < 1.0:
         return unsure
-    scores = {}
-    for r in LAGEN:
-        P = valid(apply_lage(lage_matrix(r, 0, 0, bot_w, bot_h), bottom_outline))
+
+    def score(r, phi):
+        """(IoU, dx, dy) fuer Lage r und Feinwinkel phi nach Schwerpunkt-Verschiebung."""
+        P = valid(apply_lage(lage_matrix(r, 0, 0, bot_w, bot_h, phi), bottom_outline))
         if P.is_empty or P.area < 1.0:
-            scores[r] = (0.0, 0.0, 0.0)
-            continue
+            return 0.0, 0.0, 0.0
         dx, dy = T.centroid.x - P.centroid.x, T.centroid.y - P.centroid.y
-        Q = valid(apply_lage(lage_matrix(r, dx, dy, bot_w, bot_h), bottom_outline))
+        Q = valid(apply_lage(lage_matrix(r, dx, dy, bot_w, bot_h, phi), bottom_outline))
         union = T.union(Q).area
-        scores[r] = (T.intersection(Q).area / union if union > 0 else 0.0, dx, dy)
+        return (T.intersection(Q).area / union if union > 0 else 0.0), dx, dy
+
+    def fine(r):
+        """Feinsuche: grob in 1-Grad-Schritten, dann +-PHI_STEP um das Maximum. Rueckgabe (IoU, dx, dy, phi)."""
+        coarse = [float(p) for p in np.arange(-PHI_MAX, PHI_MAX + 1e-9, 2 * PHI_STEP)]
+        best = max(coarse, key=lambda p: (round(score(r, p)[0], 4), -abs(p)))
+        cand = [p for p in (best - PHI_STEP, best, best + PHI_STEP) if abs(p) <= PHI_MAX + 1e-9]
+        best = max(cand, key=lambda p: (round(score(r, p)[0], 4), -abs(p)))
+        return (*score(r, best), best)
+
+    scores = {r: fine(r) for r in LAGEN}
     best = rot if rot is not None else max(LAGEN, key=lambda r: (round(scores[r][0], 4), -r))
-    iou, dx, dy = scores[best]
+    iou, dx, dy, phi = scores[best]
     if iou == 0.0:
         return unsure
     iou_next = max(scores[r][0] for r in LAGEN if r != best)
-    return {"rot": best, "dx": round(dx, 3), "dy": round(dy, 3), "iou": round(iou, 4), "iou_next": round(iou_next, 4),
-            "unsure": bool(iou < ALIGN_MIN_IOU or iou - iou_next < ALIGN_MIN_GAP)}
+    return {"rot": best, "dx": round(dx, 3), "dy": round(dy, 3), "phi": round(phi, 1), "iou": round(iou, 4),
+            "iou_next": round(iou_next, 4), "unsure": bool(iou < ALIGN_MIN_IOU or iou - iou_next < ALIGN_MIN_GAP)}
 
 
 def bottom_warp_matrix(analysis_bot: dict, analysis_top: dict | None, pxmm_out: float = PX_PER_MM) -> np.ndarray:
@@ -239,7 +257,7 @@ def bottom_warp_matrix(analysis_bot: dict, analysis_top: dict | None, pxmm_out: 
     rb = analysis_bot["rect"]
     al = analysis_bot.get("bottom_align") or {"rot": 0, "dx": 0.0, "dy": 0.0}
     rt = (analysis_top or analysis_bot)["rect"]
-    L = lage_matrix(al["rot"], al["dx"], al["dy"], rb["w_mm"], rb["h_mm"])
+    L = lage_matrix(al["rot"], al["dx"], al["dy"], rb["w_mm"], rb["h_mm"], al.get("phi") or 0.0)
     return _px_matrix(pxmm_out, rt["h_mm"]) @ L @ np.linalg.inv(_px_matrix(rb["pxmm"], rb["h_mm"]))
 
 

@@ -28,7 +28,8 @@ def cad_hash(project: dict, photo_ids: list[int] | None, part_id: int | None) ->
     al = []
     for p in photos:
         b = (db.jload(p["analysis"], {}) or {}).get("bottom_align") or {}
-        al.append([p["id"], p["view"], p["format"], p["status"], b.get("rot"), _r(b.get("dx")), _r(b.get("dy"))])
+        al.append([p["id"], p["view"], p["format"], p["status"], b.get("rot"), _r(b.get("dx")), _r(b.get("dy")),
+                   *([_r(b["phi"])] if b.get("phi") else [])])   # phi nur wenn gesetzt: Hash alter Datensaetze bleibt gleich
     ms = []
     for m in db.q("SELECT * FROM measurements WHERE project_id=? AND accepted=1 ORDER BY id", (pid,)):
         d = db.jload(m["data"], {}) or {}

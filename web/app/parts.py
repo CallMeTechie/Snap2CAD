@@ -373,7 +373,7 @@ def to_top(photo, pts):
     if not r:   # Foto ohne Entzerrung (z. B. nach Formatwechsel): Punkte unveraendert
         return [[float(x), float(y)] for x, y in pts]
     al = a.get("bottom_align") or {"rot": 0, "dx": 0.0, "dy": 0.0}
-    return vision.apply_lage(vision.lage_matrix(al["rot"], al["dx"], al["dy"], r["w_mm"], r["h_mm"]), pts)
+    return vision.apply_lage(vision.lage_matrix(al["rot"], al["dx"], al["dy"], r["w_mm"], r["h_mm"], al.get("phi") or 0.0), pts)
 
 
 def link_bottom(project_id):
