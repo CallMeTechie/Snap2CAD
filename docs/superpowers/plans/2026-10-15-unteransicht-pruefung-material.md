@@ -459,7 +459,9 @@ def to_top(photo, pts):
     """Punkte einer Unteransicht (mm) in Draufsicht-Koordinaten; ohne Ausrichtung nur die Spiegelung (rot=0)."""
     from core import vision  # spaet: main.py setzt sys.path erst nach den App-Importen
     a = db.jload(photo["analysis"], {}) or {}
-    r = a["rect"]
+    r = a.get("rect")
+    if not r:   # Foto ohne Entzerrung (z. B. nach Formatwechsel): Punkte unveraendert
+        return [[float(x), float(y)] for x, y in pts]
     al = a.get("bottom_align") or {"rot": 0, "dx": 0.0, "dy": 0.0}
     return vision.apply_lage(vision.lage_matrix(al["rot"], al["dx"], al["dy"], r["w_mm"], r["h_mm"]), pts)
 ```
@@ -540,8 +542,8 @@ def _align_photo(ph: dict, top: dict | None):
     ob = _outline_of(ph) if ph["view"] == "bottom" else None
     with db.atomic():
         cur = db.q1("SELECT * FROM photos WHERE id=?", (ph["id"],))
-        if not cur:
-            return
+        if not cur or cur["format"] != ph["format"]:
+            return   # geloescht oder paralleler Formatwechsel (der rechnet selbst neu)
         a = db.jload(cur["analysis"], {}) or {}
         user_rot = a.get("bottom_rot_user")
         a.pop("bottom_align", None)
@@ -565,6 +567,9 @@ def _align_photo(ph: dict, top: dict | None):
 def _realign_project(pid: int):
     """Alle Unteransichten eines Projekts neu ausrichten, danach die Teile verknuepfen. Nie in db.atomic()."""
     top = parts.reference_top(pid)
+    if top is not None and _outline_of(top) == "timeout":
+        top = {**top, "analysis": db.jdump({**(db.jload(top["analysis"], {}) or {}), "outline_mm": "timeout"})}
+        # Referenz nicht berechenbar: jede Unteransicht bekommt den Hinweis, ohne erneut zu warten
     for ph in db.q("SELECT * FROM photos WHERE project_id=? AND view='bottom'", (pid,)):
         _align_photo(ph, top)
     with db.atomic():
@@ -573,7 +578,7 @@ def _realign_project(pid: int):
 
 Auslöser in `photo_upload` (nach dem `UPDATE photos … analysis`): `if view in PLANAR: _realign_project(pid)`.
 
-`meas_create`: `data = {"view": body.view if body.view in ("top", "gauge", "bottom") else "top", …}`.
+`meas_create`: `bottom_ok = body.view == "bottom" and photo is not None and photo["view"] == "bottom"`; `data = {"view": body.view if body.view in ("top", "gauge") or bottom_ok else "top", …}` (`bottom` nur auf einer Unteransicht).
 
 `/suggest`: in der Schleife `if used_photo is None and ph["view"] == "top" and (d / "rect.jpg").is_file():`.
 
@@ -632,8 +637,15 @@ def test_umschalten_der_ansicht(user):
     assert x["bottom_align"] is None
     r = user.patch(f"/api/photos/{x['id']}", json={"view": "bottom"}, headers=H).json()
     assert r["bottom_align"]["rot"] == 180
+    m = user.post(f"/api/projects/{pid}/measurements", json={"photo_id": x["id"], "kind": "length", "view": "bottom",
+                                                             "points": [[10, 20], [30, 20]]}, headers=H).json()
+    assert m["data"]["view"] == "bottom"
+    assert user.patch(f"/api/photos/{x['id']}", json={"view": "tilted", "bottom_align": {"rot": 90}}, headers=H).status_code == 400
     r = user.patch(f"/api/photos/{x['id']}", json={"view": "tilted"}, headers=H).json()
     assert r["bottom_align"] is None and r["align_note"] is None
+    user.patch(f"/api/photos/{x['id']}", json={"view": "top"}, headers=H)                     # Messungen folgen top <-> bottom
+    mm = next(q for q in user.get(f"/api/projects/{pid}").json()["measurements"] if q["id"] == m["id"])
+    assert mm["data"]["view"] == "top"
     user.patch(f"/api/photos/{x['id']}", json={"view": "bottom"}, headers=H)
     user.patch(f"/api/photos/{t['id']}", json={"view": "tilted"}, headers=H)                  # Referenz weg
     b = _photo(user, pid, x["id"])
@@ -699,15 +711,25 @@ class PhotoPatch(BaseModel):
 
 ```python
     ph, p = _own_photo(phid, u)
+    new_view = body.view if body.view in VIEWS else ph["view"]
+    if "bottom_align" in body.model_fields_set and new_view != "bottom":
+        raise HTTPException(400, "Nur für Fotos der Ansicht „Von unten“")   # vor jeder Aenderung pruefen
     realign = False
     if body.view in VIEWS and body.view != ph["view"]:
-        db.ex("UPDATE photos SET view=? WHERE id=?", (body.view, phid))
+        with db.atomic():
+            db.ex("UPDATE photos SET view=? WHERE id=?", (body.view, phid))
+            if (ph["view"] == "bottom") != (body.view == "bottom"):   # Nutzer-Messungen folgen top <-> bottom
+                nv, ov = ("bottom", "top") if body.view == "bottom" else ("top", "bottom")
+                for m in db.q("SELECT id, data FROM measurements WHERE photo_id=?", (phid,)):
+                    d = db.jload(m["data"], {}) or {}
+                    if d.get("view", "top") == ov:
+                        d["view"] = nv
+                        db.ex("UPDATE measurements SET data=? WHERE id=?", (db.jdump(d), m["id"]))
         realign = body.view in PLANAR or ph["view"] in PLANAR
         if ph["view"] == "bottom":   # bottom_align/align_note entfernen; bottom_rot_user bleibt fuer ein Zurueckschalten
             _align_photo(db.q1("SELECT * FROM photos WHERE id=?", (phid,)), None)
         ph = db.q1("SELECT * FROM photos WHERE id=?", (phid,))
-        with db.atomic():
-            _refresh(p)   # Auto-Masse bekommen die neue Ansicht
+        _refresh(p)   # Auto-Masse bekommen die neue Ansicht (_refresh ist selbst atomar)
     if body.format is not None and body.format != ph["format"]:
         img = vision.load_image((_photo_dir(phid) / "orig.jpg").read_bytes())
         a = _analyze_store(phid, img, body.format if body.format in matgen.FORMATS else None, ph["view"])
@@ -723,11 +745,9 @@ class PhotoPatch(BaseModel):
                 (_photo_dir(phid) / n).unlink(missing_ok=True)
         realign = realign or ph["view"] in PLANAR
     if "bottom_align" in body.model_fields_set:
-        if ph["view"] != "bottom":
-            raise HTTPException(400, "Nur für Fotos der Ansicht „Von unten“")
         with db.atomic():
             a = db.jload(db.q1("SELECT analysis FROM photos WHERE id=?", (phid,))["analysis"], {}) or {}
-            if body.bottom_align is None:
+            if body.bottom_align is None or ("rot" in body.bottom_align.model_fields_set and body.bottom_align.rot is None):
                 a.pop("bottom_rot_user", None)                       # zurueck auf automatisch
             elif "rot" in body.bottom_align.model_fields_set:
                 a["bottom_rot_user"] = body.bottom_align.rot        # Handwahl ({} = nur neu rechnen)
@@ -747,7 +767,8 @@ Route **vor** `photo_file`:
 def photo_align_jpg(phid: int, u: dict = Depends(auth.require_user)):
     ph, p = _own_photo(phid, u)
     a = db.jload(ph["analysis"], {}) or {}
-    top = parts.reference_top(p["id"])
+    tid = (a.get("bottom_align") or {}).get("top_photo_id")
+    top = db.q1("SELECT * FROM photos WHERE id=?", (tid,)) if tid else parts.reference_top(p["id"])
     img = cv2.imread(str(_photo_dir(phid) / "rect.jpg")) if a.get("rect") else None
     if ph["view"] != "bottom" or img is None or not top:
         raise HTTPException(404, "Keine Ausrichtung vorhanden")
@@ -852,7 +873,7 @@ def test_same_as_folgt_der_lage(proj):
     pt = _part(c, pid, t["id"], L_SHAPE, "L")
     pb = _part(c, pid, b["id"], POLY_B, "u")
     assert _parts(c, pid)[pb["id"]]["same_as"] == pt["id"]
-    c.patch(f"/api/photos/{b['id']}", json={"bottom_align": {"rot": 0}}, headers=H)          # falsche Lage: IoU ~0,25
+    c.patch(f"/api/photos/{b['id']}", json={"bottom_align": {"rot": 0}}, headers=H)          # falsche Lage: IoU ~0,15
     assert _parts(c, pid)[pb["id"]]["same_as"] is None
     c.patch(f"/api/photos/{b['id']}", json={"bottom_align": None}, headers=H)
     assert _parts(c, pid)[pb["id"]]["same_as"] == pt["id"]
@@ -1405,7 +1426,9 @@ def _rect_top(ph: dict, top: dict | None) -> Path | None:
     if img is None:
         return None
     a = db.jload(ph["analysis"], {}) or {}
-    at = db.jload(top["analysis"], {}) if top and a.get("bottom_align") else None
+    tid = (a.get("bottom_align") or {}).get("top_photo_id")
+    ref = db.q1("SELECT analysis FROM photos WHERE id=?", (tid,)) if tid else None
+    at = db.jload(ref["analysis"], {}) if ref else None   # Referenz aus der Ausrichtung; sonst nur gespiegelt
     out = pdir / "rect_top.jpg"
     _write_atomic(out, vision.encode_jpg(vision.bottom_warp(img, a, at), 90))
     return out
@@ -1445,7 +1468,7 @@ def pick_images(project_id: int, photo_ids: list[int] | None) -> list[dict]:
     return (groups["top"] + groups["bottom"] + groups["gauge"] + groups["tilted"])[:6]
 ```
 
-`build_initial_message`: `ml = material_line(project)`; nach der Kopfzeile einfügen, wenn `ml and (not options.get("for_check") or project.get("material_user"))`. Bei `options.get("for_check")` entfallen „Fertigung“, „Wunsch des Nutzers“, Fräser, Aufspannungen, Passungen, Toleranz, Zusatzwünsche. Nach „## Wunsch des Nutzers“ bei `options.get("check_items")`: `"", "## Offene Punkte der Prüfung", *[f"- [{i['severity']}] {i['text']}" for i in options["check_items"]]`. Bilder: `for im in options.get("images") or pick_images(project["id"], photo_ids): content += ai.image_ref(im["path"], im["caption"])` (alte Schleife ersetzen). `_analyze_store` löscht **nicht** `rect_top.jpg`/`small.jpg`.
+`build_initial_message`: `ml = material_line(project)`; nach der Kopfzeile einfügen, wenn `ml and (not options.get("for_check") or project.get("material_user"))`. Bei `options.get("for_check")` entfallen „Fertigung“, „Wunsch des Nutzers“, Fräser, Aufspannungen, Passungen, Toleranz, Zusatzwünsche. Nach „## Wunsch des Nutzers“ bei `options.get("check_items")`: `"", "## Offene Punkte der Prüfung", *[f"- [{i['severity']}] {i['text']}" for i in options["check_items"]]`. Bilder: `imgs = options["images"] if "images" in options else pick_images(project["id"], photo_ids)`; `for im in imgs: content += ai.image_ref(im["path"], im["caption"])` (alte Schleife ersetzen). `_analyze_store` löscht **nicht** `rect_top.jpg`/`small.jpg`.
 
 `main.py`:
 
@@ -1716,6 +1739,9 @@ def cad_check(pid: int, body: CheckIn, request: Request, u: dict = Depends(auth.
         h = check.cad_hash(p, photo_ids, body.part_id)
         s = check.stored(p)
         if s and s.get("hash") == h and not body.force:
+            if s.get("photo_ids") != photo_ids:   # gleiche Auswahl in anderer Schreibweise: speichern, sonst bleibt stale
+                s["photo_ids"] = photo_ids
+                db.ex("UPDATE projects SET cad_check=? WHERE id=?", (db.jdump(s), pid))
             return {**s, "stale": False}
         if not settings.ai_enabled():
             raise HTTPException(503, "KI ist nicht eingerichtet (Verwaltung → Einstellungen).")
