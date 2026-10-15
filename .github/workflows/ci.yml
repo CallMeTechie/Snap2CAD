@@ -38,6 +38,8 @@ jobs:
           node-version: "22"
       - name: JavaScript-Syntax
         run: for f in web/static/js/*.js; do node --check "$f"; done
+      - name: JavaScript-Tests
+        run: node --test tests/js/*.test.mjs
       - name: Shell-Skripte
         run: sh -n web/scripts/vendor.sh
       - name: Compose-Datei

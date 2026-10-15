@@ -1,6 +1,7 @@
 {
   "name": "snap2cad-web-vendor",
   "private": true,
+  "type": "module",
   "description": "Nur zum Einbinden von three.js und IBM Plex (wird beim Docker-Build verwendet)",
   "dependencies": {
     "three": "0.170.0",

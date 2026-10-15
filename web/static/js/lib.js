@@ -120,6 +120,16 @@ export function num(v, d = 2, trim = true) {
   nf[key] ||= new Intl.NumberFormat("de-DE", { minimumFractionDigits: trim ? 0 : d, maximumFractionDigits: d });
   return nf[key].format(v);
 }
+// Messwert fuer Listen und Tabellen; unit = false ohne " mm" (Spalte mit Einheit im Kopf)
+export function fmtValue(m, unit = true) {
+  const v = m.value, u = unit ? " mm" : "";
+  if (m.kind === "point") { const p = m.data?.points?.[0]; return p ? `X ${num(p[0], 1)} · Y ${num(p[1], 1)}` : "–"; }
+  if (v == null) return "–";
+  if (m.kind === "diameter") return `Ø ${num(v, 2)}${u}`;
+  if (m.kind === "radius") return `R ${num(v, 2)}${u}`;
+  if (m.kind === "angle") return `${num(v, 1)}°`;
+  return `${num(v, 2)}${u}`;
+}
 export function parseNum(s) {
   if (s === null || s === undefined) return null;
   const t = String(s).trim().replace(/\s/g, "").replace(",", ".");
@@ -159,6 +169,16 @@ export function initials(u) {
 export function mmss(sec) {
   sec = Math.max(0, Math.floor(sec));
   return `${String(Math.floor(sec / 60)).padStart(2, "0")}:${String(sec % 60).padStart(2, "0")}`;
+}
+
+// Zeichenflaeche -----------------------------------------------------------
+// Beschriftung mit Rahmen fuer Masse und Teile; sel = ausgewaehlt (gefuellt)
+export function drawTag(ctx, x, y, text, color, { sel = false, mono = false } = {}) {
+  ctx.font = `600 12px ${mono ? '"IBM Plex Mono", monospace' : '"IBM Plex Sans", sans-serif'}`;
+  const w = ctx.measureText(text).width + 10;
+  ctx.fillStyle = sel ? color : "rgba(255,255,255,.94)"; ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.setLineDash([]);
+  ctx.beginPath(); ctx.roundRect(x - w / 2, y - 10, w, 20, 3); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = sel ? "#fff" : color; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(text, x, y + 0.5);
 }
 
 // Toast & Dialog -----------------------------------------------------------

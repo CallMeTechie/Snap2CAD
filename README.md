@@ -174,7 +174,7 @@ Tests:
 ```bash
 pip install -r web/requirements.txt -r requirements-dev.txt
 pip install --no-deps -r web/requirements-overrides.txt   # Sicherheitsupdates gegen zu enge Obergrenzen
-ruff check . && pytest
+ruff check . && pytest && node --test tests/js/*.test.mjs
 ```
 
 `SANDBOX_MODE=local` führt den CAD-Code ohne Container-Trennung aus (nur Limits, seccomp und Audit-Hook) und ist nur für die Entwicklung gedacht. `AI_FAKE=1` liefert feste Testantworten statt echter API-Aufrufe.
@@ -183,7 +183,7 @@ ruff check . && pytest
 
 Jeder Push und jeder Pull Request durchläuft [GitHub Actions](.github/workflows/ci.yml):
 
-1. **Lint:** Ruff, JavaScript-Syntax, Compose-Datei
+1. **Lint:** Ruff, JavaScript-Syntax und -Tests (Geometrie der Messfläche), Compose-Datei
 2. **Tests:** pytest – PDF-Erzeugung, Marker-Erkennung an synthetischen Fotos, Messgeometrie, Anmeldung und Rechte, kompletter CAD-Ablauf im KI-Testmodus, Sandbox-Abwehr
 3. **Trivy (Repo):** Abhängigkeiten, versehentlich eingecheckte Secrets und Dockerfile-Fehlkonfigurationen
 4. **Docker:** Image bauen, **Trivy-Scan des Images** (Ergebnis zusätzlich im Reiter *Security* von GitHub), Stack starten, End-to-End-Auftrag über den Sandbox-Container, Ausbruchstests im Container
