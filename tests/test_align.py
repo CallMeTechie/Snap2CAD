@@ -136,3 +136,85 @@ def test_suggest_nur_draufsicht(pair, monkeypatch):
     c.post(f"/api/projects/{pid}/suggest", json={"photo_id": b["id"]}, headers=HDR)
     caps = " ".join(x.get("text", "") for x in got[-1][0]["content"] if x["type"] == "text")
     assert f"Foto {t['id']})" in caps and f"Foto {b['id']})" not in caps
+
+
+def _photo(c, pid, phid):
+    return next(p for p in c.get(f"/api/projects/{pid}").json()["photos"] if p["id"] == phid)
+
+
+def test_handwahl_und_referenzwechsel(pair):
+    from app import db
+    c, pid, t, b = pair
+    r = c.patch(f"/api/photos/{b['id']}", json={"bottom_align": {"rot": 270}}, headers=HDR).json()
+    assert r["bottom_align"]["rot"] == 270 and r["bottom_align"]["auto"] is False and r["bottom_rot_user"] == 270
+    assert c.patch(f"/api/photos/{b['id']}", json={"bottom_align": {"rot": 45}}, headers=HDR).status_code == 422
+    t2 = _up(c, pid, TOP, "top")                                          # zweite Draufsicht, Referenz bleibt t
+    assert c.delete(f"/api/photos/{t['id']}", headers=HDR).status_code == 200
+    b2 = _photo(c, pid, b["id"])
+    assert b2["bottom_align"]["top_photo_id"] == t2["id"] and b2["bottom_align"]["rot"] == 270   # Handwahl bleibt
+    assert c.delete(f"/api/photos/{t2['id']}", headers=HDR).status_code == 200
+    b3 = _photo(c, pid, b["id"])
+    assert b3["bottom_align"] is None and "Draufsicht fehlt" in b3["align_note"] and b3["bottom_rot_user"] == 270
+    r = c.patch(f"/api/photos/{b['id']}", json={"bottom_align": None}, headers=HDR).json()   # zurueck auf automatisch
+    assert r["bottom_rot_user"] is None
+    assert "bottom_rot_user" not in db.jload(db.q1("SELECT analysis FROM photos WHERE id=?", (b["id"],))["analysis"])
+
+
+def test_umschalten_der_ansicht(user):
+    pid = user.post("/api/projects", json={"name": "Umschalten"}, headers=HDR).json()["id"]
+    t = _up(user, pid, TOP, "top")
+    x = _up(user, pid, bottom_of(TOP, 180), "tilted")
+    assert x["bottom_align"] is None
+    r = user.patch(f"/api/photos/{x['id']}", json={"view": "bottom"}, headers=HDR).json()
+    assert r["bottom_align"]["rot"] == 180
+    m = user.post(f"/api/projects/{pid}/measurements", json={"photo_id": x["id"], "kind": "length", "view": "bottom",
+                                                             "points": [[10, 20], [30, 20]]}, headers=HDR).json()
+    assert m["data"]["view"] == "bottom"
+    r = user.patch(f"/api/photos/{x['id']}", json={"view": "tilted", "bottom_align": {"rot": 90}}, headers=HDR)
+    assert r.status_code == 400
+    r = user.patch(f"/api/photos/{x['id']}", json={"view": "tilted"}, headers=HDR).json()
+    assert r["bottom_align"] is None and r["align_note"] is None
+    user.patch(f"/api/photos/{x['id']}", json={"view": "top"}, headers=HDR)                   # Messungen folgen top <-> bottom
+    mm = next(q for q in user.get(f"/api/projects/{pid}").json()["measurements"] if q["id"] == m["id"])
+    assert mm["data"]["view"] == "top"
+    user.patch(f"/api/photos/{x['id']}", json={"view": "bottom"}, headers=HDR)
+    user.patch(f"/api/photos/{t['id']}", json={"view": "tilted"}, headers=HDR)                # Referenz weg
+    b = _photo(user, pid, x["id"])
+    assert b["bottom_align"] is None and b["align_note"] == "Draufsicht fehlt"
+
+
+def test_handwahl_nach_formatwechsel(pair):
+    c, pid, t, b = pair
+    c.patch(f"/api/photos/{b['id']}", json={"bottom_align": {"rot": 270}}, headers=HDR)
+    c.patch(f"/api/photos/{b['id']}", json={"format": "A3"}, headers=HDR)
+    r = c.patch(f"/api/photos/{b['id']}", json={"format": "A4"}, headers=HDR).json()
+    assert r["bottom_align"]["rot"] == 270 and r["bottom_align"]["auto"] is False
+
+
+def test_erneut_anstossen(pair):
+    c, pid, t, b = pair
+    c.patch(f"/api/photos/{b['id']}", json={"bottom_align": {"rot": 270}}, headers=HDR)
+    r = c.patch(f"/api/photos/{b['id']}", json={"bottom_align": {}}, headers=HDR).json()     # neu rechnen, Handwahl bleibt
+    assert r["bottom_align"]["rot"] == 270 and r["bottom_rot_user"] == 270
+
+
+def test_align_jpg_und_to_top_gleich(pair):
+    from app import db, parts
+    c, pid, t, b = pair
+    r = c.get(f"/api/photos/{b['id']}/align.jpg")
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-store"
+    ph, top = (db.q1("SELECT * FROM photos WHERE id=?", (i,)) for i in (b["id"], t["id"]))
+    M = vision.bottom_warp_matrix(db.jload(ph["analysis"]), db.jload(top["analysis"]), 4.0)
+    u, v = (M @ np.array([30 * 10.0, (230 - 50) * 10.0, 1.0]))[:2]
+    assert (u / 4, 230 - v / 4) == pytest.approx(parts.to_top(ph, [[30, 50]])[0], abs=0.1)
+
+
+def test_fremder_nutzer_lage(pair, app, admin):
+    from fastapi.testclient import TestClient
+    c, pid, t, b = pair
+    tok = admin.post("/api/admin/invites", json={"role": "user", "days": 1}, headers=HDR).json()["link"].rsplit("/", 1)[1]
+    f = TestClient(app)
+    assert f.post(f"/api/invite/{tok}", json={"username": f"fremdl{pid}", "display_name": "Fremd",
+                                              "password": "Schieblehre-Messing-7"}, headers=HDR).status_code == 200
+    assert f.get(f"/api/photos/{b['id']}/align.jpg").status_code == 404
+    assert f.patch(f"/api/photos/{b['id']}", json={"bottom_align": {"rot": 90}}, headers=HDR).status_code == 404

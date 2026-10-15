@@ -2,7 +2,7 @@
 import { api, upload, h, clear, icon, num, parseNum, toast, fail, dialog, confirmDlg } from "./lib.js";
 import { S, ensureProject, reloadProject, projectPicker, go, onLeave } from "./app.js";
 
-export const VIEW_LABEL = { top: "Draufsicht", tilted: "Gekippt (Höhe)", gauge: "Höhenlehre", overview: "Übersicht" };
+export const VIEW_LABEL = { top: "Draufsicht", bottom: "Von unten", tilted: "Gekippt (Höhe)", gauge: "Höhenlehre", overview: "Übersicht" };
 export const STATUS = {
   gut: ["gut", "ok"], brauchbar: ["brauchbar", "warn"], unsicher: ["unsicher – wiederholen", "err"],
   nicht_auswertbar: ["nicht auswertbar", "err"],

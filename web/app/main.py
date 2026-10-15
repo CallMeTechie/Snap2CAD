@@ -11,6 +11,7 @@ import threading
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 import cv2
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
@@ -979,26 +980,63 @@ def photo_upload(pid: int, file: UploadFile = File(...), view: str = Form("top")
     return _photo_public(db.q1("SELECT * FROM photos WHERE id=?", (phid,)))
 
 
+class AlignIn(BaseModel):
+    rot: Literal[0, 90, 180, 270] | None = None
+
+
 class PhotoPatch(BaseModel):
     view: str | None = None
     format: str | None = None
+    bottom_align: AlignIn | None = None
 
 
 @app.patch("/api/photos/{phid}")
 def photo_patch(phid: int, body: PhotoPatch, u: dict = Depends(auth.require_user)):
     ph, p = _own_photo(phid, u)
-    if body.view in VIEWS:
-        db.ex("UPDATE photos SET view=? WHERE id=?", (body.view, phid))
+    new_view = body.view if body.view in VIEWS else ph["view"]
+    if "bottom_align" in body.model_fields_set and new_view != "bottom":
+        raise HTTPException(400, "Nur für Fotos der Ansicht „Von unten“")   # vor jeder Aenderung pruefen
+    realign = False
+    if body.view in VIEWS and body.view != ph["view"]:
+        with db.atomic():
+            db.ex("UPDATE photos SET view=? WHERE id=?", (body.view, phid))
+            if (ph["view"] == "bottom") != (body.view == "bottom"):   # Nutzer-Messungen folgen top <-> bottom
+                nv, ov = ("bottom", "top") if body.view == "bottom" else ("top", "bottom")
+                for m in db.q("SELECT id, data FROM measurements WHERE photo_id=?", (phid,)):
+                    d = db.jload(m["data"], {}) or {}
+                    if d.get("view", "top") == ov:
+                        d["view"] = nv
+                        db.ex("UPDATE measurements SET data=? WHERE id=?", (db.jdump(d), m["id"]))
+        realign = body.view in PLANAR or ph["view"] in PLANAR
+        if ph["view"] == "bottom":   # bottom_align/align_note entfernen; bottom_rot_user bleibt fuer ein Zurueckschalten
+            _align_photo(db.q1("SELECT * FROM photos WHERE id=?", (phid,)), None)
+        ph = db.q1("SELECT * FROM photos WHERE id=?", (phid,))
+        _refresh(p)   # Auto-Masse bekommen die neue Ansicht (_refresh ist selbst atomar)
     if body.format is not None and body.format != ph["format"]:
         img = vision.load_image((_photo_dir(phid) / "orig.jpg").read_bytes())
         a = _analyze_store(phid, img, body.format if body.format in matgen.FORMATS else None, ph["view"])
         with db.atomic():
+            old = db.jload(db.q1("SELECT analysis FROM photos WHERE id=?", (phid,))["analysis"], {}) or {}
+            if old.get("bottom_rot_user") is not None:
+                a["bottom_rot_user"] = old["bottom_rot_user"]   # Handwahl ueberlebt den Formatwechsel
             db.ex("UPDATE photos SET format=?, status=?, max_err=?, analysis=? WHERE id=?",
                   (a.get("format"), a["status"], a.get("max_err_mm"), db.jdump(a), phid))
             parts.delete_photo_parts(phid)
             _refresh(p)
             for n in ("edges.json", "edges_ki.jpg"):  # in der Transaktion: wie photo_edges beim Schreiben
                 (_photo_dir(phid) / n).unlink(missing_ok=True)
+        realign = realign or ph["view"] in PLANAR
+    if "bottom_align" in body.model_fields_set:
+        with db.atomic():
+            a = db.jload(db.q1("SELECT analysis FROM photos WHERE id=?", (phid,))["analysis"], {}) or {}
+            if body.bottom_align is None or ("rot" in body.bottom_align.model_fields_set and body.bottom_align.rot is None):
+                a.pop("bottom_rot_user", None)                       # zurueck auf automatisch
+            elif "rot" in body.bottom_align.model_fields_set:
+                a["bottom_rot_user"] = body.bottom_align.rot        # Handwahl ({} = nur neu rechnen)
+            _set_analysis(phid, a)
+        realign = True
+    if realign:
+        _realign_project(p["id"])
     return _photo_public(db.q1("SELECT * FROM photos WHERE id=?", (phid,)))
 
 
@@ -1010,7 +1048,24 @@ def photo_delete(phid: int, u: dict = Depends(auth.require_user)):
         db.ex("DELETE FROM photos WHERE id=?", (phid,))
         _refresh(p)
     shutil.rmtree(_photo_dir(phid), ignore_errors=True)
+    _realign_project(p["id"])   # Referenz-Draufsicht kann weggefallen sein
     return {"ok": True}
+
+
+@app.get("/api/photos/{phid}/align.jpg")
+def photo_align_jpg(phid: int, u: dict = Depends(auth.require_user)):
+    ph, p = _own_photo(phid, u)
+    a = db.jload(ph["analysis"], {}) or {}
+    tid = (a.get("bottom_align") or {}).get("top_photo_id")
+    top = db.q1("SELECT * FROM photos WHERE id=?", (tid,)) if tid else parts.reference_top(p["id"])
+    img = cv2.imread(str(_photo_dir(phid) / "rect.jpg")) if a.get("rect") else None
+    if ph["view"] != "bottom" or img is None or not top:
+        raise HTTPException(404, "Keine Ausrichtung vorhanden")
+    at = db.jload(top["analysis"], {}) or {}
+    out = vision.bottom_warp(img, a, at, ALIGN_PXMM)
+    own = parts.to_top(ph, a["outline_mm"]) if a.get("outline_mm") else []
+    vision.draw_outlines(out, [at.get("outline_mm"), own], [(12, 65, 194), (178, 60, 20)], ALIGN_PXMM, at["rect"]["h_mm"])
+    return Response(vision.encode_jpg(out, 85), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/photos/{phid}/{kind}.jpg")
