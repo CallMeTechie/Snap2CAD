@@ -180,9 +180,11 @@ export default async function (main) {
     const al = p.bottom_align;
     const patch = async body => { try { await api(`/api/photos/${p.id}`, { method: "PATCH", body }); await reloadProject(); drawDetail(); } catch (e) { fail(e); } };
     const retry = /nicht berechnet/.test(p.align_note || "") ? h("button", { class: "btn sm", onclick: () => patch({ bottom_align: {} }) }, "Erneut berechnen") : null;
+    const phi = Number(al?.phi) || 0;
+    const gedreht = Math.abs(phi) >= 0.5 ? `, gedreht ${phi > 0 ? "+" : "−"}${num(Math.abs(phi), 1)}°` : "";
     return h("section", { class: "card", style: { gap: "10px" } }, h("h3", {}, "Lage zur Draufsicht"),
-      al ? [h("figure", {}, h("img", { src: `/api/photos/${p.id}/align.jpg?v=${al.rot}-${al.dx}-${al.dy}`, alt: "Überlagerung Unteransicht auf Draufsicht" }),
-          h("figcaption", {}, `Überlappung ${num(al.iou * 100, 0)} % · ${al.auto ? "automatisch" : "von Hand"}`)),
+      al ? [h("figure", {}, h("img", { src: `/api/photos/${p.id}/align.jpg?v=${al.rot}-${al.dx}-${al.dy}-${phi}`, alt: "Überlagerung Unteransicht auf Draufsicht" }),
+          h("figcaption", {}, `Überlappung ${num(al.iou * 100, 0)} % · ${al.auto ? "automatisch" : "von Hand"}${gedreht}`)),
         al.unsure ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, "Ausrichtung unsicher – bitte prüfen und Lage wählen.")) : null,
         h("div", { class: "seg", role: "group", "aria-label": "Lage" }, LAGEN.map(([r, t]) => h("button", { "aria-pressed": String(al.rot === r), onclick: () => patch({ bottom_align: { rot: r } }) }, t))),
         al.auto ? null : h("button", { class: "btn sm ghost", onclick: () => patch({ bottom_align: null }) }, "Wieder automatisch")]

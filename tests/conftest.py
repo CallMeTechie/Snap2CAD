@@ -183,13 +183,13 @@ def photo_gauge() -> bytes:
     return synthetic_photo("A4", 1, tilt=0.03)
 
 
-def bottom_of(objects: list[dict], rot: int, dx: float = 0.0, dy: float = 0.0, fmt: str = "A4") -> list[dict]:
+def bottom_of(objects: list[dict], rot: int, dx: float = 0.0, dy: float = 0.0, fmt: str = "A4", phi: float = 0.0) -> list[dict]:
     """Objekte so umrechnen, wie sie in der Unteransicht liegen: Umkehrung von vision.lage_matrix."""
     import numpy as np
 
     from core import vision
     gw, gh = vision.spec(fmt)["grid_mm"]
-    inv = np.linalg.inv(vision.lage_matrix(rot, dx, dy, gw, gh))
+    inv = np.linalg.inv(vision.lage_matrix(rot, dx, dy, gw, gh, phi))
     out = []
     for o in objects:
         rest = {k: v for k, v in o.items() if k not in ("rect", "polygon", "circle")}

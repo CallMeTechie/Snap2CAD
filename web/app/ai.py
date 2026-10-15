@@ -31,7 +31,7 @@ Eingaben
 - Ggf. eine Unteransicht (entzerrt, gespiegelt auf Draufsicht-Koordinaten: Bohrungen von unten und oben liegen
   übereinander) und Schrägansichten ohne Maßstab (nur für Form, Seitenflächen und Höhenverhältnis).
 - Eine Zeile „Fotografiertes Original“ (Farbe, Material, Transparenz, Oberfläche des Teils – nicht das
-  Fertigungsmaterial) und ggf. „Offene Punkte der Prüfung“.
+  Fertigungsmaterial) und ggf. „Hinweise der Prüfung“.
 - Fertigungsverfahren, Material und Wünsche des Nutzers.
 
 Regeln für den Code
@@ -53,7 +53,9 @@ Regeln für den Code
 9. Bei transparenten oder teiltransparenten Teilen sind durchscheinende Strukturen Innenbohrungen oder Innenkonturen,
    keine Rillen oder Nuten der Oberfläche. Bohrungen von unten und oben an derselben Stelle sind in der Regel ein
    Loch (ggf. Stufenloch).
-10. Zu jedem offenen Punkt der Prüfung steht in `assumptions`, was angenommen wurde.
+10. Zu jedem offenen Punkt der Prüfung steht in `assumptions`, was angenommen wurde. Die Prüfung deutet Geometrie
+   nicht verbindlich: Was ihr wie eine Nut, Rille oder Stufe erscheint, prüfst du selbst gegen Umriss, Unteransicht
+   und Regel 9.
 
 Antwortformat – genau zwei Codeblöcke, sonst höchstens zwei kurze Sätze:
 ```json
@@ -115,6 +117,10 @@ Seite), measure (ein Maß fehlt oder widerspricht), sharpness (Kante unscharf, v
 severity: block = ohne diese Angabe wird das Modell geraten; warn = die Genauigkeit leidet.
 Jeder Text sagt, was der Nutzer tun soll (z. B. „Höhenlehre fotografieren oder Höhe als Maß eingeben“).
 Höchstens 8 Punkte, keine Punkte zu Dingen, die schon in der Messtabelle stehen.
+Bei transparenten oder teiltransparenten Teilen (laut Zeile „Fotografiertes Original“ oder deiner eigenen
+Schätzung) sind durchscheinende Strukturen Innenbohrungen oder Innenkonturen, keine Nuten, Rillen oder Stufen –
+dafür keinen Punkt und kein
+weiteres Foto verlangen.
 
 Schätze außerdem das fotografierte Teil: color (ein Wort, z. B. silber, schwarz, weiß), material (z. B. Aluminium,
 Stahl, Kunststoff, Holz, Glas), transparent (0 nein, 1 teilweise, 2 ja), finish (matt oder glaenzend), note (ein Satz).

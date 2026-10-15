@@ -111,7 +111,9 @@ def test_prompt_regeln():
     from app import ai
     assert "ist verbindlich" in ai.CAD_SYSTEM and "Innenbohrungen" in ai.CAD_SYSTEM
     assert "so einfach wie möglich" not in ai.CAD_SYSTEM
-    assert "Fotografiertes Original" in ai.CAD_SYSTEM and "Offene Punkte" in ai.CAD_SYSTEM
+    assert "Fotografiertes Original" in ai.CAD_SYSTEM and "Punkt der Prüfung" in ai.CAD_SYSTEM
+    assert "nicht verbindlich" in ai.CAD_SYSTEM
+    assert "Innenbohrungen" in ai.CHECK_SYSTEM and "keine Nuten, Rillen oder Stufen" in ai.CHECK_SYSTEM
 
 
 def test_kein_temperature_an_sdk(monkeypatch):
@@ -158,14 +160,16 @@ def test_nachricht_bilder_und_text(proj):
     opts = {"photo_ids": [t["id"], b["id"], g["id"]], "name": "x", "check_items": items}
     text = jobs.build_initial_message(project, "Nachbauen", opts)[0]["content"][0]["text"]
     assert "Fotografiertes Original (nicht das Fertigungsmaterial): silber, Aluminium, transparent: teilweise, matt" in text
-    assert "## Offene Punkte der Prüfung\n- [block] Höhe fehlt" in text
+    assert ("## Hinweise der Prüfung (nicht verbindlich – Umriss, Unteransicht und Regel 9 gehen vor)\n"
+            "- [block] Höhe fehlt") in text
+    assert "Offene Punkte der Prüfung" not in text
     chk = jobs.build_initial_message(project, "", {"photo_ids": None, "part_id": None, "for_check": True,
                                                    "process": "cnc", "cutter_d": 6})
     assert "Fräser" not in chk[0]["content"][0]["text"] and "Wunsch des Nutzers" not in chk[0]["content"][0]["text"]
     db.ex("UPDATE projects SET material_user=0 WHERE id=?", (pid,))
     project = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
     chk = jobs.build_initial_message(project, "", {"photo_ids": None, "for_check": True})
-    assert "Fotografiertes Original" not in chk[0]["content"][0]["text"]            # KI-Schaetzung nicht zurueckfuettern
+    assert "Fotografiertes Original" in chk[0]["content"][0]["text"]                # KI-Schaetzung gehoert in die Pruefung
     assert "Fotografiertes Original" in jobs.build_initial_message(project, "x", {"photo_ids": None})[0]["content"][0]["text"]
 
 
@@ -301,3 +305,21 @@ def test_fremder_nutzer_stufe_a(proj, app, admin):
     own = f.post("/api/projects", json={"name": "f"}, headers=H).json()["id"]
     r = f.post(f"/api/projects/{own}/cad-check", json={"photo_ids": [t["id"], b["id"]]}, headers=H).json()
     assert r["images"] == [] and r["photo_ids"] == []                                       # fremde Fotos ignoriert
+
+
+def test_cad_auftrag_max_tokens_32000(proj, monkeypatch):
+    import time
+
+    from app import ai
+    c, pid, t, b = proj
+    real, seen = ai.call, []
+
+    def spy(system, messages, max_tokens=16000, **kw):
+        seen.append((system, max_tokens))
+        return real(system, messages, max_tokens=max_tokens, **kw)
+    monkeypatch.setattr(ai, "call", spy)
+    jid = c.post("/api/jobs", json={"project_id": pid, "name": "x", "request": "y"}, headers=H).json()["id"]
+    t0 = time.time()
+    while c.get(f"/api/jobs/{jid}").json()["status"] in ("queued", "running") and time.time() - t0 < 120:
+        time.sleep(0.3)
+    assert seen and all(s == ai.CAD_SYSTEM and m == 32000 for s, m in seen), seen
