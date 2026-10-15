@@ -33,6 +33,7 @@ Eingaben
 - Eine Zeile „Fotografiertes Original“ (Farbe, Material, Transparenz, Oberfläche des Teils – nicht das
   Fertigungsmaterial) und ggf. „Hinweise der Prüfung“.
 - Fertigungsverfahren, Material und Wünsche des Nutzers.
+- Ggf. ein Abschnitt „Messschieber am Modell (verbindlich)“: am 3D-Modell nachgemessene Werte (Regel 11).
 
 Regeln für den Code
 1. Alle Maße stehen als benannte Konstanten in GROSSBUCHSTABEN am Anfang, jeweils mit Kommentar zur Herkunft
@@ -56,6 +57,21 @@ Regeln für den Code
 10. Zu jedem offenen Punkt der Prüfung steht in `assumptions`, was angenommen wurde. Die Prüfung deutet Geometrie
    nicht verbindlich: Was ihr wie eine Nut, Rille oder Stufe erscheint, prüfst du selbst gegen Umriss, Unteransicht
    und Regel 9.
+11. Jedes Maß, das die Form bestimmt (Außenmaße, Bohrungsdurchmesser, Tiefen, Fasen, Plattendicke, Rasterabstände),
+   steht als benannte Konstante `NAME = Zahl` am Anfang des Codes und als Eintrag in `dimensions` mit `var = NAME`.
+   Keine zwei Einträge teilen eine Konstante. Die Maße heißen D1, D2 … (eigener Nummernkreis, nie die M-Nummer einer
+   Messung); `group` ist aussen, bohrung, tiefe, fase, platte oder sonst; `assumed: true` heißt Annahme ohne
+   Messgrundlage. Die Ankerpunkte stehen in `DIM_ANCHORS` (Regel 13) so, dass ihr Abstand `value` ist (bei
+   Durchmessern: zwei gegenüberliegende Punkte des Kreises; bei Tiefen: Beginn und Ende der Bohrung); `a`/`b` im JSON
+   sind optional und nur der Rückfall für Maße ohne Eintrag in `DIM_ANCHORS`. `ref` nennt die Messung der Messtabelle
+   (M-Nummer), aus der der Wert stammt; Maße ohne Messgrundlage haben `ref: null`. Werte aus „Messschieber am Modell“
+   sind verbindlich und nie Annahmen.
+12. Bei Änderungswünschen und Schlussfolgerungen behalten bestehende Maße `id` und `var`; neue Maße bekommen neue
+   IDs. Ein Maß, dessen Wert aus einem nachgemessenen Maß folgt, trägt `derived_from` und eine `note`. Hat das Projekt
+   mehrere Teile, beginnt `label` mit der Teilnummer („T2 Dicke“).
+13. Am Ende des Codes steht ein Dict `DIM_ANCHORS = {"D3": ((0, 0, 0), (0, 0, BLOCK_H)), …}` mit den Ankerpunkten
+   jedes Maßes als Ausdrücke der Konstanten (Modellraum, mm; Punkte als Tupel von drei Zahlen). Fehlt ein Eintrag,
+   gelten `a`/`b` aus dem JSON als Rückfall.
 
 Antwortformat – genau zwei Codeblöcke, sonst höchstens zwei kurze Sätze:
 ```json
@@ -63,13 +79,14 @@ Antwortformat – genau zwei Codeblöcke, sonst höchstens zwei kurze Sätze:
   "summary": "Ein Satz, was modelliert wurde",
   "assumptions": ["Annahme 1", "…"],
   "check_before_manufacturing": ["Was der Nutzer vor dem Fertigen prüfen sollte"],
-  "dimensions": [{"id": "M1", "label": "Länge", "measured": 79.8, "nominal": 80.0, "note": "gerundet"}],
+  "dimensions": [{"id": "D3", "label": "Höhe Block", "group": "aussen", "var": "BLOCK_H", "value": 75.0, "ref": null,
+                  "assumed": true, "a": [0, 0, 0], "b": [0, 0, 75.0], "derived_from": null, "note": "Annahme: Höhe ≈ Breite"}],
   "bbox_expected": [80.0, 50.0, 6.0],
   "orientation": "Unterseite auf XY, Ursprung Mitte"
 }
 ```
 ```python
-# build123d-Code, Ergebnis in `part`
+# build123d-Code, Ergebnis in `part`, am Ende DIM_ANCHORS (Regel 13)
 ```
 """
 
@@ -313,7 +330,7 @@ def call(system: str, messages: list[dict], max_tokens: int = 16000, cancel: thr
 _BLOCK = re.compile(r"```(\w+)?\s*\n(.*?)```", re.S)
 
 
-def parse_cad(text: str) -> tuple[dict, str]:
+def parse_cad(text: str, meas_ids=frozenset()) -> tuple[dict, str]:
     meta, code = None, None
     for lang, body in _BLOCK.findall(text):
         lang = (lang or "").lower()
@@ -330,6 +347,7 @@ def parse_cad(text: str) -> tuple[dict, str]:
     for k in ("assumptions", "check_before_manufacturing", "dimensions"):
         if not isinstance(meta.get(k), list):
             meta[k] = []
+    meta["dimensions"] = parse_dims(meta["dimensions"], meas_ids)
     return meta, code
 
 
@@ -366,6 +384,71 @@ def _json_object(text: str) -> dict | None:
 def _text(v, n: int, default: str = "") -> str:
     """Nur echte Texte uebernehmen: str() wuerde aus einer Liste oder Zahl der KI ein Label wie "['x']" machen."""
     return (v.strip()[:n] or default) if isinstance(v, str) else default
+
+
+DIM_GROUPS = ("aussen", "bohrung", "tiefe", "fase", "platte", "sonst")
+_DIM_ID = re.compile(r"^D[0-9]{1,4}$")
+_VAR = re.compile(r"^[A-Z][A-Z0-9_]{1,30}$")
+MAX_DIMS = 200
+
+
+def _pos_num(v) -> float | None:
+    """Zahl > 0 und endlich; Text wie "75.0" zaehlt, bool nicht."""
+    if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+        return None
+    try:
+        f = float(v)
+    except ValueError:
+        return None
+    return f if math.isfinite(f) and f > 0 else None
+
+
+def point3(v) -> list[float] | None:
+    """Ankerpunkt: genau drei endliche Zahlen (mm), sonst None."""
+    if not isinstance(v, (list, tuple)) or len(v) != 3:
+        return None
+    if any(isinstance(x, bool) or not isinstance(x, (int, float)) for x in v):
+        return None
+    p = [float(x) for x in v]
+    return p if all(math.isfinite(x) for x in p) else None
+
+
+def _upper(v) -> str | None:
+    return v.strip().upper() if isinstance(v, str) else None
+
+
+def parse_dims(raw, meas_ids=frozenset()) -> list[dict]:
+    """Masse der KI bereinigen (Spec Stufe B §1): D-Nummer Pflicht, erste gewinnt; ohne var/value nicht editierbar
+    und ohne Anker; ref nur mit vorhandener Messung; derived_from nur auf ein anderes Mass der Liste."""
+    out, seen = [], set()
+    for it in raw if isinstance(raw, list) else []:
+        if not isinstance(it, dict):
+            continue
+        did = _upper(it.get("id")) or ""
+        if not _DIM_ID.match(did) or did in seen:
+            continue
+        seen.add(did)
+        var = it["var"] if isinstance(it.get("var"), str) and _VAR.match(it["var"]) else None
+        value = _pos_num(it.get("value"))
+        ref = _upper(it.get("ref"))
+        d = {"id": did, "label": " ".join(_text(it.get("label"), 200).split())[:60] or did,
+             "group": it.get("group") if it.get("group") in DIM_GROUPS else "sonst", "var": var,
+             "value": value if value is not None else _pos_num(it.get("nominal")),
+             "ref": ref if ref in meas_ids else None, "assumed": it.get("assumed") is True,
+             "derived_from": _upper(it.get("derived_from")),
+             "note": " ".join(_text(it.get("note"), 400).split())[:120], "editable": False}
+        if var and value is not None:
+            pa, pb = point3(it.get("a")), point3(it.get("b"))
+            if pa and pb:
+                d["a"], d["b"] = pa, pb
+        out.append(d)
+        if len(out) == MAX_DIMS:
+            break
+    ids = {d["id"] for d in out}
+    for d in out:
+        if d["derived_from"] not in ids or d["derived_from"] == d["id"]:
+            d["derived_from"] = None
+    return out
 
 
 def parse_check(text: str) -> dict:
@@ -458,6 +541,14 @@ with BuildPart() as p:
             Hole(HOLE_D / 2)
     fillet(p.edges().filter_by(Axis.Z), radius=CORNER_R)
 part = p.part
+
+DIM_ANCHORS = {
+    "D1": ((-LENGTH / 2, -WIDTH / 2, 0), (LENGTH / 2, -WIDTH / 2, 0)),
+    "D2": ((LENGTH / 2, -WIDTH / 2, 0), (LENGTH / 2, WIDTH / 2, 0)),
+    "D3": ((LENGTH / 2, WIDTH / 2, 0), (LENGTH / 2, WIDTH / 2, THICKNESS)),
+    "D4": ((HOLE_DX / 2 - HOLE_D / 2, HOLE_DY / 2, THICKNESS), (HOLE_DX / 2 + HOLE_D / 2, HOLE_DY / 2, THICKNESS)),
+    "D5": ((-HOLE_DX / 2, HOLE_DY / 2, THICKNESS), (HOLE_DX / 2, HOLE_DY / 2, THICKNESS)),
+}
 '''
 
 _FAKE_V2 = '''# Montageplatte – Testmodus (AI_FAKE)
@@ -481,18 +572,42 @@ with BuildPart() as p:
         SlotCenterToCenter(SLOT_L - SLOT_W, SLOT_W)
     extrude(amount=-THICKNESS, mode=Mode.SUBTRACT)
 part = p.part
+
+DIM_ANCHORS = {{
+    "D1": ((-LENGTH / 2, -WIDTH / 2, 0), (LENGTH / 2, -WIDTH / 2, 0)),
+    "D2": ((LENGTH / 2, -WIDTH / 2, 0), (LENGTH / 2, WIDTH / 2, 0)),
+    "D3": ((LENGTH / 2, WIDTH / 2, 0), (LENGTH / 2, WIDTH / 2, THICKNESS)),
+    "D4": ((HOLE_DX / 2 - HOLE_D / 2, HOLE_DY / 2, THICKNESS), (HOLE_DX / 2 + HOLE_D / 2, HOLE_DY / 2, THICKNESS)),
+    "D5": ((-HOLE_DX / 2, HOLE_DY / 2, THICKNESS), (HOLE_DX / 2, HOLE_DY / 2, THICKNESS)),
+    "D6": ((-SLOT_L / 2, 0, THICKNESS), (SLOT_L / 2, 0, THICKNESS)),
+}}
 '''
 
 
 def _fake_meta(t):
+    dims = [
+        {"id": "D1", "label": "Länge", "group": "aussen", "var": "LENGTH", "value": 80.0, "ref": "M1", "assumed": False,
+         "note": "gerundet"},
+        {"id": "D2", "label": "Breite", "group": "aussen", "var": "WIDTH", "value": 50.0, "ref": "M2", "assumed": False,
+         "note": "gerundet"},
+        {"id": "D3", "label": "Dicke", "group": "platte", "var": "THICKNESS", "value": t, "ref": None, "assumed": True,
+         "note": "Annahme ohne Höhenlehre"},
+        {"id": "D4", "label": "Bohrung Ø", "group": "bohrung", "var": "HOLE_D", "value": 4.5, "ref": "M3", "assumed": False},
+        {"id": "D5", "label": "Lochabstand x", "group": "sonst", "var": "HOLE_DX", "value": 64.0, "ref": "M4",
+         "assumed": False},
+        {"id": "D6", "label": "Langloch Länge", "group": "sonst", "var": "SLOT_L", "value": 30.0, "ref": None,
+         "assumed": True, "note": "Annahme: mittig"},
+        {"id": "D7", "label": "Langloch Breite", "group": "sonst", "var": "SLOT_W", "value": 8.0, "ref": None,
+         "assumed": False, "a": [0.0, -4.0, t], "b": [0.0, 4.0, t], "note": "Anker nur im JSON"},
+        {"id": "D8", "label": "Eckenradius", "group": "fase", "var": "CORNER_R", "value": 5.0, "ref": None,
+         "assumed": True, "note": "am Original prüfen"},
+        {"id": "D9", "label": "Rand bis Langloch", "group": "sonst", "var": "SLOT_EDGE", "value": 25.0, "ref": None,
+         "assumed": False, "a": [15.0, 0.0, t], "b": [40.0, 0.0, t], "note": "keine Konstante im Code"}]
     return {"summary": f"Montageplatte 80 × 50 × {t:g} mm mit vier Bohrungen und Langloch (Testmodus).",
             "assumptions": ["Bohrungen sind Durchgangsbohrungen", "Langloch mittig, gleiche Tiefe wie die Platte"],
             "check_before_manufacturing": ["Bohrungsdurchmesser mit Schieblehre nachmessen",
                                            "Eckenradius am Original prüfen"],
-            "dimensions": [{"id": "M1", "label": "Länge", "measured": 79.8, "nominal": 80.0, "note": "gerundet"},
-                           {"id": "M2", "label": "Breite", "measured": 50.1, "nominal": 50.0, "note": "gerundet"},
-                           {"id": "M5", "label": "Dicke", "measured": 6.1, "nominal": t, "note": ""}],
-            "bbox_expected": [80.0, 50.0, t], "orientation": "Unterseite auf XY, Ursprung Mitte"}
+            "dimensions": dims, "bbox_expected": [80.0, 50.0, t], "orientation": "Unterseite auf XY, Ursprung Mitte"}
 
 
 def _fake(system, messages, cancel):
