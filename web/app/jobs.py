@@ -22,7 +22,7 @@ PROCESSES = {
     "cnc": "CNC-Fräsen 3-Achs",
     "other": "nicht festgelegt",
 }
-SOURCE_LABEL = {"claude": "KI", "auto": "automatisch"}
+SOURCE_LABEL = {"claude": "KI", "auto": "automatisch", "user": "Foto", "manual": "manuell"}
 
 
 def job_dir(job_id: int) -> Path:

@@ -123,6 +123,30 @@ def test_unplausible_referenz_polygon_bearbeiten_dropped(proj):
     assert c.get(f"/api/projects/{pid}").status_code == 200
 
 
+
+def test_umbenennen_nach_kuerzung(proj):
+    """Auto-Masse heissen nach dem Umbenennen richtig, auch wenn der alte Name ihr Label auf 80 Zeichen gekuerzt hat."""
+    c, pid, phid = proj
+    part = _part(c, pid, phid, label="X" * 80)
+    assert _auto(_p(c, pid), part["id"], "L")["label"] == "X" * 80
+    for old, new in (("X" * 80, "Y" * 79), ("Y" * 79, "Quader")):
+        assert c.patch(f"/api/parts/{part['id']}", json={"label": new}, headers=H).status_code == 200, old
+    p = _p(c, pid)
+    assert (_auto(p, part["id"], "L")["label"], _auto(p, part["id"], "B")["label"]) == ("Quader Länge", "Quader Breite")
+
+
+def test_umbenennen_behaelt_eigene_labels(proj):
+    """Ergaenzte Auto-Labels bekommen nur den neuen Teilnamen, frei vergebene bleiben unveraendert."""
+    c, pid, phid = proj
+    part = _part(c, pid, phid)
+    p = _p(c, pid)
+    c.patch(f"/api/measurements/{_auto(p, part['id'], 'L')['id']}", json={"label": "Quader Länge oben"}, headers=H)
+    c.patch(f"/api/measurements/{_auto(p, part['id'], 'B')['id']}", json={"label": "Gesamt"}, headers=H)
+    assert c.patch(f"/api/parts/{part['id']}", json={"label": "Platte"}, headers=H).status_code == 200
+    p = _p(c, pid)
+    assert (_auto(p, part["id"], "L")["label"], _auto(p, part["id"], "B")["label"]) == ("Platte Länge oben", "Gesamt")
+
+
 def test_zuordnung_von_hand(proj):
     c, pid, phid = proj
     part = _part(c, pid, phid)

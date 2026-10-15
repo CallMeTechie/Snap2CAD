@@ -140,6 +140,8 @@ async def security(request: Request, call_next):
         resp.headers.setdefault("Content-Security-Policy", CSP)
     if path.startswith("/api/"):
         resp.headers.setdefault("Cache-Control", "no-store")
+    elif path.startswith("/static/"):  # nach einem Update keine alten JS-Module neben neuen (ETag macht es billig)
+        resp.headers.setdefault("Cache-Control", "no-cache")
     return resp
 
 
@@ -212,7 +214,8 @@ def _photo_public(ph: dict) -> dict:
             "gauge": ({k: a["gauge"].get(k) for k in ("strip", "ids", "rms_mm", "vlen_mm")} if a.get("gauge") else None),
             "rect": a.get("rect"), "gauge_rect": a.get("gauge_rect"),
             "files": [n[:-4] for n in ("orig.jpg", "overlay.jpg", "rect.jpg", "gauge.jpg", "thumb.jpg")
-                      if (d / n).is_file()]}
+                      if (d / n).is_file()],
+            "has_edges": (d / "edges.json").is_file()}
 
 
 def _grid_h(fmt: str | None) -> float | None:
@@ -903,8 +906,8 @@ def photo_patch(phid: int, body: PhotoPatch, u: dict = Depends(auth.require_user
                   (a.get("format"), a["status"], a.get("max_err_mm"), db.jdump(a), phid))
             parts.delete_photo_parts(phid)
             _refresh(p)
-        for n in ("edges.json", "edges_ki.jpg"):
-            (_photo_dir(phid) / n).unlink(missing_ok=True)
+            for n in ("edges.json", "edges_ki.jpg"):  # in der Transaktion: wie photo_edges beim Schreiben
+                (_photo_dir(phid) / n).unlink(missing_ok=True)
     return _photo_public(db.q1("SELECT * FROM photos WHERE id=?", (phid,)))
 
 
@@ -977,7 +980,10 @@ def photo_edges(phid: int, body: EdgesIn, request: Request, u: dict = Depends(au
             notice = notice.replace("Teile nur aus dem Umriss.", "vorhandene Teile bleiben unverändert.") if notice \
                 else "Ohne KI wurden nur die Kanten aktualisiert; vorhandene Teile bleiben unverändert."
         else:
-            parts.replace_detected(p["id"], phid, detected or parts.outline_parts(res))
+            skipped = parts.replace_detected(p["id"], phid, detected or parts.outline_parts(res))
+            if skipped:
+                more = "1 erkanntes Teil nicht übernommen" if skipped == 1 else f"{skipped} erkannte Teile nicht übernommen"
+                notice = f"{notice} {more} – höchstens {parts.MAX_PARTS_PER_PHOTO} Teile je Foto.".strip()
         _refresh(p)
         tmp = d / "edges.json.tmp"  # innerhalb von atomic: kein zweiter Lauf und kein Loeschen dazwischen
         tmp.write_text(json.dumps(res), encoding="utf-8")
@@ -1223,9 +1229,6 @@ class PartPatch(BaseModel):
     reset_scale: bool = False
 
 
-MAX_PARTS_PER_PHOTO = 12
-
-
 def _polygon(pts: list, photo: dict) -> list:
     import math
     a = db.jload(photo["analysis"], {}) or {}
@@ -1249,8 +1252,8 @@ def part_create(pid: int, body: PartIn, u: dict = Depends(auth.require_user)):
         raise HTTPException(400, "Foto gehört zu einem anderen Projekt")
     poly = _polygon(body.polygon, ph)
     with db.atomic():
-        if db.q1("SELECT COUNT(*) n FROM parts WHERE photo_id=?", (ph["id"],))["n"] >= MAX_PARTS_PER_PHOTO:
-            raise HTTPException(400, f"Höchstens {MAX_PARTS_PER_PHOTO} Teile je Foto.")
+        if db.q1("SELECT COUNT(*) n FROM parts WHERE photo_id=?", (ph["id"],))["n"] >= parts.MAX_PARTS_PER_PHOTO:
+            raise HTTPException(400, f"Höchstens {parts.MAX_PARTS_PER_PHOTO} Teile je Foto.")
         tid = parts.create_part(pid, ph["id"], body.label, body.role, poly)
         _refresh(p)
     return parts.part_public(db.q1("SELECT * FROM parts WHERE id=?", (tid,)))

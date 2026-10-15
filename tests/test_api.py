@@ -84,6 +84,27 @@ def test_measurements_and_factors(project):
     assert "'=SUMME" in csv.text  # Formel-Injektion entschaerft
 
 
+
+
+def test_statische_dateien_immer_nachfragen(admin):
+    """Nach einem Update keine Mischung aus alten und neuen JS-Modulen: der Browser fragt jedes Mal per ETag nach."""
+    r = admin.get("/static/js/app.js")
+    assert r.status_code == 200 and r.headers.get("cache-control") == "no-cache"
+    assert admin.get("/static/js/app.js", headers={"If-None-Match": r.headers["etag"]}).status_code == 304
+
+def test_csv_quelle_im_klartext(project):
+    """Quelle in CSV und KI-Masstabelle als Klartext statt der internen Werte user/manual."""
+    from app import jobs
+    c, pid, ph = project["client"], project["id"], project["photo"]
+    c.post(f"/api/projects/{pid}/measurements", json={"photo_id": ph["id"], "kind": "length",
+                                                      "points": [[10, 10], [110, 10]]}, headers=H)
+    c.post(f"/api/projects/{pid}/measurements", json={"kind": "length", "value": 6.1, "label": "Dicke"}, headers=H)
+    rows = [r.split(";") for r in c.get(f"/api/projects/{pid}/measurements.csv").text.lstrip("\ufeff").splitlines()]
+    col = rows[0].index("Quelle")
+    assert [r[col] for r in rows[1:]] == ["Foto", "manuell"]
+    table, _ = jobs.measurement_table(pid)
+    assert "| Foto |" in table and "| manuell |" in table
+
 def test_claude_suggestions(project):
     c, pid = project["client"], project["id"]
     r = c.post(f"/api/projects/{pid}/suggest", json={}, headers=H)
@@ -95,6 +116,12 @@ def test_claude_suggestions(project):
     ms = c.get(f"/api/projects/{pid}").json()["measurements"]
     assert [m["source"] for m in ms] == ["claude"] and ms[0]["accepted"]
 
+
+
+def test_parse_suggestions_nur_text_uebernehmen():
+    from app import ai
+    items = ai.parse_suggestions('[{"label": ["Dicke"], "value": 6, "reason": {"x": 1}}, {"label": " Breite ", "value": 4}]')
+    assert [(m["label"], m["reason"]) for m in items] == [("Maß", ""), ("Breite", "")]
 
 def test_cad_job_autofix_iterate_quota(project):
     c, pid = project["client"], project["id"]

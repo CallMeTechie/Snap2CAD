@@ -311,6 +311,11 @@ def _json_array(text: str, what: str) -> list:
         raise AIError(f"Die {what} war kein gültiges JSON.") from e
 
 
+def _text(v, n: int, default: str = "") -> str:
+    """Nur echte Texte uebernehmen: str() wuerde aus einer Liste oder Zahl der KI ein Label wie "['x']" machen."""
+    return (v.strip()[:n] or default) if isinstance(v, str) else default
+
+
 def parse_suggestions(text: str) -> list[dict]:
     items = _json_array(text, "Vorschlagsliste")
     out = []
@@ -326,11 +331,11 @@ def parse_suggestions(text: str) -> list[dict]:
         pts = it.get("points")
         if not (isinstance(pts, list) and all(isinstance(p, list) and len(p) == 2 for p in pts)):
             pts = None
-        out.append({"label": str(it.get("label") or "Maß")[:80], "kind": kind, "value": round(value, 2),
+        out.append({"label": _text(it.get("label"), 80, "Maß"), "kind": kind, "value": round(value, 2),
                     "unit": "°" if kind == "angle" else "mm",
                     "unc": round(float(it.get("unc") or 0.5), 2) if str(it.get("unc", "")).strip() else 0.5,
                     "view": it.get("view") if it.get("view") in ("top", "gauge") else "top",
-                    "points": pts, "reason": str(it.get("reason") or "")[:300], "unsure": bool(it.get("unsure"))})
+                    "points": pts, "reason": _text(it.get("reason"), 300), "unsure": bool(it.get("unsure"))})
     return out
 
 
@@ -351,10 +356,11 @@ def parse_parts(text: str) -> list[dict]:
         if len(poly) != len(pts) or not all(math.isfinite(v) and abs(v) < 1e4 for p in poly for v in p):
             continue
         raw_edges = it.get("edges") if isinstance(it.get("edges"), list) else []
-        out.append({"label": str(it.get("label") or "Teil")[:80],
+        out.append({"label": _text(it.get("label"), 80, "Teil"),
                     "role": it.get("role") if it.get("role") in ("body", "mounted") else "body",
-                    "polygon": poly, "edges": [str(e)[:8] for e in raw_edges if isinstance(e, (str, int))][:64],
-                    "note": str(it.get("note") or "")[:300]})
+                    "polygon": poly, "edges": [str(e)[:8] for e in raw_edges
+                                               if isinstance(e, (str, int)) and not isinstance(e, bool)][:64],
+                    "note": _text(it.get("note"), 300)})
         if len(out) == 6:
             break
     return out

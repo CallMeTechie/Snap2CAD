@@ -1,7 +1,7 @@
 // Schritt 4: CAD-Modell – Auftrag, Fortschritt, Ergebnis
-import { api, h, clear, icon, num, bytes, toast, fail, mmss, dt, confirmDlg, copyText } from "./lib.js";
+import { api, h, clear, icon, num, bytes, toast, fail, mmss, dt, confirmDlg, copyText, fmtValue } from "./lib.js";
 import { S, ensureProject, go, onLeave, refreshMe, jobBadge } from "./app.js";
-import { fmtValue } from "./measure.js";
+import { VIEW_LABEL } from "./photos.js";
 
 const PROC = {
   fdm: ["3D-Druck FDM", "Bohrungsausgleich, Wandstärke, Druckrichtung", "PETG"],
@@ -38,13 +38,13 @@ export async function form(main) {
     clear(measBox, h("span", { class: "label" }, `Maßtabelle · ${list.length}`),
       list.length ? h("table", { class: "t" }, h("thead", {}, h("tr", {}, h("th", {}, "ID"), h("th", {}, "Merkmal"), h("th", { style: { textAlign: "right" } }, "Wert"), h("th", { style: { textAlign: "right" } }, "±"))),
         h("tbody", {}, list.map(m => h("tr", {}, h("td", { class: "mono" }, `M${m.seq}`), h("td", {}, m.label, m.critical ? " ★" : ""),
-          h("td", { class: "num" }, m.caliper != null ? `${m.kind === "diameter" ? "Ø " : ""}${num(m.caliper, 2)}` : fmtValue(m).replace(" mm", "")),
+          h("td", { class: "num" }, m.caliper != null ? `${m.kind === "diameter" ? "Ø " : ""}${num(m.caliper, 2)}` : fmtValue(m, false)),
           h("td", { class: "num" }, m.caliper != null ? "MS" : num(m.unc, 1))))))
         : h("div", { class: "note warn" }, icon("warn"), h("span", {}, "Noch keine Maße. ", h("a", { href: "/messen" }, "Jetzt messen"), " – oder alles im Feld „Zweck und Funktion“ beschreiben.")),
       list.length ? h("span", { class: "xs muted" }, "★ kritisch · MS = Messschieber-Wert") : null);
   }
   let proc = "fdm";
-  try { proc = localStorage.getItem("mu.proc") || "fdm"; } catch { /* */ }
+  try { const v = localStorage.getItem("mu.proc"); if (Object.hasOwn(PROC, v)) proc = v; } catch { /* */ }
   const name = h("input", { id: "name", class: "input", value: P.name, maxlength: 120, required: true });
   const zweck = h("textarea", { id: "zweck", class: "input", rows: 3, maxlength: 6000, placeholder: "z. B. Ersatz für eine gebrochene Halteplatte. Nimmt ein Kugellager 608 (Ø 22 mm) auf und wird mit 2× M6 verschraubt." });
   const material = h("input", { class: "input", value: PROC[proc][2], maxlength: 80 });
@@ -78,7 +78,7 @@ export async function form(main) {
     h("label", { style: { cursor: "pointer", display: "flex", flexDirection: "column", gap: "4px" } },
       h("img", { src: `/api/photos/${p.id}/${p.files.includes("rect") ? "rect" : "gauge"}.jpg`, alt: p.filename, style: { opacity: picked.has(p.id) ? 1 : 0.35 } }),
       h("span", { class: "check xs", style: { minHeight: "auto" } }, h("input", { type: "checkbox", checked: picked.has(p.id), onchange: e => { e.target.checked ? picked.add(p.id) : picked.delete(p.id); drawPhotos(); } }),
-        `${p.filename.replace(/\.\w+$/, "")} · ${({ top: "Draufsicht", tilted: "Gekippt", gauge: "Höhenlehre", overview: "Übersicht" })[p.view]}${p.files.includes("gauge") ? " + Höhe" : ""}`))))
+        `${p.filename.replace(/\.\w+$/, "")} · ${VIEW_LABEL[p.view]}${p.files.includes("gauge") && p.view !== "tilted" && p.view !== "gauge" ? " + Höhe" : ""}`))))
     : h("p", { class: "hint" }, "Keine entzerrten Fotos – das Modell entsteht dann nur aus Maßen und Beschreibung."));
   drawPhotos();
   const rules = h("dd", {}, RULES[proc]);
@@ -143,11 +143,13 @@ export async function form(main) {
 // ================================================================== Auftrag ansehen
 export async function job(main, id) {
   let J = await api(`/api/jobs/${id}`);
-  let ver = null, tab = "3d", viewer = null, timer = null, liveCode = false, lastSig = "";
+  if (!main.isConnected) return;  // waehrend des Ladens weg navigiert: keine Uhr und keine Abfrage starten
+  let ver = null, tab = "3d", viewer = null, timer = null, inflight = false, gone = false, fails = 0, jv = 0, liveCode = false, lastSig = "";
   const root = h("div", { style: { display: "contents" } });
   main.append(root);
-  onLeave(() => { clearInterval(timer); clearInterval(clock); viewer?.dispose(); viewer = null; });
+  onLeave(() => { gone = true; clearTimeout(timer); clearInterval(clock); viewer?.dispose(); viewer = null; photoCache = null; });
   const running = () => J.status === "queued" || J.status === "running";
+  const sig = () => `${J.status}|${(J.log || []).length}|${J.versions.length}`;
 
   function runStart() {
     const L = J.log || [];
@@ -157,18 +159,26 @@ export async function job(main, id) {
   const clockEl = h("span", { class: "mono" });
   const clock = setInterval(() => { if (running()) clockEl.textContent = mmss((Date.now() - runStart()) / 1000); }, 1000);
 
+  // Abfrage als setTimeout-Kette: hoechstens eine Anfrage unterwegs. jv zaehlt Nutzeraktionen (Abbrechen,
+  // Aenderung): eine Antwort, die davor losgeschickt wurde, ueberschreibt deren Stand nicht.
   async function poll() {
-    try {
-      J = await api(`/api/jobs/${id}`);
-      const sig = `${J.status}|${J.log.length}|${J.versions.length}`;
-      if (sig !== lastSig) { lastSig = sig; draw(); }
-      if (!running()) { clearInterval(timer); timer = null; refreshMe().catch(() => {}); }
-    } catch (e) { if (e.status === 404) { clearInterval(timer); go("/auftraege"); } }
+    timer = null; inflight = true;
+    const v = jv;
+    let j = null, err = null;
+    try { j = await api(`/api/jobs/${id}`); } catch (e) { err = e; } finally { inflight = false; }
+    if (gone) return;
+    if (err?.status === 404) { go("/auftraege"); return; }
+    if (err) { if (++fails === 3) fail(err); }  // Netz oder Server: weiter versuchen, nach dem dritten Fehlschlag einmal melden
+    else {
+      fails = 0;
+      if (v === jv) { J = j; if (sig() !== lastSig) { try { draw(); } catch (e) { fail(e); } } }
+    }
+    if (running()) startPoll(); else refreshMe().catch(() => {});
   }
-  function startPoll() { if (!timer) timer = setInterval(poll, 1500); }
+  function startPoll() { if (!timer && !inflight && !gone) timer = setTimeout(poll, 1500); }
 
   function draw() {
-    lastSig = `${J.status}|${J.log.length}|${J.versions.length}`;
+    lastSig = sig();
     viewer?.dispose(); viewer = null;
     if (running()) drawRun(); else drawResult();
   }
@@ -183,12 +193,10 @@ export async function job(main, id) {
       const last = i === L.length - 1;
       let cls = l.level === "ok" ? "ok" : l.level === "error" ? "err" : l.level === "warn" ? "warn" : last ? "run" : "ok";
       let extra = null;
-      const vm = l.msg.match(/^Version (\d+): (\w+Error|ValueError|.*Error)/);
       if (l.level === "warn" && /^Version (\d+)/.test(l.msg)) {
         const vn = Number(l.msg.match(/^Version (\d+)/)[1]); const v = vers.find(x => x.version === vn);
         if (v?.error) extra = h("code", {}, `${v.error.line ? `Zeile ${v.error.line} · ${v.error.code || ""}\n` : ""}${v.error.type}: ${String(v.error.message).slice(0, 400)}`);
       }
-      void vm;
       return h("li", { "aria-current": last ? "step" : null },
         h("span", { class: `ic ${cls}` }, cls === "run" ? h("span", { class: "spin", style: { width: "12px", height: "12px" } }) : cls === "ok" ? icon("check", 13) : cls === "err" ? icon("x", 13) : "!"),
         h("span", {}, h("strong", { style: { fontWeight: last ? 600 : 500 } }, l.msg), extra),
@@ -215,7 +223,7 @@ export async function job(main, id) {
             h("span", { class: "small muted" }, "Du kannst die Seite verlassen. Der Auftrag läuft weiter und erscheint unter „Meine Aufträge“."),
             h("button", { class: "btn danger", onclick: async () => {
               if (!await confirmDlg("Auftrag abbrechen?", "Der laufende Schritt wird beendet. Bereits fertige Versionen bleiben erhalten.", "Abbrechen", true)) return;
-              try { J = await api(`/api/jobs/${id}/cancel`, { method: "POST" }); draw(); } catch (e) { fail(e); }
+              try { J = await api(`/api/jobs/${id}/cancel`, { method: "POST" }); if (gone) return; jv++; draw(); } catch (e) { fail(e); }
             } }, "Abbrechen")))));
     logPre.scrollTop = logPre.scrollHeight;
     startPoll();
@@ -275,14 +283,12 @@ export async function job(main, id) {
         dlLink(`${base}/model.py?download=1`, "PY", "py", `${slug(J.name)}_v${V.version}.py`, "Parametrisch · build123d"),
         h("div", { class: "chips" }, J.project_id ? h("a", { class: "btn sm", href: `/api/projects/${J.project_id}/measurements.csv`, download: "" }, icon("download", 14), "Maßtabelle CSV") : null,
           h("a", { class: "btn sm", href: `${base}/bundle.zip`, download: "" }, icon("zip", 14), "Alles als ZIP"))));
-      const bbCheck = checks.find(c => c.id === "bbox");
       right.append(h("section", { class: "card", "aria-labelledby": "ck-h", style: { gap: "12px" } }, h("h2", { id: "ck-h" }, "Prüfung"),
         h("ul", { class: "checks" },
           checks.map(c => h("li", {}, stateIcon(c.state), h("span", {}, h("strong", {}, c.label), c.detail ? ` · ${c.detail}` : ""))),
           h("li", {}, stateIcon("ok"), h("span", {}, h("strong", {}, "Abmessungen "), h("span", { class: "mono" }, `${num(r.bbox[0], 2, false)} × ${num(r.bbox[1], 2, false)} × ${num(r.bbox[2], 2, false)}`),
             h("br"), h("span", { class: "small muted" }, `Volumen ${num(r.volume_mm3 / 1000, 2, false)} cm³ · ${r.faces} Flächen`))),
           h("li", {}, stateIcon("info"), h("span", {}, h("strong", {}, "Abgleich mit Foto"), " · im Tab „Foto-Abgleich“ den Umriss auf das Foto legen")))));
-      void bbCheck;
     } else if (V) {
       right.append(h("section", { class: "card", style: { gap: "12px" } }, h("h2", {}, `v${V.version} ist fehlgeschlagen`),
         h("p", { class: "small" }, V.error ? `${V.error.type}${V.error.line ? ` in Zeile ${V.error.line}` : ""} – Details im Tab „Code“.` : "Diese Version hat die Prüfung nicht bestanden."),
@@ -352,13 +358,22 @@ export async function job(main, id) {
       h("label", { class: "check small" }, h("input", { type: "checkbox", onchange: e => { st.mirror = e.target.checked; paint(); } }), "Spiegeln"),
       h("button", { class: "btn sm", onclick: () => { center(); paint(); } }, "Zentrieren"));
     clear(panel, ctrl, wrap, h("p", { class: "hint" }, "Umriss des Modells (Draufsicht, 1:1) mit der Maus oder dem Finger auf das Bauteil schieben. Wo Umriss und Kante auseinanderliegen, stimmt das Modell nicht."));
-    let img = null;
+    let img = null, loadSeq = 0, frame = 0;
     const pxmm = () => ph.rect.pxmm;
     const all = outline.flatMap(o => o.exterior);
     const bx = [Math.min(...all.map(p => p[0])), Math.max(...all.map(p => p[0]))], by = [Math.min(...all.map(p => p[1])), Math.max(...all.map(p => p[1]))];
     const oc = [(bx[0] + bx[1]) / 2, (by[0] + by[1]) / 2];
     function center() { st.x = ph.rect.w_mm / 2; st.y = ph.rect.h_mm / 2; }
-    async function load() { img = new Image(); img.src = `/api/photos/${ph.id}/rect.jpg`; await img.decode(); cv.width = img.naturalWidth; cv.height = img.naturalHeight; center(); paint(); }
+    async function load() {  // nur das zuletzt gewaehlte Foto zeigen; bis es da ist, nicht auf das alte zeichnen
+      const n = ++loadSeq, im = new Image();
+      img = null; im.src = `/api/photos/${ph.id}/rect.jpg`;
+      try { await im.decode(); } catch {
+        if (n === loadSeq && cv.isConnected) { cv.getContext("2d").clearRect(0, 0, cv.width, cv.height); toast("Foto konnte nicht geladen werden", "err"); }
+        return;
+      }
+      if (n !== loadSeq || !cv.isConnected) return;
+      img = im; cv.width = im.naturalWidth; cv.height = im.naturalHeight; center(); paint();
+    }
     function tr([x, y]) {
       let X = x - oc[0], Y = y - oc[1];
       if (st.mirror) X = -X;
@@ -366,6 +381,7 @@ export async function job(main, id) {
       const rx = X * Math.cos(a) - Y * Math.sin(a), ry = X * Math.sin(a) + Y * Math.cos(a);
       return [(st.x + rx) * pxmm(), (ph.rect.h_mm - (st.y + ry)) * pxmm()];
     }
+    const paintSoon = () => { if (!frame) frame = requestAnimationFrame(() => { frame = 0; paint(); }); };
     function paint() {
       if (!img) return;
       rotTxt.textContent = `${num(st.rot, 1)}°`;
@@ -379,15 +395,19 @@ export async function job(main, id) {
       }
     }
     let drag = null;
-    cv.addEventListener("pointerdown", e => { cv.setPointerCapture(e.pointerId); drag = { x: e.clientX, y: e.clientY, sx: st.x, sy: st.y }; });
+    cv.addEventListener("pointerdown", e => {
+      cv.setPointerCapture(e.pointerId);
+      drag = { x: e.clientX, y: e.clientY, sx: st.x, sy: st.y, k: cv.width / cv.getBoundingClientRect().width / pxmm() };
+    });
     cv.addEventListener("pointermove", e => {
       if (!drag) return;
-      const k = cv.width / cv.getBoundingClientRect().width / pxmm();
-      st.x = drag.sx + (e.clientX - drag.x) * k; st.y = drag.sy - (e.clientY - drag.y) * k; paint();
+      st.x = drag.sx + (e.clientX - drag.x) * drag.k; st.y = drag.sy - (e.clientY - drag.y) * drag.k; paintSoon();
     });
-    cv.addEventListener("pointerup", () => { drag = null; });
+    const endDrag = () => { drag = null; };
+    cv.addEventListener("pointerup", endDrag);
+    cv.addEventListener("pointercancel", endDrag);
     cv.style.cursor = "move"; cv.style.touchAction = "none";
-    rot.addEventListener("input", () => { st.rot = Number(rot.value); paint(); });
+    rot.addEventListener("input", () => { st.rot = Number(rot.value); paintSoon(); });
     sel.addEventListener("change", () => { ph = photos.find(p => p.id === Number(sel.value)); load(); });
     load();
   }
@@ -403,7 +423,7 @@ export async function job(main, id) {
     const btn = h("button", { class: "btn primary", onclick: async () => {
       if (!ta.value.trim()) { ta.focus(); toast("Bitte die Änderung beschreiben", "err"); return; }
       btn.disabled = true;
-      try { J = await api(`/api/jobs/${id}/iterate`, { method: "POST", body: { text: ta.value } }); refreshMe().catch(() => {}); ver = null; draw(); }
+      try { J = await api(`/api/jobs/${id}/iterate`, { method: "POST", body: { text: ta.value } }); refreshMe().catch(() => {}); if (gone) return; jv++; ver = null; draw(); }
       catch (e) { fail(e); btn.disabled = false; }
     } }, `v${next} erzeugen`);
     return h("section", { class: "card", "aria-labelledby": "it-h" },
@@ -429,12 +449,12 @@ export async function job(main, id) {
 }
 
 // ------------------------------------------------------------------ Hilfen
-const projectCache = new Map();
+let photoCache = null;  // nur das zuletzt angesehene fremde Projekt: { pid, photos }
 async function ensureProjectPhotos(pid) {
   if (!pid) return [];
   if (S.project?.id === pid) return S.project.photos;
-  if (!projectCache.has(pid)) projectCache.set(pid, (await api(`/api/projects/${pid}`)).photos);
-  return projectCache.get(pid);
+  if (photoCache?.pid !== pid) photoCache = { pid, photos: (await api(`/api/projects/${pid}`)).photos };
+  return photoCache.photos;
 }
 function slug(s) { return (s || "modell").normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "modell"; }
 function dlLink(href, ext, cls, name, sub) {

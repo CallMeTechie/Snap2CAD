@@ -1,34 +1,13 @@
 // Kanten und Teile auf der Messflaeche: Zeichnen, Bearbeiten, Seitenleiste (Spec 2026-10-14 §4)
-import { api, h, clear, icon, num, toast, fail, confirmDlg } from "./lib.js";
+import { api, h, icon, num, toast, fail, confirmDlg, drawTag } from "./lib.js";
 import { S, reloadProject } from "./app.js";
+import { r3, unassignedSegments, pickPolygon } from "./geom.js";
 
 export const PART_COLORS = ["#0F766E", "#7C3AED", "#B45309", "#BE185D", "#4D7C0F", "#0369A1"];
 export const partColor = p => PART_COLORS[(p.seq - 1) % PART_COLORS.length];
 export const ROLE = { body: "Grundkörper", mounted: "montiertes Teil" };
 const HANDLE = 7, DARK = "#17212B";
-const r3 = v => Math.round(v * 1000) / 1000;
 
-export function segDist(p, a, b) {
-  const dx = b[0] - a[0], dy = b[1] - a[1], l = dx * dx + dy * dy;
-  let t = l ? ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l : 0; t = Math.max(0, Math.min(1, t));
-  return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy);
-}
-function inPoly(p, P) {
-  let c = false;
-  for (let i = 0, j = P.length - 1; i < P.length; j = i++) {
-    const [xi, yi] = P[i], [xj, yj] = P[j];
-    if ((yi > p[1]) !== (yj > p[1]) && p[0] < (xj - xi) * (p[1] - yi) / (yj - yi) + xi) c = !c;
-  }
-  return c;
-}
-function area(P) { let a = 0; for (let i = 0; i < P.length; i++) { const q = P[i], r = P[(i + 1) % P.length]; a += q[0] * r[1] - r[0] * q[1]; } return Math.abs(a) / 2; }
-function tag(ctx, [x, y], text, col) {
-  ctx.font = `600 12px "IBM Plex Sans", sans-serif`;
-  const w = ctx.measureText(text).width + 10;
-  ctx.fillStyle = "rgba(255,255,255,.92)"; ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.setLineDash([]);
-  ctx.beginPath(); ctx.roundRect(x - w / 2, y - 10, w, 20, 3); ctx.fill(); ctx.stroke();
-  ctx.fillStyle = col; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(text, x, y + 0.5);
-}
 function plus(ctx, [x, y], col) {
   ctx.fillStyle = "#fff"; ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.setLineDash([]);
   ctx.beginPath(); ctx.arc(x, y, HANDLE - 1, 0, 7); ctx.fill(); ctx.stroke();
@@ -43,12 +22,12 @@ export function createPartsLayer(env) {
   const P = q => env.scr(...env.toPX(q[0], q[1]));
   const selPart = () => list().find(p => p.id === sel) || null;
 
+  let uc = null;  // unassigned() nur neu berechnen, wenn sich Kandidaten, Teile oder Foto aendern
   function unassigned() {
-    const ps = list();
-    return segments.filter(s => s.kind === "inner" && !ps.some(p => p.polygon.some((a, i) => {
-      const b = p.polygon[(i + 1) % p.polygon.length];
-      return segDist(s.a, a, b) < 1.5 && segDist(s.b, a, b) < 1.5;
-    })));
+    const parts = S.project.parts, photo = env.photoId();
+    if (uc?.segs !== segments || uc.parts !== parts || uc.photo !== photo)
+      uc = { segs: segments, parts, photo, out: unassignedSegments(segments, list().map(p => p.polygon)) };
+    return uc.out;
   }
   function draw() {
     if (!env.photoId()) return;
@@ -71,7 +50,7 @@ export function createPartsLayer(env) {
         ctx.beginPath(); ctx.moveTo(...q); ctx.lineTo(...pts[(i + 1) % pts.length]); ctx.stroke();
       });
       const c = pts.reduce((a, q) => [a[0] + q[0] / pts.length, a[1] + q[1] / pts.length], [0, 0]);
-      tag(ctx, c, `${part.id_label} ${part.label}`, col);
+      drawTag(ctx, c[0], c[1], `${part.id_label} ${part.label}`, col);
       if (act && isSel) {
         pts.forEach((q, i) => {
           ctx.setLineDash([]); ctx.fillStyle = i === vtx ? col : "#fff"; ctx.strokeStyle = col; ctx.lineWidth = 2;
@@ -105,22 +84,15 @@ export function createPartsLayer(env) {
     return null;
   }
   function hitPart(sx, sy) {
-    let best = null;
-    for (const p of list()) {
-      const pts = p.polygon.map(P);
-      const edge = Math.min(...pts.map((q, i) => segDist([sx, sy], q, pts[(i + 1) % pts.length])));
-      if (edge > 8 && !inPoly([sx, sy], pts)) continue;
-      const k = edge <= 8 ? -1 : area(pts);
-      if (!best || k < best.k) best = { p, k };
-    }
-    return best?.p || null;
+    const ps = list(), i = pickPolygon([sx, sy], ps.map(p => p.polygon.map(P)));
+    return i >= 0 ? ps[i] : null;
   }
   function select(id) { sel = id; vtx = null; env.selectPart?.(id); env.redraw(); }
   async function save(id, body) {  // busy: kein zweites Ziehen auf veraltetem Stand, bis neu geladen ist
     busy = true;
     try {
       try { await api(`/api/parts/${id}`, { method: "PATCH", body }); } catch (e) { fail(e); }
-      await reloadProject().catch(() => {});
+      await reloadProject().catch(fail);
     } finally { busy = false; }
     env.changed();
   }

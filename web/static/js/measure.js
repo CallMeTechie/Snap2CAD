@@ -1,8 +1,9 @@
 // Schritt 3: Messen auf der entzerrten Draufsicht bzw. Hoehenlehre
-import { api, h, clear, icon, num, parseNum, toast, fail, dialog, confirmDlg } from "./lib.js";
+import { api, h, clear, icon, num, parseNum, toast, fail, dialog, confirmDlg, drawTag, fmtValue } from "./lib.js";
 import { S, ensureProject, reloadProject, projectPicker, onLeave } from "./app.js";
 import { VIEW_LABEL } from "./photos.js";
-import { createPartsLayer, partsPanel, partColor, segDist } from "./edges.js";
+import { createPartsLayer, partsPanel, partColor } from "./edges.js";
+import { r3, segDist } from "./geom.js";
 
 const KIND = { length: "Strecke", height: "Höhe", diameter: "Durchmesser", radius: "Radius", angle: "Winkel", point: "Punkt" };
 const NEED = { length: 2, height: 2, diameter: 3, radius: 3, angle: 3, point: 1 };
@@ -32,18 +33,10 @@ export function compute(kind, pts, fx = 1, fy = 1) {
   }
   return null;
 }
-export function fmtValue(m) {
-  const v = m.value;
-  if (m.kind === "point") { const p = m.data?.points?.[0]; return p ? `X ${num(p[0], 1)} · Y ${num(p[1], 1)}` : "–"; }
-  if (v == null) return "–";
-  if (m.kind === "diameter") return `Ø ${num(v, 2)} mm`;
-  if (m.kind === "radius") return `R ${num(v, 2)} mm`;
-  if (m.kind === "angle") return `${num(v, 1)}°`;
-  return `${num(v, 2)} mm`;
-}
 
 export default async function (main) {
   await ensureProject();
+  if (!main.isConnected) return;  // waehrend des Ladens weg navigiert: keine Listener fuer eine fremde Seite
   main.className = "measure-layout";
   main.removeAttribute("style");
 
@@ -67,7 +60,10 @@ export default async function (main) {
   const loupeCv = h("canvas", { width: 150, height: 150 });
   const loupe = h("div", { class: "loupe", hidden: true }, loupeCv);
   const stage = h("div", { class: "stage" }, canvas, hint, loupe);
-  const status = h("div", { class: "statusbar", "aria-live": "off" });
+  // feste Mindestbreiten (Monospace): wechselnde Texte lassen die Leiste nicht umbrechen und die Flaeche nicht springen
+  const stSpan = ch => h("span", { style: { minWidth: `${ch}ch`, whiteSpace: "nowrap" } });
+  const stX = stSpan(12), stY = stSpan(12), stZoom = stSpan(11), stFac = stSpan(0), stSnap = stSpan(16), stSrc = stSpan(0);
+  const status = h("div", { class: "statusbar", "aria-live": "off" }, stX, stY, stZoom, stFac, stSnap, stSrc);
   const listBox = h("ul", { class: "mlist" });
   const countEl = h("span", { class: "muted", style: { fontWeight: 400 } });
   const suggBox = h("section", { class: "sugg", "aria-labelledby": "ki-h", hidden: true });
@@ -77,7 +73,8 @@ export default async function (main) {
   let edgeDrag = false;
 
   const picker = projectPicker(() => { selId = null; init(); });
-  const refreshPicker = (() => { let t; return () => { clearTimeout(t); t = setTimeout(() => picker.refresh(), 800); }; })();
+  let pickerT = 0;
+  const refreshPicker = () => { if (!main.isConnected) return; clearTimeout(pickerT); pickerT = setTimeout(() => picker.refresh(), 800); };
   clear(main,
     h("section", { class: "mcanvas", "aria-label": "Messfläche" },
       h("div", { class: "toolbar", "aria-label": "Werkzeuge" },
@@ -134,18 +131,25 @@ export default async function (main) {
     const im = new Image();
     im.decoding = "async";
     im.src = x.url;
-    try { await im.decode(); } catch { if (src === x) dirty = true; toast("Bild konnte nicht geladen werden", "err"); return; }
+    try { await im.decode(); } catch { if (src === x) { dirty = true; toast("Bild konnte nicht geladen werden", "err"); } return; }
     if (src !== x) return;
     img = im;
     if (!keepView) fit();
     setTool(tool);
-    if (x.view === "top") api(`/api/photos/${x.photo.id}/edges.json`).then(r => { if (src === x) layer.setSegments(r.segments); }).catch(() => {});
-    // Pixel fuer Kantenfang im Hintergrund vorbereiten
+    const cur = S.project.photos.find(p => p.id === x.photo.id);  // aktueller Stand: x.photo stammt aus init()
+    if (x.view === "top" && cur?.has_edges) api(`/api/photos/${x.photo.id}/edges.json`)
+      .then(r => { if (src === x) layer.setSegments(r.segments); }).catch(e => { if (src === x && e.status !== 404) fail(e); });
+    // Graustufen fuer den Kantenfang im Hintergrund vorbereiten (1 Byte je Pixel statt RGBA)
     setTimeout(() => {
       if (src !== x) return;
       const oc = document.createElement("canvas"); oc.width = im.naturalWidth; oc.height = im.naturalHeight;
       const c = oc.getContext("2d", { willReadFrequently: true }); c.drawImage(im, 0, 0);
-      try { pixels = { w: oc.width, h: oc.height, d: c.getImageData(0, 0, oc.width, oc.height).data }; } catch { pixels = null; }
+      try {
+        const d = c.getImageData(0, 0, oc.width, oc.height).data, g = new Uint8ClampedArray(oc.width * oc.height);
+        for (let i = 0, j = 0; j < g.length; i += 4, j++) g[j] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+        pixels = { w: oc.width, h: oc.height, g };
+      } catch { pixels = null; }
+      oc.width = oc.height = 0;
     }, 30);
     dirty = true;
   }
@@ -185,8 +189,8 @@ export default async function (main) {
   function snap(ix, iy) {
     if (!snapOn || !pixels || tool === "pan") return [ix, iy, false];
     const r = Math.round(Math.min(25, Math.max(2, 7 / s)));
-    const { w, h: H, d } = pixels;
-    const g = (x, y) => { const i = (y * w + x) * 4; return 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; };
+    const { w, h: H, g: G } = pixels;
+    const g = (x, y) => G[y * w + x];
     const x0 = Math.round(ix), y0 = Math.round(iy);
     let best = 0, bx = ix, by = iy;
     for (let y = Math.max(1, y0 - r); y <= Math.min(H - 2, y0 + r); y++) {
@@ -207,15 +211,6 @@ export default async function (main) {
   function shown() {
     if (!src) return [];
     return S.project.measurements.filter(m => m.photo_id === src.photo.id && (m.data?.view || "top") === src.view && m.data?.points?.length);
-  }
-  function label(x, y, text, color, sel) {
-    ctx.font = `600 ${12}px "IBM Plex Mono", monospace`;
-    const w = ctx.measureText(text).width + 10;
-    ctx.fillStyle = sel ? color : "rgba(255,255,255,.94)";
-    ctx.strokeStyle = color; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.roundRect(x - w / 2, y - 10, w, 20, 3); ctx.fill(); ctx.stroke();
-    ctx.fillStyle = sel ? "#fff" : color; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillText(text, x, y + 0.5);
   }
   function shape(kind, mmPts, color, { sel = false, dash = false, text = "", live = false } = {}) {
     const P = mmPts.map(p => scr(...src.toPX(p[0], p[1])));
@@ -252,7 +247,7 @@ export default async function (main) {
       if (P.length === 2 && !live) { ctx.beginPath(); ctx.moveTo(...P[0]); ctx.lineTo(...P[1]); ctx.stroke(); }
     }
     ctx.restore();
-    if (text) label(lp[0], lp[1], text, color, sel);
+    if (text) drawTag(ctx, lp[0], lp[1], text, color, { sel, mono: true });
   }
   function draw() {
     const dpr = window.devicePixelRatio || 1;
@@ -327,16 +322,17 @@ export default async function (main) {
     stage.style.cursor = k === "pan" ? "grab" : "crosshair";
     dirty = true; upStatus();
   }
-  function upStatus() {
+  const setText = (el, t) => { if (el.textContent !== t) el.textContent = t; };
+  function upStatus() {  // bei jeder Zeigerbewegung: nur Texte setzen, kein DOM-Umbau
     const f = fac();
-    zoomTxt.textContent = `${Math.round(s * 100)} %`;
-    clear(status,
-      h("span", {}, cursor ? `X ${num(cursor.mm[0] * f[0], 2, false)} mm` : "X –"),
-      h("span", {}, cursor ? `Y ${num(cursor.mm[1] * f[1], 2, false)} mm` : "Y –"),
-      h("span", {}, `Zoom ${Math.round(s * 100)} %`),
-      h("span", {}, `Faktoren X ${num(f[0], 3, false)} · Y ${num(f[1], 3, false)}`),
-      h("span", {}, snapOn ? (cursor?.snapped ? "Kante gefangen" : "Kantenfang aktiv") : "Kantenfang aus"),
-      src ? h("span", {}, `${src.photo.format || ""} · Restfehler ${num(src.photo.max_err, 2)} mm`) : null);
+    setText(zoomTxt, `${Math.round(s * 100)} %`);
+    setText(stX, cursor ? `X ${num(cursor.mm[0] * f[0], 2, false)} mm` : "X –");
+    setText(stY, cursor ? `Y ${num(cursor.mm[1] * f[1], 2, false)} mm` : "Y –");
+    setText(stZoom, `Zoom ${Math.round(s * 100)} %`);
+    setText(stFac, `Faktoren X ${num(f[0], 3, false)} · Y ${num(f[1], 3, false)}`);
+    setText(stSnap, snapOn ? (cursor?.snapped ? "Kante gefangen" : "Kantenfang aktiv") : "Kantenfang aus");
+    stSrc.hidden = !src;
+    if (src) setText(stSrc, `${src.photo.format || ""} · Restfehler ${num(src.photo.max_err, 2)} mm`);
   }
 
   function evPos(e) { const r = stage.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
@@ -426,10 +422,11 @@ export default async function (main) {
     const k = toolKind();
     dirty = true;
     if (pts.length < NEED[k]) return;
-    const points = pts.map(p => [Math.round(p[0] * 1000) / 1000, Math.round(p[1] * 1000) / 1000]);
+    if (busy) { pts.pop(); toast("Die vorige Messung wird noch gespeichert – den letzten Punkt gleich noch einmal setzen"); return; }
+    const points = pts.map(p => [r3(p[0]), r3(p[1])]);
     pts = [];
     if (k !== "point" && compute(k, points) == null) { toast("Die Punkte liegen auf einer Linie – kein Kreis möglich", "err"); return; }
-    if (busy) return; busy = true;
+    busy = true;
     try {
       const m = await api(`/api/projects/${S.project.id}/measurements`, { method: "POST", body: { photo_id: src.photo.id, kind: k, view: src.view, points } });
       await reloadProject();
@@ -454,9 +451,9 @@ export default async function (main) {
     else if ((k === "delete" || k === "backspace") && selId) { const m = S.project.measurements.find(x => x.id === selId); if (m) del(m); }
   };
   document.addEventListener("keydown", onKey);
-  const ro = new ResizeObserver(() => { const first = canvas.width <= 1; resize(); if (first) fit(); });
+  const ro = new ResizeObserver(() => { const first = canvas.width <= 1; resize(); if (first) fit(); draw(); dirty = false; });  // sonst ein leerer Frame
   ro.observe(stage);
-  onLeave(() => { document.removeEventListener("keydown", onKey); ro.disconnect(); cancelAnimationFrame(raf); });
+  onLeave(() => { document.removeEventListener("keydown", onKey); ro.disconnect(); cancelAnimationFrame(raf); clearTimeout(pickerT); src = null; });
 
   // ---------------------------------------------------------------- Liste
   function select(id, focusSource = true) {
@@ -464,8 +461,13 @@ export default async function (main) {
     const m = S.project.measurements.find(x => x.id === id);
     if (m && focusSource && m.data?.points?.length && m.photo_id) {
       const key = `${m.photo_id}:${m.data.view || "top"}`;
-      if (!src || src.key !== key) { const x = sources.find(q => q.key === key); if (x) loadSource(x, false).then(() => centerOn(m.data.points)); }
-      else centerOn(m.data.points);
+      if (!src || src.key !== key) {
+        const x = sources.find(q => q.key === key);
+        if (x) loadSource(x, false).then(() => {  // inzwischen kann eine andere Messung gewaehlt sein
+          const cur = S.project.measurements.find(q => q.id === selId);
+          if (src === x && img && cur?.data?.points?.length && `${cur.photo_id}:${cur.data.view || "top"}` === x.key) centerOn(cur.data.points);
+        }).catch(fail);
+      } else centerOn(m.data.points);
     }
     renderList(); dirty = true;
   }
@@ -555,7 +557,7 @@ export default async function (main) {
           partOf(m) ? h("span", { class: "src-part", style: { background: partColor(partOf(m)) } }, partOf(m).id_label) : null),
         h("span", { class: "mval", title: m.data?.raw != null && Math.abs(m.data.raw - m.value) > 0.004 ? `Foto ${num(m.data.raw, 2)} mm × ${num(partOf(m)?.scale ?? 1, 3)}` : "" },
           m.caliper != null ? h("span", { title: `Foto: ${fmtValue(m)}` }, `${m.kind === "diameter" ? "Ø " : ""}${num(m.caliper, 2)} mm`) : fmtValue(m),
-          m.data?.nominal != null && Math.abs(m.data.nominal - (m.caliper ?? m.value)) > 0.004 ? h("span", { class: "xs muted" }, ` ≈ ${num(m.data.nominal, m.data.nominal % 1 ? 1 : 0)}`) : null),
+          m.data?.nominal != null && Math.abs(m.data.nominal - (m.caliper ?? m.value)) > 0.004 ? h("span", { class: "xs muted" }, ` ≈ ${num(m.data.nominal, 1)}`) : null),
         h("span", { class: "msub" }, sourceText(m)),
         m.data?.ref_warn || m.data?.warn ? h("span", { class: "msub", style: { color: "var(--warn)" } }, m.data.ref_warn || m.data.warn) : null,
         h("span", { class: "munc" }, m.caliper != null ? "MS" : m.kind === "point" ? "" : `±${num(m.unc, 1)}`),
