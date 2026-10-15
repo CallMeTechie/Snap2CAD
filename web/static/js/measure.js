@@ -3,7 +3,7 @@ import { api, h, clear, icon, num, parseNum, toast, fail, dialog, confirmDlg, dr
 import { S, ensureProject, reloadProject, projectPicker, onLeave } from "./app.js";
 import { VIEW_LABEL } from "./photos.js";
 import { createPartsLayer, partsPanel, partColor } from "./edges.js";
-import { r3, segDist } from "./geom.js";
+import { DIM_GROUP_TEXT, r3, segDist } from "./geom.js";
 
 const KIND = { length: "Strecke", height: "Höhe", diameter: "Durchmesser", radius: "Radius", angle: "Winkel", point: "Punkt" };
 const NEED = { length: 2, height: 2, diameter: 3, radius: 3, angle: 3, point: 1 };
@@ -68,6 +68,7 @@ export default async function (main) {
   const listBox = h("ul", { class: "mlist" });
   const countEl = h("span", { class: "muted", style: { fontWeight: 400 } });
   const suggBox = h("section", { class: "sugg", "aria-labelledby": "ki-h", hidden: true });
+  const mdBox = h("section", { class: "mdims", "aria-labelledby": "md-h", hidden: true });
   const suggBtn = h("button", { class: "btn claude sm", onclick: suggest, disabled: !S.status?.ai, title: S.status?.ai ? "" : "KI nicht eingerichtet" }, icon("sparkle", 16), "KI-Vorschläge");
   const edgeBtn = h("button", { class: "btn sm", onclick: detectEdges, title: "Kanten und Teile auf diesem Foto erkennen" }, icon("edges", 16), "Kanten erkennen");
   const staleEl = h("span", { class: "xs", style: { color: "var(--warn)" }, hidden: true }, "Werkstück geändert – Kanten neu erkennen");
@@ -97,7 +98,7 @@ export default async function (main) {
         partsBox,
         h("div", { class: "card-head" }, h("h2", { id: "m-h" }, "Messungen ", countEl),
           h("div", { class: "chips" }, h("button", { class: "btn sm", onclick: manual }, icon("plus", 16), "Manuell"), suggBtn)),
-        listBox, suggBox,
+        listBox, mdBox, suggBox,
         h("div", { class: "note warn", style: { fontSize: "13px" } }, icon("info", 18),
           h("span", {}, "Maße gelten für die Tischebene. Hoch liegende Kanten wirken größer – an der Auflagekante setzen. Kritische Maße mit dem Messschieber bestätigen."))),
       h("div", { class: "foot" },
@@ -587,7 +588,28 @@ export default async function (main) {
           h("button", { class: "btn sm", onclick: async () => { try { await api(`/api/projects/${S.project.id}/measurements/accept-all`, { method: "POST" }); await reloadProject(); renderList(); dirty = true; } catch (e) { fail(e); } } }, "Alle übernehmen"),
           h("button", { class: "btn sm ghost", onclick: async () => { try { await api(`/api/projects/${S.project.id}/measurements/discard-suggestions`, { method: "POST" }); await reloadProject(); renderList(); dirty = true; } catch (e) { fail(e); } } }, "Alle verwerfen")),
         h("span", { class: "xs muted" }, "Die KI bekommt die entzerrten Fotos und deine Messungen. Übernommene Vorschläge erscheinen als normale Messung mit Herkunft „KI“."));
-    }
+    }    renderModelDims();
+  }
+
+  // Spec Stufe B §4: am 3D-Modell eingetragene Messschieberwerte, gelten für alle Aufträge des Projekts
+  function renderModelDims() {
+    const md = S.project.model_dims || [];
+    mdBox.hidden = !md.length;
+    if (!md.length) { mdBox.replaceChildren(); return; }
+    clear(mdBox,
+      h("div", { class: "card-head" }, h("h3", { id: "md-h" }, "Messschieber am Modell ", h("span", { style: { fontWeight: 400 } }, `(${md.length})`)),
+        h("span", { class: "xs muted" }, "am 3D-Modell eingetragen · gilt für alle Aufträge")),
+      h("ul", { class: "mlist" }, md.map(r => h("li", { class: "mdrow" },
+        h("span", { class: "mid" }, r.dim_id || "–"),
+        h("span", { class: "mdl" }, r.label, h("span", { class: "xs muted" }, ` · ${DIM_GROUP_TEXT[r.grp] || r.grp}${r.job_id ? ` · Auftrag ${r.job_id}` : ""}`)),
+        h("span", { class: "mval" }, `${num(r.value, 2)} mm`),
+        h("button", { class: "iconbtn", style: { width: "34px", height: "34px" }, "aria-label": `${r.label} löschen`, onclick: () => delModelDim(r) }, icon("x", 16))))),
+      h("span", { class: "xs muted" }, "Diese Werte gehen bei jedem Auftrag und jeder Änderung als verbindlich an die KI."));
+  }
+  async function delModelDim(r) {
+    if (!await confirmDlg("Messschieberwert löschen?", `${r.label}: ${num(r.value, 2)} mm geht danach nicht mehr an die KI.`, "Löschen", true)) return;
+    try { await api(`/api/projects/${S.project.id}/model-dims/${r.id}`, { method: "DELETE" }); await reloadProject(); renderList(); }
+    catch (e) { fail(e); }
   }
 
   async function manual() {

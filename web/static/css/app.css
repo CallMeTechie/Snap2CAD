@@ -203,6 +203,9 @@ dialog::backdrop{background:rgba(23,33,43,.4)}
 .mid.k{color:var(--claude)}
 .mval{font-family:var(--mono);font-weight:600;text-align:right;white-space:nowrap}
 .msub{grid-column:2/3;font-size:12.5px;color:var(--muted)}
+.mdims{display:flex;flex-direction:column;gap:8px}
+.mdrow{display:grid;grid-template-columns:40px minmax(0,1fr) auto auto;gap:10px;align-items:center;padding:6px 8px 6px 12px;border:1px solid var(--line);border-radius:var(--r2)}
+.mdl{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
 .munc{font-family:var(--mono);font-size:12.5px;color:var(--muted);text-align:right}
 .medit{grid-column:1/-1;display:flex;flex-direction:column;gap:10px;padding-top:10px;margin-top:6px;border-top:1px solid var(--line);cursor:default}
 .medit .grid2 .field>label{font-size:12.5px}
