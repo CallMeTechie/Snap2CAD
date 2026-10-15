@@ -5,6 +5,7 @@ Aufruf (nur durch Sandbox-Worker bzw. lokalen Fallback):
 
 Erwartet <rundir>/model.py. Der Code muss das fertige Teil der Variablen `part` zuweisen.
 Schreibt model.step, model.stl und result.json – oder error.json bei Fehlern.
+Optional: DIM_ANCHORS im Modellcode -> result.json["dim_anchors"] (Regel 13).
 Schutzschichten: eigener Benutzer je Lauf + kein Netz (Container), Ressourcenlimits, seccomp, Audit-Hook.
 """
 import json
@@ -126,6 +127,46 @@ def _model_error(exc):
             "traceback": "".join(traceback.format_exception(exc))[-4000:]}
 
 
+MAX_ANCHORS = 200
+
+
+def _dim_key(k) -> bool:
+    """Schluessel wie ^D[0-9]{1,4}$ (ohne re: der Name re ist unten der STEP-Re-Import). type(k) is str: keine
+    str-Unterklasse aus dem Modellcode; die Vertrauensgrenze ist trotzdem erst jobs._filter_anchors (Task 4)."""
+    return type(k) is str and 2 <= len(k) <= 5 and k[0] == "D" and k[1:].isascii() and k[1:].isdigit()
+
+
+def _anchor_point(p):
+    """Folge von drei Werten oder Objekt mit X, Y, Z (build123d Vector); jeder Wert float()-bar und endlich."""
+    if all(hasattr(p, a) for a in ("X", "Y", "Z")):
+        vals = (p.X, p.Y, p.Z)
+    elif isinstance(p, (list, tuple)) and len(p) == 3:
+        vals = p
+    else:
+        return None
+    out = [float(v) for v in vals]
+    return [round(v, 4) for v in out] if all(math.isfinite(v) for v in out) else None
+
+
+def _dim_anchors(d):
+    """DIM_ANCHORS (Regel 13) -> {id: [[x, y, z], [x, y, z]]}; ungueltige Eintraege werden uebersprungen."""
+    if not isinstance(d, dict):
+        return None
+    out = {}
+    for k, v in d.items():
+        if len(out) >= MAX_ANCHORS:
+            break
+        if not _dim_key(k) or not isinstance(v, (list, tuple)) or len(v) != 2:
+            continue
+        try:
+            a, b = _anchor_point(v[0]), _anchor_point(v[1])
+        except Exception:  # noqa: BLE001  float() eines fremden Objekts: Eintrag ueberspringen
+            continue
+        if a is not None and b is not None:
+            out[k] = [a, b]
+    return out
+
+
 with open("model.py", encoding="utf-8") as f:
     SOURCE = f.read()
 
@@ -190,7 +231,15 @@ try:
     }
     with open("outline.json", "w") as f:
         json.dump(outline, f)
-    _write("result.json", result)
 except BaseException as e:  # noqa: BLE001
     _write("error.json", {"stage": "export", **_model_error(e)})
     sys.exit(1)
+
+# 6) Ankerpunkte der Masse (Regel 13): eigener Schritt, laesst den Lauf nie scheitern
+try:
+    anchors = _dim_anchors(ns.get("DIM_ANCHORS"))
+    if anchors is not None:
+        result["dim_anchors"] = anchors
+except BaseException:  # noqa: BLE001
+    pass
+_write("result.json", result)

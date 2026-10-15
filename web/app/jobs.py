@@ -1,11 +1,15 @@
 """CAD-Auftraege: KI -> Code -> Sandbox -> Pruefung -> ggf. Selbstkorrektur."""
 from __future__ import annotations
 
+import math
 import os
+import re
 import shutil
 import threading
 import traceback
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import cv2
@@ -25,6 +29,9 @@ PROCESSES = {
     "other": "nicht festgelegt",
 }
 SOURCE_LABEL = {"claude": "KI", "auto": "automatisch", "user": "Foto", "manual": "manuell"}
+GROUP_TEXT = {"aussen": "außen", "bohrung": "Bohrung", "tiefe": "Tiefe", "fase": "Fase", "platte": "Platte",
+              "sonst": "sonstige"}
+MODEL_DIMS_HEADING = "## Messschieber am Modell (verbindlich)"
 
 
 def job_dir(job_id: int) -> Path:
@@ -60,6 +67,78 @@ def top_points(m: dict, d: dict, photos: dict) -> tuple[str, list]:
     tag = "(unten)" if (db.jload(ph["analysis"], {}) or {}).get("bottom_align") else \
         "(unten, nicht ausgerichtet, links-rechts gespiegelt)"
     return tag, to_top(ph, pts)
+
+
+# ------------------------------------------------------------------ Gelernte Werte (Spec Stufe B §4)
+
+def label_norm(label: str) -> str:
+    return " ".join(re.sub(r"[^\w]+", " ", label.casefold()).split())
+
+
+def _norm_of(d: dict) -> str:
+    """label_norm eines Masses; ohne Buchstaben/Ziffern im Label die D-Nummer (sonst ueberschreiben sie sich)."""
+    return label_norm(str(d.get("label") or "")) or str(d.get("id") or "").casefold()
+
+
+def learn_dims(project_id: int, job_id: int | None, dims: list[dict]):
+    """Je Mass ein Eintrag; gleiche label_norm im Projekt ersetzt den alten Wert (UPSERT)."""
+    for d in dims:
+        db.ex("""INSERT INTO model_dims(project_id,label,label_norm,grp,value,job_id,dim_id,note,created_at)
+                 VALUES (?,?,?,?,?,?,?,?,?)
+                 ON CONFLICT(project_id,label_norm) DO UPDATE SET label=excluded.label, grp=excluded.grp,
+                   value=excluded.value, job_id=excluded.job_id, dim_id=excluded.dim_id, note=excluded.note,
+                   created_at=excluded.created_at""",
+              (project_id, str(d.get("label") or d.get("id")), _norm_of(d), d.get("group") or "sonst", float(d["value"]),
+               job_id, d.get("id"), None, db.now()))
+
+
+def learned_dims(project_id: int) -> list[dict]:
+    return db.q("SELECT * FROM model_dims WHERE project_id=? ORDER BY id", (project_id,))
+
+
+def model_dims_section(project_id: int | None) -> str:
+    rows = learned_dims(project_id) if project_id else []
+    if not rows:
+        return ""
+    lines = [MODEL_DIMS_HEADING]
+    for r in rows:
+        where = f"gemessen am Auftrag {r['job_id']}" if r["job_id"] else "gemessen am Modell"
+        lines.append(f"- {r['label']}: {_fmt(r['value'], 3)} mm (Gruppe {GROUP_TEXT.get(r['grp'], r['grp'])}, {where})")
+    return "\n".join(lines)
+
+
+def _de_num(v: float) -> str:
+    return _fmt(v, 3).replace(".", ",")
+
+
+def reconcile_learned(meta: dict, project_id: int | None, job_id: int) -> dict | None:
+    """Nach jedem KI-Lauf (nicht param): gelernter Wert getroffen -> user_set; sonst Warnung, nie Zurueckschreiben."""
+    rows = learned_dims(project_id) if project_id else []
+    if not rows:
+        return None
+    dims = [d for d in meta.get("dimensions", []) if isinstance(d, dict) and isinstance(d.get("value"), (int, float))]
+    by_norm: dict[str, dict] = {}
+    for d in dims:
+        by_norm.setdefault(_norm_of(d), d)
+    by_id = {d.get("id"): d for d in dims}
+    hit, far = 0, []
+    for r in rows:
+        d = by_norm.get(r["label_norm"])
+        if d is None and r["job_id"] == job_id and r["dim_id"]:
+            d = by_id.get(r["dim_id"])       # Label umbenannt, D-Nummer im selben Auftrag stabil (Regel 12)
+        if d is None:
+            if r["job_id"] == job_id:        # nachgemessenes Mass dieses Auftrags fehlt in der neuen Antwort
+                far.append(f"{r['label']}: {_de_num(r['value'])} → fehlt")
+            continue
+        if abs(d["value"] - r["value"]) <= 0.01 + 1e-9:
+            d["user_set"], d["assumed"] = True, False
+            hit += 1
+        else:
+            far.append(f"{r['label']}: {_de_num(r['value'])} → {_de_num(d['value'])}")
+    label = "Messschieber am Modell übernommen"
+    if far:
+        return {"id": "model_dims", "label": label, "state": "warn", "detail": "; ".join(far)}
+    return {"id": "model_dims", "label": label, "state": "ok", "detail": f"{hit} übernommen"} if hit else None
 
 
 def measurement_table(project_id: int, part_id: int | None = None) -> tuple[str, list[dict]]:
@@ -178,6 +257,9 @@ def build_initial_message(project: dict, request_text: str, options: dict) -> li
     teile = cad_text(project["id"], options.get("part_id"))
     if teile:
         parts[parts.index("## Messwerte") + 1:parts.index("## Messwerte") + 1] = [teile]
+    sec = model_dims_section(project["id"])   # Spec §4: Erstauftrag und Pruefung bekommen den Abschnitt nach der Tabelle
+    if sec:
+        parts += ["", sec]
     if not chk:
         parts += ["", "## Wunsch des Nutzers", request_text.strip() or "Bauteil möglichst originalgetreu nachbilden."]
     if options.get("check_items"):
@@ -208,6 +290,105 @@ def build_initial_message(project: dict, request_text: str, options: dict) -> li
 
 def _de(v: float, nd: int = 2) -> str:
     return f"{v:.{nd}f}".replace(".", ",")
+
+
+# ------------------------------------------------------------------ Masse am Modell (Spec Stufe B §1, §2)
+
+def _meas_ids(project_id: int | None) -> set[str]:
+    """M-Nummern der uebernommenen Messungen: nur diese duerfen als ref stehen."""
+    if not project_id:
+        return set()
+    return {f"M{r['seq']}" for r in db.q("SELECT seq FROM measurements WHERE project_id=? AND accepted=1", (project_id,))}
+
+
+def _const_re(var: str) -> re.Pattern:
+    return re.compile(rf"^{re.escape(var)}\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*(#.*)?$", re.M)
+
+
+def _add_note(note: str | None, add: str) -> str:
+    return note if note and add in note else (f"{note}; {add}" if note else add)
+
+
+def mark_editable(meta: dict, code: str):
+    """editable nur bei genau einer Zeile `VAR =` im Muster der Spec und genau einem Mass mit dieser var;
+    Codewert gilt ab Abweichung > 0,01."""
+    dims = [d for d in meta.get("dimensions", []) if isinstance(d, dict)]
+    used = Counter(d.get("var") for d in dims if d.get("var"))
+    for d in dims:
+        var, value = d.get("var"), d.get("value")
+        d["editable"] = False
+        if not isinstance(var, str) or not ai._VAR.fullmatch(var) or not isinstance(value, (int, float)):
+            continue
+        if used[var] > 1 or len(re.findall(rf"^{re.escape(var)}\s*=", code, re.M)) > 1:
+            d["note"] = _add_note(d.get("note"), "Konstante mehrfach belegt")
+            continue
+        m = _const_re(var).search(code)
+        if not m:
+            continue
+        d["editable"] = True
+        v = float(m.group(1))
+        if abs(v - value) > 0.01:
+            d["value"] = v
+            d["note"] = _add_note(d.get("note"), "Wert aus dem Code")
+
+
+def _filter_anchors(result: dict | None):
+    """dim_anchors serverseitig erneut filtern (Spec Regel 13): der Laeufer teilt den Prozess mit dem Modellcode und
+    ist keine Vertrauensgrenze. Nur gefilterte Eintraege werden gespeichert und an den Browser geliefert."""
+    if not isinstance(result, dict) or "dim_anchors" not in result:
+        return
+    raw = result.pop("dim_anchors")
+    if not isinstance(raw, dict):
+        return
+    out = {}
+    for k, v in raw.items():
+        if len(out) >= ai.MAX_DIMS:
+            break
+        if type(k) is not str or not ai._DIM_ID.fullmatch(k) or not isinstance(v, (list, tuple)) or len(v) != 2:
+            continue
+        a, b = ai.point3(v[0]), ai.point3(v[1])
+        if a and b:
+            out[k] = [[round(x, 4) for x in a], [round(x, 4) for x in b]]
+    result["dim_anchors"] = out
+
+
+def _stretch(a: list[float], b: list[float], value: float) -> tuple[list[float], list[float]]:
+    """Anker entlang a->b auf die neue Laenge strecken (Rueckfall ohne DIM_ANCHORS-Eintrag)."""
+    n = math.dist(a, b)
+    return (a, b) if n <= 1e-9 else (a, [a[i] + (b[i] - a[i]) * value / n for i in range(3)])
+
+
+def _apply_anchors(meta: dict, result: dict | None, changed: set[str] | None = None):
+    """Je Mass zuerst dim_anchors (Regel 13), sonst a/b; gelten nur bei Abstand = Wert ± max(0,1 mm; 1 %).
+    changed (Param-Lauf): geaendertes Mass ohne Eintrag wird gestreckt, jedes andere ohne Eintrag ist anchors_stale."""
+    da = (result or {}).get("dim_anchors")
+    da = da if isinstance(da, dict) else {}
+    for d in meta.get("dimensions", []):
+        if not isinstance(d, dict):
+            continue
+        value, src = d.get("value"), da.get(d.get("id"))
+        a = b = None
+        if isinstance(src, (list, tuple)) and len(src) == 2:
+            a, b = ai.point3(src[0]), ai.point3(src[1])
+        stale = False
+        if not (a and b):
+            a, b = ai.point3(d.get("a")), ai.point3(d.get("b"))
+            if changed is not None and a and b:
+                if d.get("id") in changed:
+                    a, b = _stretch(a, b, value)
+                    stale = d.get("anchors_stale") is True
+                else:
+                    stale = True
+        ok = bool(d.get("var") and isinstance(value, (int, float)) and a and b
+                  and abs(math.dist(a, b) - value) <= max(0.1, 0.01 * value))
+        d.pop("anchors_stale", None)
+        if ok:
+            d["a"], d["b"] = [round(x, 4) for x in a], [round(x, 4) for x in b]
+            if stale:
+                d["anchors_stale"] = True
+        else:
+            d.pop("a", None)
+            d.pop("b", None)
 
 
 def compute_checks(result: dict, meta: dict, project_id: int | None) -> list[dict]:
@@ -244,15 +425,27 @@ def compute_checks(result: dict, meta: dict, project_id: int | None) -> list[dic
     if project_id:
         crit = db.q("SELECT seq,label,value,caliper,unc FROM measurements WHERE project_id=? AND accepted=1 AND critical=1",
                     (project_id,))
-        dims = {str(d.get("id", "")).upper(): d for d in meta.get("dimensions", []) if isinstance(d, dict)}
-        missing = [f"M{c['seq']}" for c in crit if f"M{c['seq']}" not in dims]
+        # Stufe B: Modellmasse (D-Nummern) zeigen ueber ref auf die Messung und tragen value; alte Versionen: id = M-Nummer
+        by_m: dict[str, tuple[dict, str]] = {}
+        for d in meta.get("dimensions", []):
+            if not isinstance(d, dict):
+                continue
+            did = str(d.get("id", "")).upper()
+            if did.startswith("D"):
+                if d.get("ref"):
+                    by_m.setdefault(str(d["ref"]).upper(), (d, "value"))
+            else:
+                by_m.setdefault(did, (d, "nominal"))
+        missing = [f"M{c['seq']}" for c in crit if f"M{c['seq']}" not in by_m]
         far = []
         for c in crit:
-            d = dims.get(f"M{c['seq']}")
+            hit = by_m.get(f"M{c['seq']}")
             ref = c["caliper"] if c["caliper"] is not None else c["value"]
             try:
-                if d and ref is not None and abs(float(d.get("nominal")) - ref) > max(2 * (c["unc"] or 0.5), 0.3):
-                    far.append(f"M{c['seq']} {_de(ref)} → {_de(float(d['nominal']))}")
+                if hit and ref is not None:
+                    v = float(hit[0].get(hit[1]))
+                    if abs(v - ref) > max(2 * (c["unc"] or 0.5), 0.3):
+                        far.append(f"M{c['seq']} {_de(ref)} → {_de(v)}")
             except (TypeError, ValueError):
                 pass
         if crit:
@@ -286,11 +479,15 @@ def _check_quota(user: dict):
         raise HTTPException(429, f"Monatskontingent erreicht ({q} CAD-Generierungen). Bitte den Administrator fragen.")
 
 
+def _check_sandbox():
+    if not sandbox.worker_alive():
+        raise HTTPException(503, "Die CAD-Sandbox läuft nicht (Dienst „sandbox“ prüfen).")
+
+
 def _check_ready():
     if not settings.ai_enabled():
         raise HTTPException(503, "KI ist nicht eingerichtet (Verwaltung → Einstellungen).")
-    if not sandbox.worker_alive():
-        raise HTTPException(503, "Die CAD-Sandbox läuft nicht (Dienst „sandbox“ prüfen).")
+    _check_sandbox()
 
 
 def create(user: dict, project: dict | None, name: str, request_text: str, options: dict) -> int:
@@ -330,13 +527,185 @@ def _iterate_locked(user: dict, job: dict, text: str):
     msgs = db.jload(job["messages"], [])
     # Gespraech auf die aktuelle Version zurueckschneiden ist nicht noetig: Claude sieht den Verlauf.
     cur = db.q1("SELECT code FROM job_versions WHERE job_id=? AND version=?", (job["id"], base))
+    sec = model_dims_section(job["project_id"])   # Spec §4: gelernte Werte an jeden Aenderungswunsch
     msgs.append({"role": "user", "content": [{"type": "text", "text":
-                 f"Änderungswunsch zu Version {base}:\n{text.strip()}\n\n"
+                 f"Änderungswunsch zu Version {base}:\n{text.strip()}\n\n" + (f"{sec}\n\n" if sec else "") +
                  "Ausgangspunkt ist dieser Code:\n```python\n" + (cur["code"] if cur else "") + "```\n"
                  "Antworte wieder im gleichen Format (JSON-Block + vollständiger Python-Block)."}]})
     _set(job["id"], messages=db.jdump(msgs), status="queued", error=None)
     log(job["id"], f"Änderungswunsch: {text.strip()[:200]}")
     _submit(job["id"], "iterate", text)
+
+
+# ------------------------------------------------------------------ Parametrischer Neuaufbau (Spec Stufe B §2)
+
+PARAM_MAX = 20
+
+
+def set_const(code: str, var: str, value: float) -> tuple[str, int]:
+    """Zahl der Zeile `VAR = alt` ersetzen; Abstaende und Kommentar bleiben."""
+    if not isinstance(var, str) or not ai._VAR.fullmatch(var):
+        return code, 0
+    pat = re.compile(rf"^({re.escape(var)}\s*=\s*)([0-9]+(?:\.[0-9]+)?)(\s*(?:#.*)?)$", re.M)
+    return pat.subn(lambda m: m.group(1) + _fmt(value, 3) + m.group(3), code, count=1)
+
+
+def _param_limits(user: dict):
+    """Unter _lock: hoechstens ein laufender Neuaufbau je Nutzer und PARAM_PER_HOUR je Stunde (Pool ist geteilt)."""
+    busy = db.q1("SELECT COUNT(*) n FROM job_versions v JOIN jobs j ON j.id=v.job_id WHERE j.user_id=? "
+                 "AND v.trigger='param' AND v.status='running' AND j.status IN ('queued','running')", (user["id"],))
+    if busy["n"]:
+        raise HTTPException(429, "Es läuft bereits ein Neuaufbau. Bitte warten.")
+    since = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
+    hour = db.q1("SELECT COUNT(*) n FROM job_versions v JOIN jobs j ON j.id=v.job_id WHERE j.user_id=? "
+                 "AND v.trigger='param' AND v.created_at>=?", (user["id"], since))
+    if hour["n"] >= config.PARAM_PER_HOUR:
+        raise HTTPException(429, f"Höchstens {config.PARAM_PER_HOUR} Neuaufbauten je Stunde – "
+                                 "bitte später erneut versuchen.")
+
+
+def param(user: dict, job: dict, values: list[dict], base: int | None = None) -> dict:
+    """Konstanten der aktuellen Version ersetzen und ohne KI neu bauen. Pruefen, Lernen, Version anlegen und
+    status=queued in einem Block unter _lock; die Sandbox laeuft danach im Pool (Abbrechen wie bisher)."""
+    if auth.quota_of(user) == 0:
+        raise HTTPException(403, "CAD ist für dieses Konto gesperrt.")
+    _check_sandbox()
+    with _lock:
+        job = db.q1("SELECT * FROM jobs WHERE id=?", (job["id"],))
+        if not job or job["status"] in ("queued", "running"):
+            raise HTTPException(409, "Der Auftrag läuft noch.")
+        _param_limits(user)
+        cur = job["current_version"]
+        bv = db.q1("SELECT code, meta FROM job_versions WHERE job_id=? AND version=?", (job["id"], cur)) if cur else None
+        if not bv:
+            raise HTTPException(409, "Es gibt noch keine Version, auf der aufgebaut werden kann.")
+        if base is not None and base != cur:
+            raise HTTPException(409, f"Version {base} ist nicht mehr aktuell (aktuell: Version {cur}) – bitte neu laden.")
+        code, meta = bv["code"] or "", db.jload(bv["meta"], {}) or {}
+        dims = {d.get("id"): d for d in meta.get("dimensions", []) if isinstance(d, dict)}
+        changed: dict[str, float] = {}
+        for it in values:
+            d, new = dims.get(it["id"]), round(float(it["value"]), 3)
+            if not d or not d.get("editable") or not d.get("var"):
+                raise HTTPException(400, f"Maß {it['id']} ist nicht editierbar")
+            if new <= 0:
+                raise HTTPException(400, f"Maß {it['id']}: Der Wert muss größer als 0 sein.")
+            code, n = set_const(code, d["var"], new)
+            if not n:
+                raise HTTPException(400, f"Maß {it['id']} ist nicht editierbar")
+            d.update(value=new, assumed=False, user_set=True, derived_from=None)   # gleicher Wert: Annahme bestaetigt
+            changed[d["id"]] = new
+        req = ", ".join(f"{k} = {_fmt(v, 3)} mm" for k, v in changed.items())
+        meta["param_ids"] = list(changed)  # einzige Quelle fuer „geaendert“ (_run_param, pending_param, cad.js)
+        meta.pop("bbox_expected", None)   # Erwartung der KI galt fuer die alten Werte: Hüllquader-Pruefung entfaellt
+        if job["project_id"]:                       # §2.4: gemessen ist gemessen, unabhaengig vom Erfolg
+            cnt = Counter(_norm_of(x) for x in dims.values())   # gleiche Bezeichnung zweimal: D-Nummer anhaengen
+            learn_dims(job["project_id"], job["id"],
+                       [{**dims[k], "label": f"{dims[k].get('label')} ({k})"} if cnt[_norm_of(dims[k])] > 1 else dims[k]
+                        for k in changed])
+        version = _new_version(job["id"], "param", req, "", {})
+        db.ex("UPDATE job_versions SET code=?, meta=? WHERE job_id=? AND version=?",
+              (code, db.jdump(meta), job["id"], version))
+        _set(job["id"], status="queued", error=None)
+        log(job["id"], f"Neuaufbau mit {req} …")
+        db.audit("cad_param", f"Auftrag {job['id']}: {req}"[:500], user_id=user["id"], actor=user["username"])
+        _submit(job["id"], "param", str(version))   # der Pool-Lauf baut genau diese Version
+    return {"version": version} if job["project_id"] else {"version": version, "learned": False}
+
+
+def _run_param(job_id: int, version: int, ev: threading.Event):
+    """Sandbox-Lauf genau der Param-Version `version`: kein KI-Aufruf, kein Autofix; Fehler -> failed, Basis bleibt."""
+    with _lock:   # Pruefen und status=running atomar: ein cancel() dazwischen wird nicht ueberschrieben
+        v = db.q1("SELECT * FROM job_versions WHERE job_id=? AND version=?", (job_id, version))
+        job = db.q1("SELECT * FROM jobs WHERE id=?", (job_id,))
+        if not job:
+            return
+        if not v or v["status"] != "running":       # Version wurde zwischenzeitlich beendet: Auftrag nicht queued lassen
+            if _current(job_id, ev):
+                _set(job_id, status="failed", error="Neuaufbau abgebrochen.")
+            return
+        if job["status"] == "cancelled" or ev.is_set():
+            db.ex("UPDATE job_versions SET status='cancelled' WHERE job_id=? AND version=?", (job_id, version))
+            return
+        _set(job_id, status="running")
+    code, req = v["code"] or "", v["request_text"] or ""
+    meta = db.jload(v["meta"], {}) or {}
+    vdir = version_dir(job_id, version)
+    vdir.mkdir(parents=True, exist_ok=True)
+    (vdir / "model.py").write_text(code, encoding="utf-8")
+    try:
+        res = sandbox.run(code, vdir, cancel=ev)
+    except sandbox.Cancelled:                    # nur diese Version; _run_safe fasst Param-Versionen nicht an
+        db.ex("UPDATE job_versions SET status='cancelled' WHERE job_id=? AND version=?", (job_id, version))
+        log(job_id, "Abgebrochen", "warn")
+        return
+    if not db.q1("SELECT id FROM jobs WHERE id=?", (job_id,)):
+        shutil.rmtree(job_dir(job_id), ignore_errors=True)
+        return
+    err = None if res["ok"] else res["error"]
+    result = res.get("result")
+    _filter_anchors(result)                     # Spec Regel 13: nur gefilterte Anker speichern
+    if result:
+        _apply_anchors(meta, result, changed=set(meta.get("param_ids") or []))
+    checks = compute_checks(result, meta, job["project_id"]) if result else []
+    failed = err is not None or any(c["state"] == "fail" for c in checks)
+    why = ""
+    if err:
+        where = f" (Zeile {err['line']})" if err.get("line") else ""
+        why = f"{err.get('type')}{where}: {str(err.get('message'))[:200]}"
+    elif failed:
+        why = "Prüfung nicht bestanden – " + "; ".join(c["label"] for c in checks if c["state"] == "fail")
+    # Ein Block unter _lock (cancel() setzt ev unter _lock): Abbruch pruefen, Version schreiben und bei Erfolg
+    # Gespraechszeile, done und current_version – eine abgebrochene Version wird nie ok ohne aktuell zu werden.
+    with _lock:
+        if not _current(job_id, ev):
+            db.ex("UPDATE job_versions SET status='cancelled' WHERE job_id=? AND version=?", (job_id, version))
+            log(job_id, "Abgebrochen", "warn")
+            return
+        db.ex("UPDATE job_versions SET status=?, error=?, result=?, checks=?, seconds=?, meta=? "
+              "WHERE job_id=? AND version=?",
+              ("failed" if failed else "ok", db.jdump(err) if err else None, db.jdump(result) if result else None,
+               db.jdump(checks), res.get("seconds"), db.jdump(meta), job_id, version))
+        if failed:
+            _set(job_id, status="failed", error=f"Neuaufbau mit {req} fehlgeschlagen – {why}")
+        else:   # Gespraechszeile nur bei Erfolg: spaetere KI-Aenderungen kennen den Stand
+            row = db.q1("SELECT messages FROM jobs WHERE id=?", (job_id,))
+            msgs = db.jload(row["messages"], []) if row else []
+            msgs.append({"role": "user", "content": [{"type": "text",
+                                                      "text": f"Parametrisch geändert: {req} (Version {version})"}]})
+            _set(job_id, messages=db.jdump(msgs), status="done", current_version=version, error=None)
+    if failed:
+        log(job_id, f"Version {version}: Neuaufbau mit {req} fehlgeschlagen – {why}", "warn")
+        return
+    bb = result["bbox"]
+    log(job_id, f"Version {version} fertig (Neuaufbau ohne KI): {_de(bb[0])} × {_de(bb[1])} × {_de(bb[2])} mm, "
+                f"{_de(res['seconds'], 1)} s", "ok")
+
+
+def pending_param(job_id: int) -> list[dict]:
+    """§5: Masse aus erfolgreichen Param-Versionen (meta["param_ids"]) nach der letzten erfolgreichen KI-Version."""
+    vs = db.q("SELECT version, trigger, status, meta FROM job_versions WHERE job_id=? ORDER BY version", (job_id,))
+    job = db.q1("SELECT current_version FROM jobs WHERE id=?", (job_id,))
+    cur = (job or {}).get("current_version") or 0
+    # Bezug: juengste erfolgreiche KI-Version, die aktuell ist oder war (version <= current_version); eine ok-Version,
+    # die durch einen Abbruch nie aktuell wurde, setzt die Liste nicht zurueck
+    ai_ok = [v for v in vs if v["trigger"] != "param" and v["status"] == "ok" and v["version"] <= cur]
+    if not ai_ok:
+        return []
+    last = ai_ok[-1]
+    old = {d.get("id"): d for d in (db.jload(last["meta"], {}) or {}).get("dimensions", []) if isinstance(d, dict)}
+    out: dict[str, dict] = {}
+    for v in vs:
+        if v["trigger"] != "param" or v["status"] != "ok" or v["version"] < last["version"]:
+            continue
+        meta = db.jload(v["meta"], {}) or {}
+        dims = {d.get("id"): d for d in meta.get("dimensions", []) if isinstance(d, dict)}
+        for i in meta.get("param_ids") or []:
+            if i in dims:
+                o = old.get(i) or {}
+                out[i] = {"id": i, "label": dims[i].get("label"), "value": dims[i].get("value"), "old": o.get("value"),
+                          "old_assumed": bool(o.get("assumed"))}
+    return list(out.values())
 
 
 def cancel(job: dict):
@@ -348,6 +717,9 @@ def cancel(job: dict):
         if cur and cur["status"] in ("queued", "running"):
             _set(job["id"], status="cancelled", error="Abgebrochen")
             log(job["id"], "Abbruch angefordert", "warn")
+        # Neuaufbau noch in der Warteschlange: die Version nicht running lassen (_run_param prueft den Status)
+        db.ex("UPDATE job_versions SET status='cancelled' WHERE job_id=? AND status='running' AND trigger='param'",
+              (job["id"],))
 
 
 def _submit(job_id: int, trigger: str, request_text: str):
@@ -366,7 +738,8 @@ def _run_safe(job_id, trigger, request_text, ev):
     try:
         _run(job_id, trigger, request_text, ev)
     except (ai.Cancelled, sandbox.Cancelled):
-        db.ex("UPDATE job_versions SET status='cancelled' WHERE job_id=? AND status='running'", (job_id,))
+        db.ex("UPDATE job_versions SET status='cancelled' WHERE job_id=? AND status='running' AND trigger!='param'",
+              (job_id,))
         log(job_id, "Abgebrochen", "warn")
     except ai.AIError as e:
         if _current(job_id, ev):
@@ -374,6 +747,12 @@ def _run_safe(job_id, trigger, request_text, ev):
         log(job_id, str(e), "error")
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
+        if trigger == "param":   # nur die eigene Param-Version; ein paralleler KI-Lauf bleibt unberuehrt
+            db.ex("UPDATE job_versions SET status='failed' WHERE job_id=? AND version=? AND status='running'",
+                  (job_id, int(request_text)))
+        else:
+            db.ex("UPDATE job_versions SET status='failed' WHERE job_id=? AND status='running' AND trigger!='param'",
+                  (job_id,))
         if _current(job_id, ev):
             _set(job_id, status="failed", error=f"Interner Fehler: {type(e).__name__}: {e}")
         log(job_id, f"Interner Fehler: {type(e).__name__}: {e}", "error")
@@ -393,10 +772,14 @@ def _new_version(job_id: int, trigger: str, request_text: str, text: str, usage:
 
 
 def _run(job_id: int, trigger: str, request_text: str, ev: threading.Event):
-    job = db.q1("SELECT * FROM jobs WHERE id=?", (job_id,))
-    if not job or job["status"] == "cancelled" or ev.is_set():
+    if trigger == "param":   # Spec Stufe B §2: Neuaufbau ohne KI und ohne Autofix; request_text = Versionsnummer
+        _run_param(job_id, int(request_text), ev)
         return
-    _set(job_id, status="running")
+    with _lock:   # Pruefen und status=running atomar: ein cancel() dazwischen wird nicht ueberschrieben
+        job = db.q1("SELECT * FROM jobs WHERE id=?", (job_id,))
+        if not job or job["status"] == "cancelled" or ev.is_set():
+            return
+        _set(job_id, status="running")
     msgs = db.jload(job["messages"], [])
     fixes = 0
     while True:
@@ -416,7 +799,7 @@ def _run(job_id: int, trigger: str, request_text: str, ev: threading.Event):
         vdir.mkdir(parents=True, exist_ok=True)
         (vdir / "claude.txt").write_text(text, encoding="utf-8")
         try:
-            meta, code = ai.parse_cad(text)
+            meta, code = ai.parse_cad(text, _meas_ids(job["project_id"]))
         except ai.AIError as e:
             meta, code = {}, ""
             err = {"stage": "antwort", "type": "FormatError", "message": str(e), "line": None, "code": None}
@@ -425,6 +808,12 @@ def _run(job_id: int, trigger: str, request_text: str, ev: threading.Event):
             log(job_id, f"Version {version}: Antwort im falschen Format", "warn")
             result, checks = None, []
         else:
+            mark_editable(meta, code)
+            legacy = sum(1 for d in meta["dimensions"] if not str(d.get("id", "")).startswith("D"))
+            if legacy:   # Antwort im alten Format (M-Nummern): Tabelle bleibt, Werte am Modell nicht aenderbar
+                n = "1 Maß" if legacy == 1 else f"{legacy} Maße"
+                log(job_id, f"Version {version}: {n} ohne D-Nummer (altes Format) – am Modell nicht änderbar", "warn")
+            learned_chk = reconcile_learned(meta, job["project_id"], job_id)   # Spec §4: nur nach KI-Laeufen
             (vdir / "model.py").write_text(code, encoding="utf-8")
             db.ex("UPDATE job_versions SET code=?, meta=? WHERE job_id=? AND version=?",
                   (code, db.jdump(meta), job_id, version))
@@ -435,11 +824,17 @@ def _run(job_id: int, trigger: str, request_text: str, ev: threading.Event):
                 return
             err = None if res["ok"] else res["error"]
             result = res.get("result")
+            _filter_anchors(result)                 # Spec Regel 13: nur gefilterte Anker speichern
+            if result:
+                _apply_anchors(meta, result)
             checks = compute_checks(result, meta, job["project_id"]) if result else []
+            if result and learned_chk:
+                checks.append(learned_chk)
             failed = err is not None or any(c["state"] == "fail" for c in checks)
-            db.ex("UPDATE job_versions SET status=?, error=?, result=?, checks=?, seconds=? WHERE job_id=? AND version=?",
+            db.ex("UPDATE job_versions SET status=?, error=?, result=?, checks=?, seconds=?, meta=? "
+                  "WHERE job_id=? AND version=?",
                   ("failed" if failed else "ok", db.jdump(err) if err else None, db.jdump(result) if result else None,
-                   db.jdump(checks), res.get("seconds"), job_id, version))
+                   db.jdump(checks), res.get("seconds"), db.jdump(meta), job_id, version))
             if not failed:
                 warn = sum(1 for c in checks if c["state"] == "warn")
                 bb = result["bbox"]
@@ -507,4 +902,5 @@ def job_public(job: dict, detail: bool = False) -> dict:
             "seconds": v["seconds"], "created_at": v["created_at"], "files": version_files(job["id"], v["version"]),
         } for v in vs]
         out["log"] = db.q("SELECT ts,level,msg FROM job_log WHERE job_id=? ORDER BY id", (job["id"],))
+        out["pending_param"] = pending_param(job["id"])
     return out

@@ -42,6 +42,7 @@ SANDBOX_UID = _int("SANDBOX_UID", 10002)
 APP_UID = _int("APP_UID", 10001)
 MAX_AUTOFIX = _int("MAX_AUTOFIX", 2)
 MAX_CONCURRENT_JOBS = _int("MAX_CONCURRENT_JOBS", 2)
+PARAM_PER_HOUR = _int("PARAM_PER_HOUR", 30)   # Neuaufbauten ohne KI je Nutzer und Stunde (Spec Stufe B §2.1)
 MAX_UPLOAD_MB = _int("MAX_UPLOAD_MB", 25)
 DEFAULT_QUOTA = os.environ.get("DEFAULT_QUOTA", "20")
 

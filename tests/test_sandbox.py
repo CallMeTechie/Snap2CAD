@@ -87,3 +87,48 @@ def test_collect_ignores_symlinks_and_fifos(tmp_path):
     assert res["ok"]
     assert not (tmp_path / "dest" / "model.step").exists()
     assert not (tmp_path / "dest" / "model.stl").exists()
+
+
+def test_dim_anchors_tupel_vector_und_ungueltige(tmp_path):
+    code = ("class K(str):\n    pass\n"
+            "B = 10\npart = Box(B, B, B)\nDIM_ANCHORS = {\n"
+            "    'D1': ((0, 0, 0), (0, 0, B)),\n"
+            "    'D2': (Vector(0, 0, 0), Vector(1.23456, 0, 0)),\n"
+            "    'D3': ((0, 0, float('nan')), (0, 0, 1)),\n"
+            "    'M1': ((0, 0, 0), (1, 0, 0)),\n"
+            "    'D4': ((0, 0, 0),),\n"
+            "    'D5': ((0, 0, 0), ('x', 0, 0)),\n"
+            "    'D12345': ((0, 0, 0), (1, 0, 0)),\n"
+            "    7: ((0, 0, 0), (1, 0, 0)),\n"
+            "    K('D7'): ((0, 0, 0), (1, 0, 0)),\n"
+            "    'D6': [[0, 0, 0], [0, 2, 0]],\n"
+            "}\n")
+    r = run(code, tmp_path)
+    assert r["ok"], r
+    assert r["result"]["dim_anchors"] == {"D1": [[0, 0, 0], [0, 0, 10]], "D2": [[0, 0, 0], [1.2346, 0, 0]],
+                                          "D6": [[0, 0, 0], [0, 2, 0]]}
+    assert not (tmp_path / "out" / "error.json").exists()
+
+
+@pytest.mark.parametrize("anchors", ["[1, 2]", "None", "'D1'"])
+def test_dim_anchors_kein_dict(tmp_path, anchors):
+    r = run(f"part = Box(5, 5, 5)\nDIM_ANCHORS = {anchors}\n", tmp_path)
+    assert r["ok"], r
+    assert "dim_anchors" not in r["result"]
+
+
+def test_dim_anchors_fehlt_oder_wirft(tmp_path):
+    r = run(OK, tmp_path)
+    assert r["ok"] and "dim_anchors" not in r["result"]
+    code = ("class X(dict):\n    def items(self):\n        raise RuntimeError('kaputt')\n"
+            "part = Box(5, 5, 5)\nDIM_ANCHORS = X(D1=((0, 0, 0), (1, 0, 0)))\n")
+    r = run(code, tmp_path / "zwei")
+    assert r["ok"], r
+    assert "dim_anchors" not in r["result"] and not (tmp_path / "zwei" / "out" / "error.json").exists()
+
+
+def test_dim_anchors_hoechstens_200(tmp_path):
+    code = "part = Box(5, 5, 5)\nDIM_ANCHORS = {f'D{i}': ((0, 0, 0), (i, 0, 0)) for i in range(1, 251)}\n"
+    r = run(code, tmp_path)
+    assert r["ok"], r
+    assert len(r["result"]["dim_anchors"]) == 200 and r["result"]["dim_anchors"]["D200"] == [[0, 0, 0], [200, 0, 0]]

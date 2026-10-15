@@ -20,8 +20,8 @@ def _r(v):
     return round(v, 2) if isinstance(v, float) else v
 
 
-def cad_hash(project: dict, photo_ids: list[int] | None, part_id: int | None) -> str:
-    """Pruefsumme des Projektstands; photo_ids=None = alle Fotos zum Zeitpunkt der Berechnung (Spec §2.1)."""
+def hash_blob(project: dict, photo_ids: list[int] | None, part_id: int | None) -> dict:
+    """Inhalt der Pruefsumme; photo_ids=None = alle Fotos zum Zeitpunkt der Berechnung (Spec §2.1)."""
     pid = project["id"]
     photos = [p for p in db.q("SELECT * FROM photos WHERE project_id=? ORDER BY id", (pid,))
               if photo_ids is None or p["id"] in photo_ids]
@@ -42,8 +42,16 @@ def cad_hash(project: dict, photo_ids: list[int] | None, part_id: int | None) ->
                    d.get("holes"), d.get("same_as")])
     mat = ([project.get("color"), project.get("material"), project.get("transparent"), project.get("finish")]
            if project.get("material_user") else None)
-    blob = json.dumps({"photos": al, "meas": ms, "parts": ps, "part_id": part_id, "material": mat}, sort_keys=True,
-                      ensure_ascii=False)
+    blob = {"photos": al, "meas": ms, "parts": ps, "part_id": part_id, "material": mat}
+    md = [[r["label_norm"], _r(r["value"])] for r in jobs.learned_dims(pid)]
+    if md:   # Stufe B §4: neuer oder geloeschter Messschieberwert macht die Pruefung veraltet; ohne Werte Hash wie bisher
+        blob["model_dims"] = md
+    return blob
+
+
+def cad_hash(project: dict, photo_ids: list[int] | None, part_id: int | None) -> str:
+    """Pruefsumme des Projektstands (Spec §2.1)."""
+    blob = json.dumps(hash_blob(project, photo_ids, part_id), sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(blob.encode()).hexdigest()
 
 

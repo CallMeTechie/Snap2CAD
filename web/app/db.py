@@ -102,6 +102,12 @@ CREATE TABLE IF NOT EXISTS parts (
   data TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'auto',
   scale REAL NOT NULL DEFAULT 1.0, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS model_dims(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  label TEXT NOT NULL, label_norm TEXT NOT NULL,
+  grp TEXT NOT NULL, value REAL NOT NULL, job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL, dim_id TEXT,
+  note TEXT, created_at TEXT NOT NULL,
+  UNIQUE(project_id, label_norm));
 CREATE INDEX IF NOT EXISTS ix_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS ix_photos_project ON photos(project_id);
 CREATE INDEX IF NOT EXISTS ix_meas_project ON measurements(project_id);
