@@ -84,6 +84,8 @@ def measurement_table(project_id: int, part_id: int | None = None) -> tuple[str,
     return "\n".join(lines), rows
 
 
+CHECK_ITEMS_HEADING = "## Hinweise der Prüfung (nicht verbindlich – Umriss, Unteransicht und Regel 9 gehen vor)"
+CAD_MAX_TOKENS = 32000   # Opus denkt mit; 16000 schnitt die Antwort ab (A8)
 TRANSPARENT_TEXT = {0: "nein", 1: "teilweise", 2: "ja"}
 
 
@@ -169,7 +171,7 @@ def build_initial_message(project: dict, request_text: str, options: dict) -> li
     if not chk:
         parts.append(f"Fertigung: {proc}" + (f", Material: {options['material']}" if options.get("material") else ""))
     ml = material_line(project)
-    if ml and (not chk or project.get("material_user")):   # KI-Schaetzung nicht als Tatsache zurueckfuettern
+    if ml:   # auch die KI-Schaetzung: Pruefung und Konstruktion brauchen sie (Regel 9); Kantenhinweise nur aus Handeingabe
         parts.append(ml)
     parts += [f"Korrekturfaktoren aus dem Kontrollmaß sind bereits in den Werten enthalten (X {fx:.4f}).",
               "", "## Messwerte", table if rows else "(keine Messwerte – nur aus den Fotos ableiten)"]
@@ -179,7 +181,7 @@ def build_initial_message(project: dict, request_text: str, options: dict) -> li
     if not chk:
         parts += ["", "## Wunsch des Nutzers", request_text.strip() or "Bauteil möglichst originalgetreu nachbilden."]
     if options.get("check_items"):
-        parts += ["", "## Offene Punkte der Prüfung", *[f"- [{i['severity']}] {i['text']}" for i in options["check_items"]]]
+        parts += ["", CHECK_ITEMS_HEADING, *[f"- [{i['severity']}] {i['text']}" for i in options["check_items"]]]
     if not chk:
         if options.get("process") == "cnc":
             cd = options.get("cutter_d")
@@ -403,7 +405,7 @@ def _run(job_id: int, trigger: str, request_text: str, ev: threading.Event):
         if not db.q1("SELECT id FROM jobs WHERE id=?", (job_id,)):
             return  # Auftrag wurde geloescht
         log(job_id, "KI erstellt das Modell …" if trigger != "autofix" else "KI korrigiert den Code …")
-        text, usage = ai.call(ai.CAD_SYSTEM, msgs, cancel=ev,
+        text, usage = ai.call(ai.CAD_SYSTEM, msgs, max_tokens=CAD_MAX_TOKENS, cancel=ev,
                               on_progress=lambda n: None)
         msgs.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
         _set(job_id, messages=db.jdump(msgs))
