@@ -137,3 +137,55 @@ def test_temperatur_wird_uebergeben(monkeypatch):
     ai.call("s", [{"role": "user", "content": "x"}], temperature=0.0)
     ai.call("s", [{"role": "user", "content": "x"}])
     assert seen[0]["temperature"] == 0.0 and "temperature" not in seen[1]
+
+
+def test_nachricht_bilder_und_text(proj):
+    from app import db, jobs
+    c, pid, t, b = proj
+    g = _up(c, pid, TOP, "tilted")
+    for _ in range(4):
+        _up(c, pid, TOP, "top")
+    c.patch(f"/api/projects/{pid}", headers=H,
+            json={"color": "silber", "material": "Aluminium", "transparent": 1, "finish": "matt"})
+    imgs = jobs.pick_images(pid, None)
+    # 5 Draufsichten + 1 unten + 1 gekippt -> 6, gekippt faellt weg
+    assert [i["kind"] for i in imgs] == ["top"] * 5 + ["bottom"]
+    imgs = jobs.pick_images(pid, [t["id"], b["id"], g["id"]])
+    assert [i["kind"] for i in imgs] == ["top", "bottom", "tilted"]
+    assert imgs[1]["path"].name == "rect_top.jpg" and "gespiegelt auf Draufsicht-Koordinaten" in imgs[1]["caption"]
+    assert imgs[2]["path"].name == "small.jpg" and "Schrägansicht" in imgs[2]["caption"] and imgs[2]["path"].is_file()
+    project = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
+    items = [{"kind": "height", "severity": "block", "text": "Höhe fehlt"}]
+    opts = {"photo_ids": [t["id"], b["id"], g["id"]], "name": "x", "check_items": items}
+    text = jobs.build_initial_message(project, "Nachbauen", opts)[0]["content"][0]["text"]
+    assert "Fotografiertes Original (nicht das Fertigungsmaterial): silber, Aluminium, transparent: teilweise, matt" in text
+    assert "## Offene Punkte der Prüfung\n- [block] Höhe fehlt" in text
+    chk = jobs.build_initial_message(project, "", {"photo_ids": None, "part_id": None, "for_check": True,
+                                                   "process": "cnc", "cutter_d": 6})
+    assert "Fräser" not in chk[0]["content"][0]["text"] and "Wunsch des Nutzers" not in chk[0]["content"][0]["text"]
+    db.ex("UPDATE projects SET material_user=0 WHERE id=?", (pid,))
+    project = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
+    chk = jobs.build_initial_message(project, "", {"photo_ids": None, "for_check": True})
+    assert "Fotografiertes Original" not in chk[0]["content"][0]["text"]            # KI-Schaetzung nicht zurueckfuettern
+    assert "Fotografiertes Original" in jobs.build_initial_message(project, "x", {"photo_ids": None})[0]["content"][0]["text"]
+
+
+def test_nachricht_ohne_draufsicht(user):
+    from app import jobs
+    pid = user.post("/api/projects", json={"name": "Nur unten"}, headers=H).json()["id"]
+    _up(user, pid, bottom_of(TOP, 0), "bottom")
+    imgs = jobs.pick_images(pid, None)
+    assert [i["kind"] for i in imgs] == ["bottom"] and "nicht ausgerichtet, links-rechts gespiegelt" in imgs[0]["caption"]
+
+
+def test_auftrag_mit_check_items(proj):
+    from app import db
+    c, pid, t, b = proj
+    items = [{"kind": "height", "severity": "block", "text": "Höhe fehlt"}]
+    r = c.post("/api/jobs", json={"project_id": pid, "name": "P", "request": "x", "check_items": items}, headers=H)
+    assert r.status_code == 200, r.text
+    msgs = db.jload(db.q1("SELECT messages FROM jobs WHERE id=?", (r.json()["id"],))["messages"])
+    assert "- [block] Höhe fehlt" in msgs[0]["content"][0]["text"]
+    bad = [{"kind": "x", "severity": "block", "text": "t"}]
+    r = c.post("/api/jobs", json={"project_id": pid, "name": "P", "request": "x", "check_items": bad}, headers=H)
+    assert r.status_code == 422

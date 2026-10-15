@@ -1,16 +1,18 @@
 """CAD-Auftraege: KI -> Code -> Sandbox -> Pruefung -> ggf. Selbstkorrektur."""
 from __future__ import annotations
 
+import os
 import shutil
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import cv2
 from fastapi import HTTPException
 
 from . import ai, auth, config, db, sandbox, settings
-from .parts import cad_text, to_top
+from .parts import cad_text, reference_top, to_top
 
 _pool = ThreadPoolExecutor(max_workers=max(1, config.MAX_CONCURRENT_JOBS), thread_name_prefix="job")
 _cancel: dict[int, threading.Event] = {}
@@ -82,46 +84,121 @@ def measurement_table(project_id: int, part_id: int | None = None) -> tuple[str,
     return "\n".join(lines), rows
 
 
+TRANSPARENT_TEXT = {0: "nein", 1: "teilweise", 2: "ja"}
+
+
+def material_line(project: dict) -> str:
+    tr = project.get("transparent")
+    bits = [project.get("color"), project.get("material"),
+            f"transparent: {TRANSPARENT_TEXT[tr]}" if tr in TRANSPARENT_TEXT else None, project.get("finish")]
+    bits = [b for b in bits if b]
+    return f"Fotografiertes Original (nicht das Fertigungsmaterial): {', '.join(bits)}" if bits else ""
+
+
+def _write_atomic(path: Path, data: bytes):
+    tmp = path.with_name(f"{path.name}.{threading.get_ident()}.tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+
+
+def _small(pdir: Path) -> Path | None:
+    out = pdir / "small.jpg"
+    if not out.is_file():
+        if not (pdir / "orig.jpg").is_file():
+            return None
+        _write_atomic(out, ai.prepare_image(pdir / "orig.jpg")[0])
+    return out
+
+
+def _rect_top(ph: dict, top: dict | None) -> Path | None:
+    """Unteransicht in Draufsicht-Koordinaten, bei jedem Aufbau neu (kein veralteter Zwischenspeicher)."""
+    from core import vision  # spaet: main.py setzt sys.path erst nach den App-Importen
+    pdir = config.DATA_DIR / "photos" / str(ph["id"])
+    img = cv2.imread(str(pdir / "rect.jpg"))
+    if img is None:
+        return None
+    a = db.jload(ph["analysis"], {}) or {}
+    tid = (a.get("bottom_align") or {}).get("top_photo_id")
+    ref = db.q1("SELECT analysis FROM photos WHERE id=?", (tid,)) if tid else None
+    at = db.jload(ref["analysis"], {}) if ref else None   # Referenz aus der Ausrichtung; sonst nur gespiegelt
+    out = pdir / "rect_top.jpg"
+    _write_atomic(out, vision.encode_jpg(vision.bottom_warp(img, a, at), 90))
+    return out
+
+
+def pick_images(project_id: int, photo_ids: list[int] | None) -> list[dict]:
+    """Bilder fuer die KI (Spec §2.2): Draufsicht, Unteransicht, Hoehenlehre, Schraegfotos; hoechstens 6."""
+    from core import vision  # spaet: siehe oben
+    photos = [p for p in db.q("SELECT * FROM photos WHERE project_id=? ORDER BY id", (project_id,))
+              if photo_ids is None or p["id"] in photo_ids]
+    top = reference_top(project_id)
+    groups: dict[str, list[dict]] = {"top": [], "bottom": [], "gauge": [], "tilted": []}
+    for p in photos:
+        pdir = config.DATA_DIR / "photos" / str(p["id"])
+        a = db.jload(p["analysis"], {}) or {}
+        if p["view"] == "top" and (pdir / "rect.jpg").is_file():
+            cap = ai.scaled_caption(pdir / "rect.jpg", f"Foto {p['id']} (Draufsicht), entzerrt auf die Unterlage",
+                                    vision.PX_PER_MM)
+            groups["top"].append({"photo_id": p["id"], "kind": "top", "path": pdir / "rect.jpg", "caption": cap})
+        elif p["view"] == "bottom" and a.get("rect"):
+            path = _rect_top(p, top)
+            if path:
+                tag = ("entzerrt und gespiegelt auf Draufsicht-Koordinaten – Bohrungen von unten und oben liegen übereinander"
+                       if a.get("bottom_align") else "entzerrt, nicht ausgerichtet, links-rechts gespiegelt")
+                cap = ai.scaled_caption(path, f"Foto {p['id']} (von unten), {tag}", vision.PX_PER_MM)
+                groups["bottom"].append({"photo_id": p["id"], "kind": "bottom", "path": path, "caption": cap})
+        elif p["view"] in ("tilted", "overview"):
+            path = _small(pdir)
+            if path:
+                cap = (f"Foto {p['id']}, Schrägansicht – nicht entzerrt, kein Maßstab; "
+                       "nur für Form, Seitenflächen und Höhenverhältnis.")
+                groups["tilted"].append({"photo_id": p["id"], "kind": "tilted", "path": path, "caption": cap})
+        if (pdir / "gauge.jpg").is_file():
+            cap = ai.scaled_caption(pdir / "gauge.jpg", f"Foto {p['id']}, entzerrte Höhenlehre (x −100…100 mm, y ab −10 mm)",
+                                    vision.PX_PER_MM)
+            groups["gauge"].append({"photo_id": p["id"], "kind": "gauge", "path": pdir / "gauge.jpg", "caption": cap})
+    return (groups["top"] + groups["bottom"] + groups["gauge"] + groups["tilted"])[:6]
+
+
 def build_initial_message(project: dict, request_text: str, options: dict) -> list[dict]:
+    chk = bool(options.get("for_check"))
     table, rows = measurement_table(project["id"], options.get("part_id"))
     proc = PROCESSES.get(options.get("process"), options.get("process") or "nicht festgelegt")
     fx = (project.get("ctrl_x") or 100) / 100
-    parts = [f"# Auftrag: {options.get('name') or 'Bauteil'}",
-             f"Fertigung: {proc}" + (f", Material: {options['material']}" if options.get("material") else ""),
-             f"Korrekturfaktoren aus dem Kontrollmaß sind bereits in den Werten enthalten (X {fx:.4f}).",
-             "", "## Messwerte", table if rows else "(keine Messwerte – nur aus den Fotos ableiten)",
-             "", "## Wunsch des Nutzers", request_text.strip() or "Bauteil möglichst originalgetreu nachbilden."]
+    parts = [f"# Auftrag: {options.get('name') or 'Bauteil'}"]
+    if not chk:
+        parts.append(f"Fertigung: {proc}" + (f", Material: {options['material']}" if options.get("material") else ""))
+    ml = material_line(project)
+    if ml and (not chk or project.get("material_user")):   # KI-Schaetzung nicht als Tatsache zurueckfuettern
+        parts.append(ml)
+    parts += [f"Korrekturfaktoren aus dem Kontrollmaß sind bereits in den Werten enthalten (X {fx:.4f}).",
+              "", "## Messwerte", table if rows else "(keine Messwerte – nur aus den Fotos ableiten)"]
     teile = cad_text(project["id"], options.get("part_id"))
     if teile:
         parts[parts.index("## Messwerte") + 1:parts.index("## Messwerte") + 1] = [teile]
-    if options.get("process") == "cnc":
-        if options.get("cutter_d"):
-            parts.append(f"Kleinster Fräser: Ø {options['cutter_d']:g} mm → Innenradien ≥ {options['cutter_d'] / 2 + 0.2:g} mm")
-        if options.get("setups"):
-            parts.append(f"Aufspannungen: {options['setups']}")
-    if options.get("fits"):
-        parts.append("Passungen: " + "; ".join(
-            f"{f['id']} {f['fit']}" + (f" ({f['depth']})" if f.get("depth") else "") for f in options["fits"] if f.get("fit")))
-    if options.get("tolerance"):
-        parts.append(f"Allgemeintoleranz: {options['tolerance']}")
-    if options.get("extra"):
-        parts.append(f"Zusatzwünsche: {options['extra']}")
+    if not chk:
+        parts += ["", "## Wunsch des Nutzers", request_text.strip() or "Bauteil möglichst originalgetreu nachbilden."]
+    if options.get("check_items"):
+        parts += ["", "## Offene Punkte der Prüfung", *[f"- [{i['severity']}] {i['text']}" for i in options["check_items"]]]
+    if not chk:
+        if options.get("process") == "cnc":
+            cd = options.get("cutter_d")
+            if cd:
+                parts.append(f"Kleinster Fräser: Ø {cd:g} mm → Innenradien ≥ {cd / 2 + 0.2:g} mm")
+            if options.get("setups"):
+                parts.append(f"Aufspannungen: {options['setups']}")
+        if options.get("fits"):
+            parts.append("Passungen: " + "; ".join(
+                f"{f['id']} {f['fit']}" + (f" ({f['depth']})" if f.get("depth") else "")
+                for f in options["fits"] if f.get("fit")))
+        if options.get("tolerance"):
+            parts.append(f"Allgemeintoleranz: {options['tolerance']}")
+        if options.get("extra"):
+            parts.append(f"Zusatzwünsche: {options['extra']}")
     content: list[dict] = [{"type": "text", "text": "\n".join(parts)}]
-    photo_ids = options.get("photo_ids")
-    photos = db.q("SELECT * FROM photos WHERE project_id=? ORDER BY id", (project["id"],))
-    n = 0
-    for p in photos:
-        if photo_ids is not None and p["id"] not in photo_ids:
-            continue
-        pdir = config.DATA_DIR / "photos" / str(p["id"])
-        if (pdir / "rect.jpg").is_file() and n < 4:
-            content += ai.image_ref(pdir / "rect.jpg", ai.scaled_caption(
-                pdir / "rect.jpg", f"Foto {p['id']} ({p['view']}), entzerrte Draufsicht auf die Unterlage", 10.0))
-            n += 1
-        if (pdir / "gauge.jpg").is_file() and n < 4:
-            content += ai.image_ref(pdir / "gauge.jpg", ai.scaled_caption(
-                pdir / "gauge.jpg", f"Foto {p['id']}, entzerrte Höhenlehre (x −100…100 mm, y ab −10 mm)", 10.0))
-            n += 1
+    imgs = options["images"] if "images" in options else pick_images(project["id"], options.get("photo_ids"))
+    for im in imgs:
+        content += ai.image_ref(im["path"], im["caption"])
     return [{"role": "user", "content": content}]
 
 

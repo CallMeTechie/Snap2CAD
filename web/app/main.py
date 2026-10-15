@@ -17,7 +17,7 @@ import cv2
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from . import ai, auth, config, db, geom, jobs, parts, sandbox, settings
 
@@ -1554,6 +1554,17 @@ def meas_csv(pid: int, u: dict = Depends(auth.require_user)):
 
 # ------------------------------------------------------------------ CAD-Auftraege
 
+class CheckItem(BaseModel):
+    kind: Literal[*ai.CHECK_KINDS]
+    severity: Literal["block", "warn"]
+    text: str = Field(max_length=200)
+
+    @field_validator("text")
+    @classmethod
+    def _einzeilig(cls, v: str) -> str:
+        return " ".join(v.split())
+
+
 class JobIn(BaseModel):
     project_id: int | None = None
     name: str = Field(default="", max_length=120)
@@ -1561,7 +1572,8 @@ class JobIn(BaseModel):
     process: str = "fdm"
     material: str = Field(default="", max_length=80)
     tolerance: str = Field(default="", max_length=80)
-    photo_ids: list[int] | None = None
+    photo_ids: list[int] | None = Field(default=None, max_length=30)
+    check_items: list[CheckItem] = Field(default=[], max_length=8)
     cutter_d: float | None = None
     setups: str = Field(default="", max_length=40)
     fits: list[dict] | None = None
@@ -1583,7 +1595,7 @@ def job_create(body: JobIn, u: dict = Depends(auth.require_user)):
     jid = jobs.create(u, project, name, body.request, {
         "process": body.process, "material": body.material.strip(), "tolerance": body.tolerance.strip(),
         "photo_ids": body.photo_ids, "part_id": body.part_id, "cutter_d": body.cutter_d, "setups": body.setups.strip(),
-        "fits": fits,
+        "fits": fits, "check_items": [i.model_dump() for i in body.check_items],
         "extra": body.extra.strip()})
     return jobs.job_public(db.q1("SELECT * FROM jobs WHERE id=?", (jid,)), True)
 

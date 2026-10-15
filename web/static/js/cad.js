@@ -71,12 +71,12 @@ export async function form(main) {
     rules.textContent = RULES[k];
   }
   // Fotos
-  const usable = P.photos.filter(p => p.files.includes("rect") || p.files.includes("gauge"));
-  const picked = new Set(usable.filter(p => p.status !== "unsicher").slice(0, 4).map(p => p.id));
+  const usable = P.photos.filter(p => p.files.includes("rect") || p.files.includes("gauge") || ((p.view === "tilted" || p.view === "overview") && p.files.includes("orig")));
+  const picked = new Set(usable.filter(p => p.status !== "unsicher").slice(0, 6).map(p => p.id));
   const photoFigs = h("div", { class: "thumbs" });
   const drawPhotos = () => clear(photoFigs, usable.length ? usable.map(p => h("figure", {},
     h("label", { style: { cursor: "pointer", display: "flex", flexDirection: "column", gap: "4px" } },
-      h("img", { src: `/api/photos/${p.id}/${p.files.includes("rect") ? "rect" : "gauge"}.jpg`, alt: p.filename, style: { opacity: picked.has(p.id) ? 1 : 0.35 } }),
+      h("img", { src: `/api/photos/${p.id}/${p.files.includes("rect") ? "rect" : p.files.includes("gauge") ? "gauge" : "thumb"}.jpg`, alt: p.filename, style: { opacity: picked.has(p.id) ? 1 : 0.35 } }),
       h("span", { class: "check xs", style: { minHeight: "auto" } }, h("input", { type: "checkbox", checked: picked.has(p.id), onchange: e => { e.target.checked ? picked.add(p.id) : picked.delete(p.id); drawPhotos(); } }),
         `${p.filename.replace(/\.\w+$/, "")} · ${VIEW_LABEL[p.view]}${p.files.includes("gauge") && p.view !== "tilted" && p.view !== "gauge" ? " + Höhe" : ""}`))))
     : h("p", { class: "hint" }, "Keine entzerrten Fotos – das Modell entsteht dann nur aus Maßen und Beschreibung."));
