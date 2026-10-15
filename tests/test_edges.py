@@ -91,3 +91,40 @@ def test_heller_koerper_ohne_raster():
     res = edges.detect(_rect([{"rect": [60, 80, 60, 40], "gray": 246}]), "A4")
     assert len(res["outlines"]) == 1
     _close(res["outlines"][0]["polygon"], [(60, 80), (120, 80), (120, 120), (60, 120)], 1.0)
+
+
+SHADOW = {"mm": 8, "sides": ("left", "bottom"), "dark": 0.8}
+GLASS = {"rect": [60, 80, 60, 40], "gray": 200, "alpha": 0.5}
+CORNERS = [(60, 80), (120, 80), (120, 120), (60, 120)]
+
+
+def test_schatten_bleibt_aussen():
+    img = vision.load_image(synthetic_photo("A4", objects=[BOX], shadow=SHADOW))
+    a = vision.analyze(img, "A4")
+    res = edges.detect(vision.rectify_mat(img, a["homography"], "A4"), "A4")
+    assert len(res["outlines"]) == 1 and len(res["outlines"][0]["polygon"]) == 4
+    _close(res["outlines"][0]["polygon"], CORNERS, 0.5)
+
+
+def test_transparenter_quader_mit_hinweis():
+    res = edges.detect(_rect([GLASS]), "A4", hints={"transparent": 2})
+    assert len(res["outlines"]) == 1
+    _close(res["outlines"][0]["polygon"], CORNERS, 1.0)
+
+
+def test_halbtransparent_ohne_oder_teilweise_nicht_schlechter():
+    img = _rect([GLASS])
+    for hints in (None, {"transparent": 1}):
+        assert len(edges.detect(img, "A4", hints=hints)["outlines"]) == 1, hints
+
+
+def test_heller_koerper_mit_hinweis():
+    res = edges.detect(_rect([{"rect": [60, 80, 60, 40], "gray": 225}]), "A4", hints={"light": True})
+    assert len(res["outlines"]) == 1
+    _close(res["outlines"][0]["polygon"], CORNERS, 1.0)
+
+
+def test_kontrastwert():
+    assert edges.detect(_rect([BOX]), "A4")["contrast"] > 30
+    assert edges.detect(_rect([{"rect": [60, 80, 60, 40], "gray": 225}]), "A4")["contrast"] < 20
+    assert edges.detect(_rect([]), "A4")["contrast"] is None
