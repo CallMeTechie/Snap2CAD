@@ -121,6 +121,7 @@ def client():
         return _client
 
 
+FINISHES = ("matt", "glaenzend")                                    # zulaessige Oberflaechen am Werkstueck
 _KEY_RE = re.compile(r"^[A-Za-z0-9_\-]{20,300}$")
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@\-]{2,99}$")
 

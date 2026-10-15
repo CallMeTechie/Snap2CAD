@@ -80,3 +80,16 @@ def test_unteransicht_auto_masse_und_zuordnung(proj):
     m = c.post(f"/api/projects/{pid}/measurements", json={"photo_id": b["id"], "kind": "length", "view": "bottom",
                                                           "points": [[cx - 3, cy], [cx + 3, cy]]}, headers=H).json()
     assert m["part_id"] == pb["id"]                                                           # Zuordnung auch bei bottom
+
+
+def test_werkstueck_felder(proj):
+    c, pid, t, b = proj
+    p = c.get(f"/api/projects/{pid}").json()
+    assert p["material_user"] == 0 and p["transparent"] is None
+    body = {"color": "silber", "material": "Aluminium", "transparent": 1, "finish": "matt"}
+    r = c.patch(f"/api/projects/{pid}", json=body, headers=H).json()
+    assert (r["color"], r["material"], r["transparent"], r["finish"], r["material_user"]) == ("silber", "Aluminium", 1, "matt", 1)
+    assert c.patch(f"/api/projects/{pid}", json={"transparent": 5}, headers=H).status_code == 422
+    assert c.patch(f"/api/projects/{pid}", json={"finish": "rau"}, headers=H).status_code == 400
+    r = c.patch(f"/api/projects/{pid}", json={"clear_material": True}, headers=H).json()
+    assert r["material"] is None and r["material_user"] == 0

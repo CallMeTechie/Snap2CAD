@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS projects (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name TEXT NOT NULL, created_at TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0,
-  ctrl_x REAL, ctrl_y REAL
+  ctrl_x REAL, ctrl_y REAL,
+  color TEXT, material TEXT, transparent INTEGER, finish TEXT, material_user INTEGER NOT NULL DEFAULT 0, cad_check TEXT
 );
 CREATE TABLE IF NOT EXISTS photos (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -138,6 +139,11 @@ def _migrate(c: sqlite3.Connection):
     if "part_id" not in cols:
         c.execute("ALTER TABLE measurements ADD COLUMN part_id INTEGER REFERENCES parts(id) ON DELETE SET NULL")
     c.execute("CREATE INDEX IF NOT EXISTS ix_meas_part ON measurements(part_id)")
+    pcols = {r[1] for r in c.execute("PRAGMA table_info(projects)").fetchall()}
+    for col, typ in (("color", "TEXT"), ("material", "TEXT"), ("transparent", "INTEGER"), ("finish", "TEXT"),
+                     ("material_user", "INTEGER NOT NULL DEFAULT 0"), ("cad_check", "TEXT")):
+        if col not in pcols:
+            c.execute(f"ALTER TABLE projects ADD COLUMN {col} {typ}")
 
 
 def q(sql: str, args=()) -> list[dict]:

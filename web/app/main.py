@@ -742,6 +742,7 @@ def mat_layout(format: str = "A4", u: dict = Depends(auth.require_user)):
 
 def _project_public(p: dict, detail: bool = False) -> dict:
     out = dict(p)
+    out["cad_check"] = None                                                     # Task 10 bereitet den Rohwert auf
     out["n_photos"] = db.q1("SELECT COUNT(*) n FROM photos WHERE project_id=?", (p["id"],))["n"]
     out["n_measurements"] = db.q1("SELECT COUNT(*) n FROM measurements WHERE project_id=? AND accepted=1", (p["id"],))["n"]
     fmt = _project_format(p["id"])
@@ -788,12 +789,20 @@ def project_get(pid: int, u: dict = Depends(auth.require_user)):
     return _project_public(_own_project(pid, u), True)
 
 
+LIGHT_COLORS = {"weiß", "weiss", "silber", "hellgrau", "beige", "natur"}
+
+
 class ProjectPatch(BaseModel):
     name: str | None = Field(default=None, max_length=120)
     ctrl_x: float | None = None
     ctrl_y: float | None = None
     clear_ctrl: bool = False
     archived: bool | None = None
+    color: str | None = Field(default=None, max_length=40)
+    material: str | None = Field(default=None, max_length=40)
+    transparent: int | None = Field(default=None, ge=0, le=2)
+    finish: str | None = Field(default=None, max_length=20)
+    clear_material: bool = False
 
 
 @app.patch("/api/projects/{pid}")
@@ -805,6 +814,8 @@ def project_patch(pid: int, body: ProjectPatch, u: dict = Depends(auth.require_u
         if v is not None and not (0.9 * ref <= v <= 1.1 * ref):
             raise HTTPException(400, f"Kontrollwert {v:g} mm ist unplausibel (erwartet um {ref:g} mm).")
     _finite(body.ctrl_x, "Kontrollwert"); _finite(body.ctrl_y, "Kontrollwert")  # noqa: E702
+    if body.finish is not None and body.finish not in ai.FINISHES:
+        raise HTTPException(400, "Oberfläche: matt oder glaenzend")
     with db.atomic():
         if body.name is not None and body.name.strip():
             db.ex("UPDATE projects SET name=? WHERE id=?", (body.name.strip(), pid))
@@ -816,6 +827,14 @@ def project_patch(pid: int, body: ProjectPatch, u: dict = Depends(auth.require_u
             v = getattr(body, k)
             if v is not None:
                 db.ex(f"UPDATE projects SET {k}=? WHERE id=?", (v, pid))
+        if body.clear_material:
+            db.ex("UPDATE projects SET color=NULL, material=NULL, transparent=NULL, finish=NULL, material_user=0 "
+                  "WHERE id=?", (pid,))
+        for k in ("color", "material", "transparent", "finish"):                  # feste Spaltenliste
+            v = getattr(body, k)
+            if v is not None:
+                v = (v.strip() or None) if isinstance(v, str) else v
+                db.ex(f"UPDATE projects SET {k}=?, material_user=1 WHERE id=?", (v, pid))
         p = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
         _refresh(p)
     return _project_public(p, True)
