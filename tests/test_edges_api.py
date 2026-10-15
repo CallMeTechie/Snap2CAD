@@ -252,3 +252,39 @@ def test_ki_entartetes_polygon_laesst_teile(two, monkeypatch):
         res = c.post(f"/api/photos/{phid}/edges", json={}, headers=H).json()
         assert [p["id"] for p in res["parts"]] == [p["id"] for p in first], junk
         assert "keine Teile" in res["notice"]
+
+
+def test_hints_in_edges_json_und_veraltet(two):
+    c, pid, phid = two
+    c.patch(f"/api/projects/{pid}", json={"transparent": 2, "color": "silber"}, headers=H)
+    c.post(f"/api/photos/{phid}/edges", json={"use_ai": False}, headers=H)
+    assert c.get(f"/api/photos/{phid}/edges.json").json()["hints"] == {"transparent": 2, "light": True}
+    ph = next(p for p in c.get(f"/api/projects/{pid}").json()["photos"] if p["id"] == phid)
+    assert ph["edges_stale"] is False
+    c.patch(f"/api/projects/{pid}", json={"transparent": 0}, headers=H)
+    ph = next(p for p in c.get(f"/api/projects/{pid}").json()["photos"] if p["id"] == phid)
+    assert ph["edges_stale"] is True
+    c.patch(f"/api/projects/{pid}", json={"clear_material": True}, headers=H)
+    c.post(f"/api/projects/{pid}/cad-check", json={"force": True}, headers=H)   # KI-Schaetzung aendert hints nicht
+    ph = next(p for p in c.get(f"/api/projects/{pid}").json()["photos"] if p["id"] == phid)
+    assert ph["edges_stale"] is True   # hints {} vs. gespeichert transparent=2
+
+
+def test_kontrastwarnung(user):
+    pid, phid = _upload(user, [{"rect": [60, 80, 60, 40], "gray": 225}])
+    ph = user.get(f"/api/projects/{pid}").json()["photos"][0]
+    assert ph["low_contrast"] is True and ph["contrast"] < 20
+
+
+def test_ki_zuordnung_bekommt_werkstueckzeile(two, monkeypatch):
+    from app import ai
+    c, pid, phid = two
+    c.patch(f"/api/projects/{pid}", json={"transparent": 2, "color": "klar"}, headers=H)
+    seen = []
+
+    def fake(system, messages, **kw):
+        seen.append(" ".join(b.get("text", "") for b in messages[0]["content"]))
+        return KI_ZWEI, {}
+    monkeypatch.setattr(ai, "call", fake)
+    assert c.post(f"/api/photos/{phid}/edges", json={}, headers=H).status_code == 200
+    assert "Fotografiertes Original" in seen[0] and "transparent: ja" in seen[0] and "Innenbohrungen" in seen[0]

@@ -70,6 +70,8 @@ export default async function (main) {
   const suggBox = h("section", { class: "sugg", "aria-labelledby": "ki-h", hidden: true });
   const suggBtn = h("button", { class: "btn claude sm", onclick: suggest, disabled: !S.status?.ai, title: S.status?.ai ? "" : "KI nicht eingerichtet" }, icon("sparkle", 16), "KI-Vorschläge");
   const edgeBtn = h("button", { class: "btn sm", onclick: detectEdges, title: "Kanten und Teile auf diesem Foto erkennen" }, icon("edges", 16), "Kanten erkennen");
+  const staleEl = h("span", { class: "xs", style: { color: "var(--warn)" }, hidden: true }, "Werkstück geändert – Kanten neu erkennen");
+  const upStale = () => { staleEl.hidden = !(src && planar(src.view) && S.project.photos.find(p => p.id === src.photo.id)?.edges_stale); };
   const partsBox = h("div");
   let edgeDrag = false;
 
@@ -81,7 +83,7 @@ export default async function (main) {
       h("div", { class: "toolbar", "aria-label": "Werkzeuge" },
         h("label", { class: "grp" }, h("span", { class: "small muted" }, "Foto"), photoSel),
         h("div", { class: "grp", role: "toolbar" }, Object.values(toolBtns)),
-        edgeBtn,
+        edgeBtn, staleEl,
         h("label", { class: "check small" }, snapCb, "Kantenfang"),
         h("label", { class: "check small" }, loupeCb, "Lupe"),
         h("div", { class: "grp" },
@@ -128,6 +130,7 @@ export default async function (main) {
     src = x; pts = []; pixels = null; img = null;  // kein Messen auf dem alten Bild, solange das neue laedt
     layer.reset();
     renderList();
+    upStale();
     if (!x) { dirty = true; return; }
     photoSel.value = x.key;
     const im = new Image();
@@ -617,6 +620,7 @@ export default async function (main) {
     try {
       const r = await api(`/api/photos/${phid}/edges`, { method: "POST", body: { use_ai: true } });
       await reloadProject();
+      upStale();
       if (src?.photo.id === phid) { layer.setSegments(r.segments); setTool("edges"); }
       renderList(); dirty = true;
       toast(r.notice || `${r.parts.length} Teil${r.parts.length === 1 ? "" : "e"} erkannt`, r.notice ? "" : "ok");

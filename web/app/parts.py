@@ -686,11 +686,13 @@ def plausible(poly, outlines, min_area=25.0):
     return P.intersection(U).area >= 0.5 * P.area
 
 
-def ai_parts(photo_dir, res):
+def ai_parts(photo_dir, res, material_text=""):
     """Teile per KI zuordnen und auf die Kandidaten einrasten. Leere Liste = KI hat nichts Brauchbares geliefert."""
     img = candidate_image(photo_dir, res)
     content = ai.image_ref(img, ai.scaled_caption(img, "Draufsicht mit nummerierten Kanten-Kandidaten", res["px_per_mm"]))
-    content.append({"type": "text", "text": candidate_text(res)})
+    content.append({"type": "text", "text": candidate_text(res) + (
+        "\n" + material_text + "\nBei transparenten Teilen sind durchscheinende Strukturen Innenbohrungen, keine Rillen."
+        if material_text else "")})
     text, _ = ai.call(ai.PARTS_SYSTEM, [{"role": "user", "content": content}], max_tokens=4000)
     out = []
     for it in ai.parse_parts(text):

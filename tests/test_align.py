@@ -218,3 +218,11 @@ def test_fremder_nutzer_lage(pair, app, admin):
                                               "password": "Schieblehre-Messing-7"}, headers=HDR).status_code == 200
     assert f.get(f"/api/photos/{b['id']}/align.jpg").status_code == 404
     assert f.patch(f"/api/photos/{b['id']}", json={"bottom_align": {"rot": 90}}, headers=HDR).status_code == 404
+
+
+def test_werkstueck_aendert_umriss_und_lage(pair):
+    from app import db
+    c, pid, t, b = pair
+    c.patch(f"/api/projects/{pid}", json={"transparent": 1}, headers=HDR)
+    a = db.jload(db.q1("SELECT analysis FROM photos WHERE id=?", (b["id"],))["analysis"])
+    assert a["outline_hints"] == {"transparent": 1, "light": False} and a["bottom_align"]["rot"] == 90

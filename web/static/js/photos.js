@@ -228,6 +228,7 @@ export default async function (main) {
       p.status === "nicht_auswertbar" ? h("div", { class: "note err" }, icon("warn"), h("span", {}, `Nur ${(a.mat_ids || []).length} Marker der Unterlage erkannt – mindestens 4 sind nötig. `,
         (a.missing_ids || []).length ? `Fehlend: ID ${a.missing_ids.join(", ")}. ` : "", "Foto mit allen Markern im Bild wiederholen.")) : null,
       p.status === "unsicher" ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, "Restfehler über 1 mm. Unterlage liegt vermutlich nicht flach oder das Foto ist unscharf – besser wiederholen.")) : null,
+      p.low_contrast ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, "Geringer Kontrast zur Unterlage – Licht seitlich, Schatten vermeiden, bei Glas oder Klarsicht ein Blatt Papier unterlegen.")) : null,
       p.view === "bottom" ? alignBox(p) : null,
       h("div", { class: `duo ${figs.length === 1 ? "one" : ""}` }, figs),
       h("div", { class: "grid2", style: { gap: "24px", alignItems: "start" } },

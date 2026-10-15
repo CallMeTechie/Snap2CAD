@@ -205,7 +205,7 @@ def _photo_dir(phid: int) -> Path:
     return config.DATA_DIR / "photos" / str(phid)
 
 
-def _photo_public(ph: dict) -> dict:
+def _photo_public(ph: dict, hints: dict | None = None) -> dict:
     a = db.jload(ph["analysis"], {}) or {}
     d = _photo_dir(ph["id"])
     return {"id": ph["id"], "project_id": ph["project_id"], "filename": ph["filename"], "view": ph["view"],
@@ -217,6 +217,7 @@ def _photo_public(ph: dict) -> dict:
             "files": [n[:-4] for n in ("orig.jpg", "overlay.jpg", "rect.jpg", "gauge.jpg", "thumb.jpg")
                       if (d / n).is_file()],
             "has_edges": (d / "edges.json").is_file(),
+            "edges_stale": hints is not None and (d / "edges.json").is_file() and (a.get("edges_hints") or {}) != hints,
             "contrast": a.get("contrast"), "low_contrast": a.get("contrast") is not None and a["contrast"] < 12,
             "bottom_align": a.get("bottom_align") if ph["view"] == "bottom" else None,
             "align_note": a.get("align_note") if ph["view"] == "bottom" else None,
@@ -749,7 +750,8 @@ def _project_public(p: dict, detail: bool = False) -> dict:
     out["format"] = fmt
     out["factors"] = _factors(p)
     if detail:
-        out["photos"] = [_photo_public(ph) for ph in db.q("SELECT * FROM photos WHERE project_id=? ORDER BY id", (p["id"],))]
+        hp = _hints(p)
+        out["photos"] = [_photo_public(ph, hp) for ph in db.q("SELECT * FROM photos WHERE project_id=? ORDER BY id", (p["id"],))]
         out["measurements"] = [_meas_public(m) for m in
                                db.q("SELECT * FROM measurements WHERE project_id=? ORDER BY seq", (p["id"],))]
         out["grid_h"] = _grid_h(fmt)
@@ -792,6 +794,14 @@ def project_get(pid: int, u: dict = Depends(auth.require_user)):
 LIGHT_COLORS = {"weiß", "weiss", "silber", "hellgrau", "beige", "natur"}
 
 
+def _hints(project: dict) -> dict:
+    """Hinweise fuer die Kantenerkennung nur aus Handeingaben (Spec §3); KI-Schaetzungen wirken nicht."""
+    if not project.get("material_user"):
+        return {}
+    return {"transparent": project.get("transparent") or 0,
+            "light": (project.get("color") or "").strip().lower() in LIGHT_COLORS}
+
+
 class ProjectPatch(BaseModel):
     name: str | None = Field(default=None, max_length=120)
     ctrl_x: float | None = None
@@ -814,6 +824,7 @@ def project_patch(pid: int, body: ProjectPatch, u: dict = Depends(auth.require_u
         if v is not None and not (0.9 * ref <= v <= 1.1 * ref):
             raise HTTPException(400, f"Kontrollwert {v:g} mm ist unplausibel (erwartet um {ref:g} mm).")
     _finite(body.ctrl_x, "Kontrollwert"); _finite(body.ctrl_y, "Kontrollwert")  # noqa: E702
+    before = _hints(p)
     if body.finish is not None and body.finish not in ai.FINISHES:
         raise HTTPException(400, "Oberfläche: matt oder glaenzend")
     with db.atomic():
@@ -837,6 +848,8 @@ def project_patch(pid: int, body: ProjectPatch, u: dict = Depends(auth.require_u
                 db.ex(f"UPDATE projects SET {k}=?, material_user=1 WHERE id=?", (v, pid))
         p = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
         _refresh(p)
+    if _hints(p) != before:
+        _realign_project(pid)   # rechnet die Umrisse mit den neuen Hinweisen nach (nie in db.atomic())
     return _project_public(p, True)
 
 
@@ -897,7 +910,9 @@ def _set_analysis(phid: int, a: dict):
 def _outline_of(ph: dict):
     """Umriss (mm) aus analysis.outline_mm; sonst nachrechnen (unter _detect_lock). None = keiner, "timeout" = spaeter."""
     a = db.jload(ph["analysis"], {}) or {}
-    if "outline_mm" in a:
+    project = db.q1("SELECT * FROM projects WHERE id=?", (ph["project_id"],))
+    hints = _hints(project or {})
+    if "outline_mm" in a and a.get("outline_hints") == hints:
         return a["outline_mm"]
     rect_path = _photo_dir(ph["id"]) / "rect.jpg"
     if not a.get("rect") or not rect_path.is_file():
@@ -906,7 +921,7 @@ def _outline_of(ph: dict):
         return "timeout"
     try:
         img = cv2.imread(str(rect_path))
-        res = edges.detect(img, ph["format"]) if img is not None else {"outlines": [], "contrast": None}
+        res = edges.detect(img, ph["format"], hints) if img is not None else {"outlines": [], "contrast": None}
     except Exception:  # noqa: BLE001 – Umriss ist optional
         res = {"outlines": [], "contrast": None}
     finally:
@@ -917,7 +932,7 @@ def _outline_of(ph: dict):
         if not cur or cur["format"] != ph["format"]:
             return None
         a2 = db.jload(cur["analysis"], {}) or {}
-        a2["outline_mm"], a2["contrast"] = outline, res["contrast"]
+        a2["outline_mm"], a2["contrast"], a2["outline_hints"] = outline, res["contrast"], hints
         _set_analysis(ph["id"], a2)
         ph["analysis"] = db.jdump(a2)
     return outline
@@ -966,7 +981,7 @@ def _realign_project(pid: int):
 @app.post("/api/projects/{pid}/photos")
 def photo_upload(pid: int, file: UploadFile = File(...), view: str = Form("top"), format: str = Form(""),
                  u: dict = Depends(auth.require_user)):
-    _own_project(pid, u)
+    p = _own_project(pid, u)
     if db.q1("SELECT COUNT(*) n FROM photos WHERE project_id=?", (pid,))["n"] >= 30:
         raise HTTPException(400, "Höchstens 30 Fotos pro Projekt.")
     data = file.file.read(config.MAX_UPLOAD_MB * 1024 * 1024 + 1)
@@ -987,7 +1002,7 @@ def photo_upload(pid: int, file: UploadFile = File(...), view: str = Form("top")
     try:
         (d / "orig.jpg").write_bytes(vision.encode_jpg(img, 92))
         (d / "thumb.jpg").write_bytes(vision.encode_jpg(vision.thumbnail(img, 360), 82))
-        a = _analyze_store(phid, img, format if format in matgen.FORMATS else None, view)
+        a = _analyze_store(phid, img, format if format in matgen.FORMATS else None, view, _hints(p))
     except Exception as e:  # noqa: BLE001
         shutil.rmtree(d, ignore_errors=True)
         db.ex("DELETE FROM photos WHERE id=?", (phid,))
@@ -996,7 +1011,7 @@ def photo_upload(pid: int, file: UploadFile = File(...), view: str = Form("top")
           (a.get("format"), a["status"], a.get("max_err_mm"), db.jdump(a), phid))
     if view in PLANAR:
         _realign_project(pid)
-    return _photo_public(db.q1("SELECT * FROM photos WHERE id=?", (phid,)))
+    return _photo_public(db.q1("SELECT * FROM photos WHERE id=?", (phid,)), _hints(p))
 
 
 class AlignIn(BaseModel):
@@ -1033,7 +1048,8 @@ def photo_patch(phid: int, body: PhotoPatch, u: dict = Depends(auth.require_user
         _refresh(p)   # Auto-Masse bekommen die neue Ansicht (_refresh ist selbst atomar)
     if body.format is not None and body.format != ph["format"]:
         img = vision.load_image((_photo_dir(phid) / "orig.jpg").read_bytes())
-        a = _analyze_store(phid, img, body.format if body.format in matgen.FORMATS else None, ph["view"])
+        a = _analyze_store(phid, img, body.format if body.format in matgen.FORMATS else None, ph["view"],
+                           _hints(p))
         with db.atomic():
             old = db.jload(db.q1("SELECT analysis FROM photos WHERE id=?", (phid,))["analysis"], {}) or {}
             if old.get("bottom_rot_user") is not None:
@@ -1056,7 +1072,7 @@ def photo_patch(phid: int, body: PhotoPatch, u: dict = Depends(auth.require_user
         realign = True
     if realign:
         _realign_project(p["id"])
-    return _photo_public(db.q1("SELECT * FROM photos WHERE id=?", (phid,)))
+    return _photo_public(db.q1("SELECT * FROM photos WHERE id=?", (phid,)), _hints(p))
 
 
 @app.delete("/api/photos/{phid}")
@@ -1112,10 +1128,11 @@ def photo_edges(phid: int, body: EdgesIn, request: Request, u: dict = Depends(au
     img = cv2.imread(str(d / "rect.jpg"))
     if img is None:
         raise HTTPException(400, "Die Draufsicht ist nicht lesbar.")
+    hints = _hints(p)
     if not _detect_lock.acquire(blocking=False):
         raise HTTPException(429, "Kantenerkennung ist gerade belegt – bitte gleich erneut versuchen.")
     try:
-        res = edges.detect(img, ph["format"])
+        res = edges.detect(img, ph["format"], hints)
     finally:
         _detect_lock.release()
     if not res["outlines"]:
@@ -1130,7 +1147,7 @@ def photo_edges(phid: int, body: EdgesIn, request: Request, u: dict = Depends(au
         else:
             db.audit("edges_ai", f"Foto {phid}", user_id=u["id"], actor=u["username"], ip=auth.client_ip(request))
             try:
-                detected = [x for x in parts.ai_parts(d, res) if inside(x["polygon"])]
+                detected = [x for x in parts.ai_parts(d, res, jobs.material_line(p)) if inside(x["polygon"])]
                 if not detected:
                     notice = "Die KI hat keine Teile erkannt – Teile nur aus dem Umriss."
             except ai.AIError as e:
@@ -1150,9 +1167,15 @@ def photo_edges(phid: int, body: EdgesIn, request: Request, u: dict = Depends(au
                 more = "1 erkanntes Teil nicht übernommen" if skipped == 1 else f"{skipped} erkannte Teile nicht übernommen"
                 notice = f"{notice} {more} – höchstens {parts.MAX_PARTS_PER_PHOTO} Teile je Foto.".strip()
         _refresh(p)
+        a2 = db.jload(db.q1("SELECT analysis FROM photos WHERE id=?", (phid,))["analysis"], {}) or {}
+        a2["outline_mm"] = res["outlines"][0]["polygon"]
+        a2["contrast"], a2["outline_hints"], a2["edges_hints"] = res["contrast"], hints, hints
+        _set_analysis(phid, a2)
         tmp = d / "edges.json.tmp"  # innerhalb von atomic: kein zweiter Lauf und kein Loeschen dazwischen
         tmp.write_text(json.dumps(res), encoding="utf-8")
         os.replace(tmp, d / "edges.json")
+    if ph["view"] in PLANAR:
+        _realign_project(p["id"])
     return {"parts": [t for t in parts.public_list(p["id"]) if t["photo_id"] == phid], "segments": res["segments"],
             "notice": notice}
 
