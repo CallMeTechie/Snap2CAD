@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from . import ai, auth, config, db, geom, jobs, parts, sandbox, settings
+from . import ai, auth, check, config, db, geom, jobs, parts, sandbox, settings
 
 sys.path.insert(0, str(config.ROOT))
 from core import edges, matgen, vision  # noqa: E402
@@ -257,8 +257,8 @@ _detect_lock = threading.Semaphore(1)  # nur um den OpenCV-Teil, nicht um den KI
 
 def _ai_uses_today(u: dict) -> int:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return db.q1("SELECT COUNT(*) n FROM audit WHERE user_id=? AND action IN ('suggest','edges_ai') AND substr(ts,1,10)=?",
-                 (u["id"], today))["n"]
+    return db.q1("SELECT COUNT(*) n FROM audit WHERE user_id=? AND action IN ('suggest','edges_ai','cad_check')"
+                 " AND substr(ts,1,10)=?", (u["id"], today))["n"]
 
 
 # ------------------------------------------------------------------ Status & Auth
@@ -742,7 +742,7 @@ def mat_layout(format: str = "A4", u: dict = Depends(auth.require_user)):
 
 def _project_public(p: dict, detail: bool = False) -> dict:
     out = dict(p)
-    out["cad_check"] = None                                                     # Task 10 bereitet den Rohwert auf
+    out["cad_check"] = check.public_check(p) if detail else None
     out["n_photos"] = db.q1("SELECT COUNT(*) n FROM photos WHERE project_id=?", (p["id"],))["n"]
     out["n_measurements"] = db.q1("SELECT COUNT(*) n FROM measurements WHERE project_id=? AND accepted=1", (p["id"],))["n"]
     fmt = _project_format(p["id"])
@@ -1459,6 +1459,48 @@ def part_delete(part_id: int, u: dict = Depends(auth.require_user)):
 class SuggestIn(BaseModel):
     photo_id: int | None = None
     hint: str = Field(default="", max_length=500)
+
+
+class CheckIn(BaseModel):
+    photo_ids: list[int] | None = Field(default=None, max_length=30)
+    part_id: int | None = None
+    force: bool = False
+
+
+@app.post("/api/projects/{pid}/cad-check")
+def cad_check(pid: int, body: CheckIn, request: Request, u: dict = Depends(auth.require_user)):
+    p = _own_project(pid, u)
+    if body.part_id is not None and not db.q1("SELECT id FROM parts WHERE id=? AND project_id=?", (body.part_id, pid)):
+        raise HTTPException(400, "Teil gehört nicht zu diesem Projekt")
+    photo_ids = body.photo_ids
+    if photo_ids is not None:
+        own = {r["id"] for r in db.q("SELECT id FROM photos WHERE project_id=?", (pid,))}
+        photo_ids = sorted(set(photo_ids) & own)
+    lock = check.lock_for(pid)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(409, "Prüfung läuft bereits – Ergebnis folgt gleich.")
+    try:
+        p = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
+        h = check.cad_hash(p, photo_ids, body.part_id)
+        s = check.stored(p)
+        if s and s.get("hash") == h and not body.force:
+            if s.get("photo_ids") != photo_ids:   # gleiche Auswahl in anderer Schreibweise: speichern, sonst bleibt stale
+                s["photo_ids"] = photo_ids
+                db.ex("UPDATE projects SET cad_check=? WHERE id=?", (db.jdump(s), pid))
+            return {**s, "stale": False}
+        if not settings.ai_enabled():
+            raise HTTPException(503, "KI ist nicht eingerichtet (Verwaltung → Einstellungen).")
+        with db.atomic():
+            if u["role"] != "admin" and _ai_uses_today(u) >= AI_DAILY_LIMIT:
+                raise HTTPException(429, f"Tageslimit für KI-Funktionen erreicht ({AI_DAILY_LIMIT}).")
+            db.audit("cad_check", f"Projekt {pid}", user_id=u["id"], actor=u["username"], ip=auth.client_ip(request))
+        try:
+            out = check.run_check(p, photo_ids, body.part_id, h)
+        except ai.AIError as e:
+            raise HTTPException(502, str(e)) from None
+    finally:
+        lock.release()
+    return {**out, "stale": False}
 
 
 @app.post("/api/projects/{pid}/suggest")

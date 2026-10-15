@@ -189,3 +189,115 @@ def test_auftrag_mit_check_items(proj):
     bad = [{"kind": "x", "severity": "block", "text": "t"}]
     r = c.post("/api/jobs", json={"project_id": pid, "name": "P", "request": "x", "check_items": bad}, headers=H)
     assert r.status_code == 422
+
+
+def test_cad_check_testmodus(proj, monkeypatch):
+    from app import ai
+    c, pid, t, b = proj
+    calls, orig = [], ai.call
+    # nur Pruefaufrufe zaehlen: ein Job-Thread aus einem Vortest ruft ai.call sonst dazwischen auf
+    monkeypatch.setattr(ai, "call", lambda s, *a, **k: (calls.append(k) if s == ai.CHECK_SYSTEM else None, orig(s, *a, **k))[1])
+    r = c.post(f"/api/projects/{pid}/cad-check", json={"photo_ids": None, "part_id": None}, headers=H)
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert [(i["kind"], i["severity"]) for i in j["items"]] == [("height", "block"), ("bottom", "warn")]
+    assert j["material"]["material"] == "Aluminium" and [i["kind"] for i in j["images"]] == ["top", "bottom"]
+    assert calls[-1]["temperature"] == 0.0 and j["stale"] is False
+    p = c.get(f"/api/projects/{pid}").json()
+    assert p["material"] == "Aluminium" and p["material_user"] == 0 and p["cad_check"]["stale"] is False
+    n = len(calls)
+    assert c.post(f"/api/projects/{pid}/cad-check", json={}, headers=H).json()["hash"] == j["hash"] and len(calls) == n
+    c.post(f"/api/projects/{pid}/cad-check", json={"force": True}, headers=H)
+    assert len(calls) == n + 1
+    assert c.get("/api/projects", headers=H).json()[0]["cad_check"] is None            # Liste ohne Hash-Rechnung
+
+
+def test_idempotent_nach_schaetzung_und_handeingabe(proj):
+    c, pid, t, b = proj
+    j = c.post(f"/api/projects/{pid}/cad-check", json={}, headers=H).json()
+    assert c.get(f"/api/projects/{pid}").json()["cad_check"]["stale"] is False      # KI-Schaetzung veraltet die Pruefung nicht
+    c.patch(f"/api/projects/{pid}", json={"material": "Stahl"}, headers=H)
+    assert c.get(f"/api/projects/{pid}").json()["cad_check"]["stale"] is True       # Handeingabe schon
+    j2 = c.post(f"/api/projects/{pid}/cad-check", json={}, headers=H).json()
+    assert j2["hash"] != j["hash"] and c.get(f"/api/projects/{pid}").json()["material"] == "Stahl"
+
+
+def test_hash_aufgeloeste_fotos(proj):
+    c, pid, t, b = proj
+    j = c.post(f"/api/projects/{pid}/cad-check", json={"photo_ids": None}, headers=H).json()
+    _up(c, pid, TOP, "top")
+    assert c.get(f"/api/projects/{pid}").json()["cad_check"]["stale"] is True
+    assert c.post(f"/api/projects/{pid}/cad-check", json={}, headers=H).json()["hash"] != j["hash"]
+
+
+def test_cad_check_tageslimit(proj):
+    from app import db
+    c, pid, t, b = proj
+    uid = c.get("/api/me").json()["user"]["id"]
+    c.post(f"/api/projects/{pid}/cad-check", json={}, headers=H)
+    for _ in range(30):
+        db.audit("cad_check", "Test", user_id=uid)
+    assert c.post(f"/api/projects/{pid}/cad-check", json={}, headers=H).status_code == 200    # gleicher Hash: gespeichert
+    _up(c, pid, TOP, "top")                                                                  # neuer Hash
+    assert c.post(f"/api/projects/{pid}/cad-check", json={}, headers=H).status_code == 429
+    assert c.post(f"/api/projects/{pid}/suggest", json={}, headers=H).status_code == 429     # zaehlt mit
+
+
+def test_ki_schaetzung_ersetzt_und_null(proj, monkeypatch):
+    from app import ai
+    c, pid, t, b = proj
+    c.post(f"/api/projects/{pid}/cad-check", json={}, headers=H)                              # Aluminium/silber
+    monkeypatch.setattr(ai, "call", lambda *a, **k: ('{"items": [], "material": {"material": "Stahl", "transparent": 9}}', {}))
+    c.post(f"/api/projects/{pid}/cad-check", json={"force": True}, headers=H)
+    p = c.get(f"/api/projects/{pid}").json()
+    assert (p["material"], p["color"], p["transparent"], p["finish"]) == ("Stahl", None, None, None)
+    monkeypatch.setattr(ai, "call", lambda *a, **k: ('{"items": []}', {}))
+    c.post(f"/api/projects/{pid}/cad-check", json={"force": True}, headers=H)
+    assert c.get(f"/api/projects/{pid}").json()["material"] == "Stahl"                     # material fehlt -> unveraendert
+
+
+def test_handeingabe_waehrend_pruefung_bleibt(proj, monkeypatch):
+    from app import ai, db
+    c, pid, t, b = proj
+    orig = ai.call
+
+    def call(*a, **k):
+        db.ex("UPDATE projects SET material='Stahl', material_user=1 WHERE id=?", (pid,))
+        return orig(*a, **k)
+    monkeypatch.setattr(ai, "call", call)
+    assert c.post(f"/api/projects/{pid}/cad-check", json={}, headers=H).status_code == 200
+    p = c.get(f"/api/projects/{pid}").json()
+    assert p["material"] == "Stahl" and p["material_user"] == 1
+
+
+def test_pruefung_laeuft_bereits(proj):
+    from app import check
+    c, pid, t, b = proj
+    with check.lock_for(pid):
+        assert c.post(f"/api/projects/{pid}/cad-check", json={}, headers=H).status_code == 409
+
+
+def test_temperatur_je_aufruf(proj, monkeypatch):
+    from app import ai
+    c, pid, t, b = proj
+    seen, orig = [], ai.call
+    monkeypatch.setattr(ai, "call", lambda s, *a, **k: (seen.append((s, k.get("temperature"))), orig(s, *a, **k))[1])
+    c.post(f"/api/projects/{pid}/cad-check", json={}, headers=H)
+    c.post(f"/api/projects/{pid}/suggest", json={}, headers=H)
+    c.post(f"/api/photos/{t['id']}/edges", json={"use_ai": True}, headers=H)
+    d = dict(seen)
+    assert d[ai.CHECK_SYSTEM] == 0.0 and d[ai.SUGGEST_SYSTEM] is None and d[ai.PARTS_SYSTEM] is None
+
+
+def test_fremder_nutzer_stufe_a(proj, app, admin):
+    from fastapi.testclient import TestClient
+    c, pid, t, b = proj
+    tok = admin.post("/api/admin/invites", json={"role": "user", "days": 1}, headers=H).json()["link"].rsplit("/", 1)[1]
+    f = TestClient(app)
+    assert f.post(f"/api/invite/{tok}", json={"username": f"fremda{pid}", "display_name": "Fremd",
+                                              "password": "Schieblehre-Messing-7"}, headers=H).status_code == 200
+    assert f.post(f"/api/projects/{pid}/cad-check", json={}, headers=H).status_code == 404
+    assert f.patch(f"/api/projects/{pid}", json={"material": "x"}, headers=H).status_code == 404
+    own = f.post("/api/projects", json={"name": "f"}, headers=H).json()["id"]
+    r = f.post(f"/api/projects/{own}/cad-check", json={"photo_ids": [t["id"], b["id"]]}, headers=H).json()
+    assert r["images"] == [] and r["photo_ids"] == []                                       # fremde Fotos ignoriert
