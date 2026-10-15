@@ -9,6 +9,7 @@ import threading
 import traceback
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import cv2
@@ -478,11 +479,15 @@ def _check_quota(user: dict):
         raise HTTPException(429, f"Monatskontingent erreicht ({q} CAD-Generierungen). Bitte den Administrator fragen.")
 
 
+def _check_sandbox():
+    if not sandbox.worker_alive():
+        raise HTTPException(503, "Die CAD-Sandbox läuft nicht (Dienst „sandbox“ prüfen).")
+
+
 def _check_ready():
     if not settings.ai_enabled():
         raise HTTPException(503, "KI ist nicht eingerichtet (Verwaltung → Einstellungen).")
-    if not sandbox.worker_alive():
-        raise HTTPException(503, "Die CAD-Sandbox läuft nicht (Dienst „sandbox“ prüfen).")
+    _check_sandbox()
 
 
 def create(user: dict, project: dict | None, name: str, request_text: str, options: dict) -> int:
@@ -532,6 +537,170 @@ def _iterate_locked(user: dict, job: dict, text: str):
     _submit(job["id"], "iterate", text)
 
 
+# ------------------------------------------------------------------ Parametrischer Neuaufbau (Spec Stufe B §2)
+
+PARAM_MAX = 20
+
+
+def set_const(code: str, var: str, value: float) -> tuple[str, int]:
+    """Zahl der Zeile `VAR = alt` ersetzen; Abstaende und Kommentar bleiben."""
+    if not isinstance(var, str) or not ai._VAR.fullmatch(var):
+        return code, 0
+    pat = re.compile(rf"^({re.escape(var)}\s*=\s*)([0-9]+(?:\.[0-9]+)?)(\s*(?:#.*)?)$", re.M)
+    return pat.subn(lambda m: m.group(1) + _fmt(value, 3) + m.group(3), code, count=1)
+
+
+def _param_limits(user: dict):
+    """Unter _lock: hoechstens ein laufender Neuaufbau je Nutzer und PARAM_PER_HOUR je Stunde (Pool ist geteilt)."""
+    busy = db.q1("SELECT COUNT(*) n FROM job_versions v JOIN jobs j ON j.id=v.job_id WHERE j.user_id=? "
+                 "AND v.trigger='param' AND v.status='running' AND j.status IN ('queued','running')", (user["id"],))
+    if busy["n"]:
+        raise HTTPException(429, "Es läuft bereits ein Neuaufbau. Bitte warten.")
+    since = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
+    hour = db.q1("SELECT COUNT(*) n FROM job_versions v JOIN jobs j ON j.id=v.job_id WHERE j.user_id=? "
+                 "AND v.trigger='param' AND v.created_at>=?", (user["id"], since))
+    if hour["n"] >= config.PARAM_PER_HOUR:
+        raise HTTPException(429, f"Höchstens {config.PARAM_PER_HOUR} Neuaufbauten je Stunde – "
+                                 "bitte später erneut versuchen.")
+
+
+def param(user: dict, job: dict, values: list[dict], base: int | None = None) -> dict:
+    """Konstanten der aktuellen Version ersetzen und ohne KI neu bauen. Pruefen, Lernen, Version anlegen und
+    status=queued in einem Block unter _lock; die Sandbox laeuft danach im Pool (Abbrechen wie bisher)."""
+    if auth.quota_of(user) == 0:
+        raise HTTPException(403, "CAD ist für dieses Konto gesperrt.")
+    _check_sandbox()
+    with _lock:
+        job = db.q1("SELECT * FROM jobs WHERE id=?", (job["id"],))
+        if not job or job["status"] in ("queued", "running"):
+            raise HTTPException(409, "Der Auftrag läuft noch.")
+        _param_limits(user)
+        cur = job["current_version"]
+        bv = db.q1("SELECT code, meta FROM job_versions WHERE job_id=? AND version=?", (job["id"], cur)) if cur else None
+        if not bv:
+            raise HTTPException(409, "Es gibt noch keine Version, auf der aufgebaut werden kann.")
+        if base is not None and base != cur:
+            raise HTTPException(409, f"Version {base} ist nicht mehr aktuell (aktuell: Version {cur}) – bitte neu laden.")
+        code, meta = bv["code"] or "", db.jload(bv["meta"], {}) or {}
+        dims = {d.get("id"): d for d in meta.get("dimensions", []) if isinstance(d, dict)}
+        changed: dict[str, float] = {}
+        for it in values:
+            d, new = dims.get(it["id"]), round(float(it["value"]), 3)
+            if not d or not d.get("editable") or not d.get("var"):
+                raise HTTPException(400, f"Maß {it['id']} ist nicht editierbar")
+            if new <= 0:
+                raise HTTPException(400, f"Maß {it['id']}: Der Wert muss größer als 0 sein.")
+            code, n = set_const(code, d["var"], new)
+            if not n:
+                raise HTTPException(400, f"Maß {it['id']} ist nicht editierbar")
+            d.update(value=new, assumed=False, user_set=True, derived_from=None)   # gleicher Wert: Annahme bestaetigt
+            changed[d["id"]] = new
+        req = ", ".join(f"{k} = {_fmt(v, 3)} mm" for k, v in changed.items())
+        meta["param_ids"] = list(changed)  # einzige Quelle fuer „geaendert“ (_run_param, pending_param, cad.js)
+        meta.pop("bbox_expected", None)   # Erwartung der KI galt fuer die alten Werte: Hüllquader-Pruefung entfaellt
+        if job["project_id"]:                       # §2.4: gemessen ist gemessen, unabhaengig vom Erfolg
+            cnt = Counter(_norm_of(x) for x in dims.values())   # gleiche Bezeichnung zweimal: D-Nummer anhaengen
+            learn_dims(job["project_id"], job["id"],
+                       [{**dims[k], "label": f"{dims[k].get('label')} ({k})"} if cnt[_norm_of(dims[k])] > 1 else dims[k]
+                        for k in changed])
+        version = _new_version(job["id"], "param", req, "", {})
+        db.ex("UPDATE job_versions SET code=?, meta=? WHERE job_id=? AND version=?",
+              (code, db.jdump(meta), job["id"], version))
+        _set(job["id"], status="queued", error=None)
+        log(job["id"], f"Neuaufbau mit {req} …")
+        db.audit("cad_param", f"Auftrag {job['id']}: {req}"[:500], user_id=user["id"], actor=user["username"])
+        _submit(job["id"], "param", str(version))   # der Pool-Lauf baut genau diese Version
+    return {"version": version} if job["project_id"] else {"version": version, "learned": False}
+
+
+def _run_param(job_id: int, version: int, ev: threading.Event):
+    """Sandbox-Lauf genau der Param-Version `version`: kein KI-Aufruf, kein Autofix; Fehler -> failed, Basis bleibt."""
+    v = db.q1("SELECT * FROM job_versions WHERE job_id=? AND version=?", (job_id, version))
+    job = db.q1("SELECT * FROM jobs WHERE id=?", (job_id,))
+    if not job:
+        return
+    if not v or v["status"] != "running":       # Version wurde zwischenzeitlich beendet: Auftrag nicht queued lassen
+        if _current(job_id, ev):
+            _set(job_id, status="failed", error="Neuaufbau abgebrochen.")
+        return
+    if job["status"] == "cancelled" or ev.is_set():
+        db.ex("UPDATE job_versions SET status='cancelled' WHERE job_id=? AND version=?", (job_id, version))
+        return
+    _set(job_id, status="running")
+    code, req = v["code"] or "", v["request_text"] or ""
+    meta = db.jload(v["meta"], {}) or {}
+    vdir = version_dir(job_id, version)
+    vdir.mkdir(parents=True, exist_ok=True)
+    (vdir / "model.py").write_text(code, encoding="utf-8")
+    try:
+        res = sandbox.run(code, vdir, cancel=ev)
+    except sandbox.Cancelled:                    # nur diese Version; _run_safe fasst Param-Versionen nicht an
+        db.ex("UPDATE job_versions SET status='cancelled' WHERE job_id=? AND version=?", (job_id, version))
+        log(job_id, "Abgebrochen", "warn")
+        return
+    if not db.q1("SELECT id FROM jobs WHERE id=?", (job_id,)):
+        shutil.rmtree(job_dir(job_id), ignore_errors=True)
+        return
+    err = None if res["ok"] else res["error"]
+    result = res.get("result")
+    _filter_anchors(result)                     # Spec Regel 13: nur gefilterte Anker speichern
+    if result:
+        _apply_anchors(meta, result, changed=set(meta.get("param_ids") or []))
+    checks = compute_checks(result, meta, job["project_id"]) if result else []
+    failed = err is not None or any(c["state"] == "fail" for c in checks)
+    with _lock:   # cancel() setzt ev unter _lock: nach einem Abbruch wird die Version nie ok/failed (O-2)
+        if ev.is_set():
+            db.ex("UPDATE job_versions SET status='cancelled' WHERE job_id=? AND version=?", (job_id, version))
+            log(job_id, "Abgebrochen", "warn")
+            return
+        db.ex("UPDATE job_versions SET status=?, error=?, result=?, checks=?, seconds=?, meta=? "
+              "WHERE job_id=? AND version=?",
+              ("failed" if failed else "ok", db.jdump(err) if err else None, db.jdump(result) if result else None,
+               db.jdump(checks), res.get("seconds"), db.jdump(meta), job_id, version))
+    if failed:
+        if err:
+            where = f" (Zeile {err['line']})" if err.get("line") else ""
+            why = f"{err.get('type')}{where}: {str(err.get('message'))[:200]}"
+        else:
+            why = "Prüfung nicht bestanden – " + "; ".join(c["label"] for c in checks if c["state"] == "fail")
+        log(job_id, f"Version {version}: Neuaufbau mit {req} fehlgeschlagen – {why}", "warn")
+        if _current(job_id, ev):
+            _set(job_id, status="failed", error=f"Neuaufbau mit {req} fehlgeschlagen – {why}")
+        return
+    bb = result["bbox"]
+    log(job_id, f"Version {version} fertig (Neuaufbau ohne KI): {_de(bb[0])} × {_de(bb[1])} × {_de(bb[2])} mm, "
+                f"{_de(res['seconds'], 1)} s", "ok")
+    with _lock:   # Gespraechszeile nur bei Erfolg und nur fuer den aktuellen Lauf: spaetere KI-Aenderungen kennen den Stand
+        if not _current(job_id, ev):
+            return
+        row = db.q1("SELECT messages FROM jobs WHERE id=?", (job_id,))
+        msgs = db.jload(row["messages"], []) if row else []
+        msgs.append({"role": "user", "content": [{"type": "text", "text": f"Parametrisch geändert: {req} (Version {version})"}]})
+        _set(job_id, messages=db.jdump(msgs), status="done", current_version=version, error=None)
+
+
+def pending_param(job_id: int) -> list[dict]:
+    """§5: Masse aus erfolgreichen Param-Versionen (meta["param_ids"]) nach der letzten erfolgreichen KI-Version."""
+    vs = db.q("SELECT version, trigger, status, meta FROM job_versions WHERE job_id=? ORDER BY version", (job_id,))
+    ai_ok = [v for v in vs if v["trigger"] != "param" and v["status"] == "ok"]
+    if not ai_ok:
+        return []
+    last = ai_ok[-1]
+    old = {d.get("id"): d for d in (db.jload(last["meta"], {}) or {}).get("dimensions", []) if isinstance(d, dict)}
+    out: dict[str, dict] = {}
+    for v in vs:
+        if v["trigger"] != "param" or v["status"] != "ok" or v["version"] < last["version"]:
+            continue
+        meta = db.jload(v["meta"], {}) or {}
+        dims = {d.get("id"): d for d in meta.get("dimensions", []) if isinstance(d, dict)}
+        for i in meta.get("param_ids") or []:
+            if i in dims:
+                o = old.get(i) or {}
+                out[i] = {"id": i, "label": dims[i].get("label"), "value": dims[i].get("value"), "old": o.get("value"),
+                          "old_assumed": bool(o.get("assumed"))}
+    return list(out.values())
+
+
 def cancel(job: dict):
     with _lock:
         ev = _cancel.get(job["id"])
@@ -541,6 +710,9 @@ def cancel(job: dict):
         if cur and cur["status"] in ("queued", "running"):
             _set(job["id"], status="cancelled", error="Abgebrochen")
             log(job["id"], "Abbruch angefordert", "warn")
+        # Neuaufbau noch in der Warteschlange: die Version nicht running lassen (_run_param prueft den Status)
+        db.ex("UPDATE job_versions SET status='cancelled' WHERE job_id=? AND status='running' AND trigger='param'",
+              (job["id"],))
 
 
 def _submit(job_id: int, trigger: str, request_text: str):
@@ -559,7 +731,8 @@ def _run_safe(job_id, trigger, request_text, ev):
     try:
         _run(job_id, trigger, request_text, ev)
     except (ai.Cancelled, sandbox.Cancelled):
-        db.ex("UPDATE job_versions SET status='cancelled' WHERE job_id=? AND status='running'", (job_id,))
+        db.ex("UPDATE job_versions SET status='cancelled' WHERE job_id=? AND status='running' AND trigger!='param'",
+              (job_id,))
         log(job_id, "Abgebrochen", "warn")
     except ai.AIError as e:
         if _current(job_id, ev):
@@ -567,6 +740,12 @@ def _run_safe(job_id, trigger, request_text, ev):
         log(job_id, str(e), "error")
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
+        if trigger == "param":   # nur die eigene Param-Version; ein paralleler KI-Lauf bleibt unberuehrt
+            db.ex("UPDATE job_versions SET status='failed' WHERE job_id=? AND version=? AND status='running'",
+                  (job_id, int(request_text)))
+        else:
+            db.ex("UPDATE job_versions SET status='failed' WHERE job_id=? AND status='running' AND trigger!='param'",
+                  (job_id,))
         if _current(job_id, ev):
             _set(job_id, status="failed", error=f"Interner Fehler: {type(e).__name__}: {e}")
         log(job_id, f"Interner Fehler: {type(e).__name__}: {e}", "error")
@@ -586,6 +765,9 @@ def _new_version(job_id: int, trigger: str, request_text: str, text: str, usage:
 
 
 def _run(job_id: int, trigger: str, request_text: str, ev: threading.Event):
+    if trigger == "param":   # Spec Stufe B §2: Neuaufbau ohne KI und ohne Autofix; request_text = Versionsnummer
+        _run_param(job_id, int(request_text), ev)
+        return
     job = db.q1("SELECT * FROM jobs WHERE id=?", (job_id,))
     if not job or job["status"] == "cancelled" or ev.is_set():
         return
@@ -708,4 +890,5 @@ def job_public(job: dict, detail: bool = False) -> dict:
             "seconds": v["seconds"], "created_at": v["created_at"], "files": version_files(job["id"], v["version"]),
         } for v in vs]
         out["log"] = db.q("SELECT ts,level,msg FROM job_log WHERE job_id=? ORDER BY id", (job["id"],))
+        out["pending_param"] = pending_param(job["id"])
     return out

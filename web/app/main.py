@@ -1699,6 +1699,27 @@ def job_iterate(jid: int, body: IterIn, u: dict = Depends(auth.require_user)):
     return jobs.job_public(db.q1("SELECT * FROM jobs WHERE id=?", (jid,)), True)
 
 
+class ParamValue(BaseModel):
+    id: str = Field(pattern=r"^D[0-9]{1,4}$")
+    # strict: true und "45" -> 422; Bereich im Endpunkt: ein Pydantic-Fehler mit NaN liesse sich nicht als JSON melden
+    value: float = Field(strict=True)
+
+
+class ParamIn(BaseModel):
+    values: list[ParamValue] = Field(min_length=1, max_length=jobs.PARAM_MAX)
+    base: int | None = None
+
+
+@app.post("/api/jobs/{jid}/param")
+def job_param(jid: int, body: ParamIn, u: dict = Depends(auth.require_user)):
+    """Spec Stufe B §2: Messschieberwerte in die Konstanten einsetzen, neue Version ohne KI."""
+    for v in body.values:
+        if not 0 < v.value <= 5000:            # faengt auch NaN und Unendlich ab
+            raise HTTPException(422, f"Maß {v.id}: Der Wert muss größer als 0 und höchstens 5000 mm sein.")
+    j = _own_job(jid, u)
+    return jobs.param(u, j, [v.model_dump() for v in body.values], base=body.base)
+
+
 @app.post("/api/jobs/{jid}/cancel")
 def job_cancel(jid: int, u: dict = Depends(auth.require_user)):
     j = _own_job(jid, u)

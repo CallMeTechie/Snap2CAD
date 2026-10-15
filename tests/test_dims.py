@@ -374,3 +374,365 @@ def test_anker_nach_ki_lauf(user):
     assert (d["D7"]["a"], d["D7"]["b"]) == ([0.0, -4.0, 6.0], [0.0, 4.0, 6.0]) and "anchors_stale" not in d["D7"]
     assert "a" not in d["D8"] and all(x["editable"] for k, x in d.items() if k != "D9")
     assert d["D9"]["editable"] is False and (d["D9"]["a"], d["D9"]["b"]) == ([15.0, 0.0, 6.0], [40.0, 0.0, 6.0])
+
+
+# ------------------------------------------------------------------ B2/B3: Param-Neuaufbau
+
+BLOCK = '''BLOCK_L = 40.0  # Laenge
+BLOCK_H = 75.0  # Hoehe, Annahme
+HOLE_D = 6.0
+part = Box(BLOCK_L, BLOCK_L, BLOCK_H, align=(Align.CENTER, Align.CENTER, Align.MIN)) - Cylinder(
+    HOLE_D / 2, BLOCK_H, align=(Align.CENTER, Align.CENTER, Align.MIN))
+DIM_ANCHORS = {"D1": ((-BLOCK_L / 2, -BLOCK_L / 2, 0), (BLOCK_L / 2, -BLOCK_L / 2, 0)),
+               "D2": ((BLOCK_L / 2, -BLOCK_L / 2, 0), (BLOCK_L / 2, -BLOCK_L / 2, BLOCK_H))}
+'''
+BLOCK_META = {"dimensions": [
+    {"id": "D1", "label": "Länge", "group": "aussen", "var": "BLOCK_L", "value": 40.0, "assumed": False, "editable": True,
+     "a": [-20.0, -20.0, 0.0], "b": [20.0, -20.0, 0.0]},
+    {"id": "D2", "label": "Höhe Block", "group": "aussen", "var": "BLOCK_H", "value": 75.0, "assumed": True,
+     "editable": True, "a": [20.0, -20.0, 0.0], "b": [20.0, -20.0, 75.0]},
+    {"id": "D3", "label": "Bohrung", "group": "bohrung", "var": "HOLE_D", "value": 6.0, "assumed": False, "editable": True,
+     "a": [-3.0, 0.0, 75.0], "b": [3.0, 0.0, 75.0]},
+    {"id": "D4", "label": "Fase", "group": "fase", "var": None, "value": 1.0, "assumed": True, "editable": False}]}
+
+
+def _fake_sandbox(monkeypatch, ok=True, anchors=None, block=False):
+    from app import sandbox
+    seen = []
+
+    def run(code, dest, cancel=None):
+        seen.append(code)
+        dest.mkdir(parents=True, exist_ok=True)
+        t0 = time.time()
+        while block and not cancel.is_set() and time.time() - t0 < 10:
+            time.sleep(0.05)
+        if block:
+            raise sandbox.Cancelled()
+        if not ok:
+            return {"ok": False, "seconds": 0.1, "error": {"stage": "model", "type": "ValueError", "message": "kaputt",
+                                                         "line": 3, "code": "x", "traceback": ""}}
+        res = {"valid": True, "solids": 1, "bbox": [40.0, 40.0, 45.0], "stl": {"triangles": 12, "watertight": True}}
+        if anchors is not None:
+            res["dim_anchors"] = anchors
+        return {"ok": True, "seconds": 0.1, "result": res}
+    monkeypatch.setattr(sandbox, "run", run)
+    return seen
+
+
+def test_param_ersetzung_mit_kommentar():
+    from app import jobs
+    assert jobs.set_const("VAR = 75.0  # Kommentar\nB = 2\n", "VAR", 45.0) == ("VAR = 45  # Kommentar\nB = 2\n", 1)
+    assert jobs.set_const("VAR=1\n", "VAR", 12.3456) == ("VAR=12.346\n", 1)
+    assert jobs.set_const("VAR = 2 * B\n", "VAR", 3.0) == ("VAR = 2 * B\n", 0)
+    assert jobs.set_const("VAR_X = 1\n", "VAR", 3.0)[1] == 0
+    assert jobs.set_const("WIDTH = 50.0\n", "WIDTH)|(.*", 3.0) == ("WIDTH = 50.0\n", 0)     # var ausserhalb ai._VAR
+
+
+def test_param_version_ohne_ki_mit_ankern(user, monkeypatch):
+    from app import ai, db, jobs
+    calls, real = [], ai.call
+    monkeypatch.setattr(ai, "call", lambda *a, **k: (calls.append(a[0]), real(*a, **k))[1])
+    pid = _proj(user)
+    jid = _job(user, pid, BLOCK, copy.deepcopy(BLOCK_META))
+    r = user.post(f"/api/jobs/{jid}/param", json={"values": [{"id": "D2", "value": 45}]}, headers=H)
+    assert r.status_code == 200 and r.json() == {"version": 2}, r.text
+    j = _wait(user, jid)
+    v = j["versions"][-1]
+    assert calls == [] and j["status"] == "done" and j["current_version"] == 2, j
+    assert (v["trigger"], v["request_text"], v["claude_text"], v["status"]) == ("param", "D2 = 45 mm", "", "ok")
+    assert "BLOCK_H = 45  # Hoehe, Annahme\n" in v["code"] and v["result"]["bbox"] == [40.0, 40.0, 45.0]
+    d = {x["id"]: x for x in v["meta"]["dimensions"]}
+    assert (d["D2"]["value"], d["D2"]["assumed"], d["D2"]["user_set"], d["D2"]["derived_from"]) == (45.0, False, True, None)
+    assert v["result"]["dim_anchors"]["D2"] == [[20.0, -20.0, 0.0], [20.0, -20.0, 45.0]]
+    assert d["D2"]["b"] == [20.0, -20.0, 45.0] and "anchors_stale" not in d["D1"] and d["D3"]["anchors_stale"] is True
+    assert v["meta"]["param_ids"] == ["D2"] and 0 < v["seconds"] < 30
+    assert db.q1("SELECT detail FROM audit WHERE action='cad_param' ORDER BY id DESC LIMIT 1")["detail"] == \
+        f"Auftrag {jid}: D2 = 45 mm"
+    assert j["pending_param"] == [{"id": "D2", "label": "Höhe Block", "value": 45.0, "old": 75.0, "old_assumed": True}]
+    msgs = db.jload(db.q1("SELECT messages FROM jobs WHERE id=?", (jid,))["messages"])
+    assert msgs[-1]["content"][0]["text"] == "Parametrisch geändert: D2 = 45 mm (Version 2)"
+    assert [(x["label"], x["value"], x["dim_id"], x["job_id"]) for x in jobs.learned_dims(pid)] == \
+        [("Höhe Block", 45.0, "D2", jid)]
+
+
+def test_param_mehrere_werte_und_fehler(user, monkeypatch):
+    from app import db, sandbox
+    _fake_sandbox(monkeypatch)
+    pid = _proj(user)
+    jid = _job(user, pid, BLOCK, copy.deepcopy(BLOCK_META))
+    url = f"/api/jobs/{jid}/param"
+    r = user.post(url, json={"values": [{"id": "D4", "value": 2}]}, headers=H)
+    assert r.status_code == 400 and r.json()["detail"] == "Maß D4 ist nicht editierbar"
+    assert user.post(url, json={"values": [{"id": "D9", "value": 2}]}, headers=H).status_code == 400
+    assert user.post(url, json={"values": [{"id": "D1", "value": 1}] * 21}, headers=H).status_code == 422
+    assert user.post(url, json={"values": []}, headers=H).status_code == 422
+    monkeypatch.setattr(sandbox, "worker_alive", lambda: False)
+    assert user.post(url, json={"values": [{"id": "D1", "value": 41}]}, headers=H).status_code == 503
+    monkeypatch.setattr(sandbox, "worker_alive", lambda: True)
+    db.ex("UPDATE jobs SET status='running' WHERE id=?", (jid,))
+    r = user.post(url, json={"values": [{"id": "D1", "value": 41}]}, headers=H)
+    assert r.status_code == 409 and r.json()["detail"] == "Der Auftrag läuft noch."
+    db.ex("UPDATE jobs SET status='done' WHERE id=?", (jid,))
+    assert db.q1("SELECT COUNT(*) n FROM job_versions WHERE job_id=?", (jid,))["n"] == 1   # Fehlversuche: keine Version
+    r = user.post(url, json={"values": [{"id": "D1", "value": 41}, {"id": "D3", "value": 6.5}]}, headers=H)
+    assert r.status_code == 200
+    v = _wait(user, jid)["versions"][-1]
+    assert v["request_text"] == "D1 = 41 mm, D3 = 6.5 mm" and v["status"] == "ok"
+    assert "BLOCK_L = 41  # Laenge\n" in v["code"] and "\nHOLE_D = 6.5\n" in v["code"]
+
+
+def test_param_ungueltige_werte(user, monkeypatch):
+    _fake_sandbox(monkeypatch)
+    pid = _proj(user)
+    jid = _job(user, pid, BLOCK, copy.deepcopy(BLOCK_META))
+    url = f"/api/jobs/{jid}/param"
+    for bad in (0, -1, 5000.5, "abc", None, True, "45"):           # strict: kein bool, kein Zahlentext
+        assert user.post(url, json={"values": [{"id": "D1", "value": bad}]}, headers=H).status_code == 422, bad
+    for raw in ('{"values": [{"id": "D1", "value": NaN}]}', '{"values": [{"id": "D1", "value": Infinity}]}'):
+        r = user.post(url, content=raw, headers={**H, "Content-Type": "application/json"})
+        assert r.status_code == 422, raw
+    assert user.post(url, json={"values": [{"id": "d1", "value": 2}]}, headers=H).status_code == 422
+    r = user.post(url, json={"values": [{"id": "D1", "value": 0.0001}]}, headers=H)
+    assert r.status_code == 400 and "größer als 0" in r.json()["detail"]
+
+
+def test_param_basis_veraltet(user, monkeypatch):
+    _fake_sandbox(monkeypatch)
+    pid = _proj(user)
+    jid = _job(user, pid, BLOCK, copy.deepcopy(BLOCK_META))
+    url = f"/api/jobs/{jid}/param"
+    r = user.post(url, json={"values": [{"id": "D1", "value": 41}], "base": 7}, headers=H)
+    assert r.status_code == 409 and "nicht mehr aktuell" in r.json()["detail"]
+    assert user.post(url, json={"values": [{"id": "D1", "value": 41}], "base": 1}, headers=H).status_code == 200
+    _wait(user, jid)
+    r = user.post(url, json={"values": [{"id": "D1", "value": 42}], "base": 1}, headers=H)     # zweiter Tab, alter Stand
+    assert r.status_code == 409
+
+
+def test_version_rueckfall_gestreckt_und_stale(user, monkeypatch):
+    _fake_sandbox(monkeypatch)                                         # Ergebnis ohne dim_anchors
+    pid = _proj(user)
+    jid = _job(user, pid, BLOCK, copy.deepcopy(BLOCK_META))
+    user.post(f"/api/jobs/{jid}/param", json={"values": [{"id": "D2", "value": 45}]}, headers=H)
+    d = {x["id"]: x for x in _wait(user, jid)["versions"][-1]["meta"]["dimensions"]}
+    assert d["D2"]["b"] == [20.0, -20.0, 45.0] and "anchors_stale" not in d["D2"]
+    assert d["D1"]["anchors_stale"] is True and d["D3"]["anchors_stale"] is True and "a" not in d["D4"]
+
+
+def test_version_huellquader_ohne_ki_erwartung(user, monkeypatch):
+    """bbox_expected der KI gilt fuer den alten Wert: ohne Entfernen scheiterte jeder groessere Neuaufbau (75 -> 45)."""
+    _fake_sandbox(monkeypatch)                                         # Ergebnis 40 x 40 x 45
+    pid = _proj(user)
+    jid = _job(user, pid, BLOCK, {**copy.deepcopy(BLOCK_META), "bbox_expected": [40.0, 40.0, 75.0]})
+    user.post(f"/api/jobs/{jid}/param", json={"values": [{"id": "D2", "value": 45}]}, headers=H)
+    j = _wait(user, jid)
+    v = j["versions"][-1]
+    assert j["status"] == "done" and v["status"] == "ok", v["checks"]
+    assert "bbox_expected" not in v["meta"] and "bbox" not in {c["id"] for c in v["checks"]}
+
+
+def test_version_sandbox_fehler_basis_bleibt(user, monkeypatch):
+    from app import db, jobs
+    _fake_sandbox(monkeypatch, ok=False)
+    pid = _proj(user)
+    jid = _job(user, pid, BLOCK, copy.deepcopy(BLOCK_META))
+    assert user.post(f"/api/jobs/{jid}/param", json={"values": [{"id": "D2", "value": 45}]}, headers=H).status_code == 200
+    j = _wait(user, jid)
+    assert j["status"] == "failed" and j["current_version"] == 1 and j["versions"][-1]["status"] == "failed"
+    assert any(x["msg"] == "Version 2: Neuaufbau mit D2 = 45 mm fehlgeschlagen – ValueError (Zeile 3): kaputt"
+               for x in j["log"]), j["log"]
+    assert j["pending_param"] == [] and [x["value"] for x in jobs.learned_dims(pid)] == [45.0]   # §2.4: Wert bleibt
+    assert db.jload(db.q1("SELECT messages FROM jobs WHERE id=?", (jid,))["messages"]) == []
+
+
+def test_version_abbrechen(user, monkeypatch):
+    _fake_sandbox(monkeypatch, block=True)
+    pid = _proj(user)
+    jid = _job(user, pid, BLOCK, copy.deepcopy(BLOCK_META))
+    user.post(f"/api/jobs/{jid}/param", json={"values": [{"id": "D2", "value": 45}]}, headers=H)
+    assert user.post(f"/api/jobs/{jid}/cancel", headers=H).status_code == 200
+    j = _wait(user, jid)
+    assert j["status"] == "cancelled" and j["current_version"] == 1
+    time.sleep(0.5)
+    assert user.get(f"/api/jobs/{jid}").json()["versions"][-1]["status"] == "cancelled"
+
+
+def test_param_ohne_projekt(user, monkeypatch):
+    from app import db
+    _fake_sandbox(monkeypatch)
+    jid = _job(user, None, BLOCK, copy.deepcopy(BLOCK_META))
+    r = user.post(f"/api/jobs/{jid}/param", json={"values": [{"id": "D2", "value": 45}]}, headers=H)
+    assert r.json() == {"version": 2, "learned": False}
+    assert _wait(user, jid)["status"] == "done"
+    assert db.q1("SELECT COUNT(*) n FROM model_dims WHERE job_id=?", (jid,))["n"] == 0
+
+
+def test_param_fremder_nutzer(user, app, admin, monkeypatch):
+    from fastapi.testclient import TestClient
+    _fake_sandbox(monkeypatch)
+    pid = _proj(user)
+    jid = _job(user, pid, BLOCK, copy.deepcopy(BLOCK_META))
+    tok = admin.post("/api/admin/invites", json={"role": "user", "days": 1}, headers=H).json()["link"].rsplit("/", 1)[1]
+    f = TestClient(app)
+    assert f.post(f"/api/invite/{tok}", json={"username": f"fremdb{jid}", "display_name": "Fremd",
+                                              "password": "Schieblehre-Messing-7"}, headers=H).status_code == 200
+    assert f.post(f"/api/jobs/{jid}/param", json={"values": [{"id": "D2", "value": 45}]}, headers=H).status_code == 404
+
+
+def test_version_pending_param_reihenfolge(user):
+    from app import jobs
+    pid = _proj(user)
+    m = copy.deepcopy(BLOCK_META)
+    jid = _job(user, pid, BLOCK, m)
+
+    def meta(*ids, **vals):
+        """Meta wie BLOCK_META mit gesetzten Werten; ids = param_ids einer Param-Version."""
+        out = copy.deepcopy(m)
+        for d in out["dimensions"]:
+            if d["id"] in vals:
+                d.update(value=vals[d["id"]], assumed=False, user_set=True)
+        if ids:
+            out["param_ids"] = list(ids)
+        return out
+    _version(jid, 2, "param", "ok", meta("D2", D2=45.0), "D2 = 45 mm")
+    _version(jid, 3, "param", "failed", meta("D1", D2=45.0, D1=50.0), "D1 = 50 mm")
+    _version(jid, 4, "param", "ok", meta("D1", D2=45.0, D1=41.0), "D1 = 41 mm")
+    assert jobs.pending_param(jid) == [
+        {"id": "D2", "label": "Höhe Block", "value": 45.0, "old": 75.0, "old_assumed": True},
+        {"id": "D1", "label": "Länge", "value": 41.0, "old": 40.0, "old_assumed": False}]
+    _version(jid, 5, "iterate", "failed", meta())          # fehlgeschlagene KI-Version setzt nichts zurueck
+    assert [p["id"] for p in jobs.pending_param(jid)] == ["D2", "D1"]
+    _version(jid, 6, "iterate", "ok", meta(D2=45.0, D1=41.0))
+    assert jobs.pending_param(jid) == []
+    _version(jid, 7, "param", "ok", meta("D3", D2=45.0, D1=41.0, D3=6.5), "D3 = 6.5 mm")
+    assert jobs.pending_param(jid) == [{"id": "D3", "label": "Bohrung", "value": 6.5, "old": 6.0, "old_assumed": False}]
+    _version(jid, 8, "param", "ok", meta(D2=45.0, D1=41.0, D3=7.0), "D3 = 7 mm")       # ohne param_ids: zaehlt nicht
+    assert [p["value"] for p in jobs.pending_param(jid)] == [6.5]
+
+
+def test_param_ohne_kontingent_und_ki(user, monkeypatch):
+    """Kein _check_quota, kein _check_ready: Neuaufbau geht auch bei erschoepftem Kontingent und ohne KI."""
+    from fastapi import HTTPException
+
+    from app import jobs
+    _fake_sandbox(monkeypatch)
+
+    def boom(*a, **k):
+        raise HTTPException(429, "darf nicht aufgerufen werden")
+    monkeypatch.setattr(jobs, "_check_quota", boom)
+    monkeypatch.setattr(jobs, "_check_ready", boom)
+    pid = _proj(user)
+    jid = _job(user, pid, BLOCK, copy.deepcopy(BLOCK_META))
+    r = user.post(f"/api/jobs/{jid}/param", json={"values": [{"id": "D2", "value": 45}]}, headers=H)
+    assert r.status_code == 200, r.text
+    assert _wait(user, jid)["status"] == "done"
+
+
+def test_param_cad_gesperrt(user, monkeypatch):
+    from app import db
+    _fake_sandbox(monkeypatch)
+    pid = _proj(user)
+    jid = _job(user, pid, BLOCK, copy.deepcopy(BLOCK_META))
+    db.ex("UPDATE users SET cad_quota=0 WHERE username=?", (user.username,))
+    r = user.post(f"/api/jobs/{jid}/param", json={"values": [{"id": "D2", "value": 45}]}, headers=H)
+    assert r.status_code == 403 and r.json()["detail"] == "CAD ist für dieses Konto gesperrt."
+    assert db.q1("SELECT COUNT(*) n FROM job_versions WHERE job_id=?", (jid,))["n"] == 1
+
+
+def test_param_grenzen(user, monkeypatch):
+    """Hoechstens PARAM_PER_HOUR Neuaufbauten je Stunde und ein laufender je Nutzer (Pool ist geteilt)."""
+    from app import config, db
+    _fake_sandbox(monkeypatch)
+    pid = _proj(user)
+    jid = _job(user, pid, BLOCK, copy.deepcopy(BLOCK_META))
+    url = f"/api/jobs/{jid}/param"
+    monkeypatch.setattr(config, "PARAM_PER_HOUR", 1)
+    assert user.post(url, json={"values": [{"id": "D2", "value": 45}]}, headers=H).status_code == 200
+    _wait(user, jid)
+    r = user.post(url, json={"values": [{"id": "D2", "value": 46}]}, headers=H)
+    assert r.status_code == 429 and "je Stunde" in r.json()["detail"]
+    monkeypatch.setattr(config, "PARAM_PER_HOUR", 30)
+    jid2 = _job(user, pid, BLOCK, copy.deepcopy(BLOCK_META))
+    _version(jid2, 2, "param", "running", copy.deepcopy(BLOCK_META), "D2 = 50 mm")
+    db.ex("UPDATE jobs SET status='running' WHERE id=?", (jid2,))
+    r = user.post(url, json={"values": [{"id": "D2", "value": 46}]}, headers=H)
+    assert r.status_code == 429 and r.json()["detail"] == "Es läuft bereits ein Neuaufbau. Bitte warten."
+    db.ex("UPDATE jobs SET status='cancelled' WHERE id=?", (jid2,))   # abgebrochener Auftrag zaehlt nicht mehr
+    assert user.post(url, json={"values": [{"id": "D2", "value": 46}]}, headers=H).status_code == 200
+    _wait(user, jid)
+
+
+def test_param_annahme_bestaetigen(user, monkeypatch):
+    """Spec §3: Enter mit unveraendertem Wert bestaetigt eine Annahme als nachgemessen."""
+    from app import jobs
+    _fake_sandbox(monkeypatch)
+    pid = _proj(user)
+    jid = _job(user, pid, BLOCK, copy.deepcopy(BLOCK_META))
+    assert user.post(f"/api/jobs/{jid}/param", json={"values": [{"id": "D2", "value": 75}]}, headers=H).status_code == 200
+    v = _wait(user, jid)["versions"][-1]
+    d = {x["id"]: x for x in v["meta"]["dimensions"]}
+    assert v["status"] == "ok" and "BLOCK_H = 75  # Hoehe, Annahme\n" in v["code"]
+    assert (d["D2"]["value"], d["D2"]["assumed"], d["D2"]["user_set"]) == (75.0, False, True)
+    assert [x["value"] for x in jobs.learned_dims(pid)] == [75.0]
+
+
+def test_version_zweiter_param_baut_eigene_version(user, monkeypatch):
+    """Abbrechen und sofort neu anfordern: jeder Pool-Lauf baut seine Version, der abgebrochene nur seine."""
+    import threading
+
+    from app import jobs
+    subs = []
+    monkeypatch.setattr(jobs, "_submit", lambda *a: subs.append(a))
+    pid = _proj(user)
+    jid = _job(user, pid, BLOCK, copy.deepcopy(BLOCK_META))
+    url = f"/api/jobs/{jid}/param"
+    assert user.post(url, json={"values": [{"id": "D2", "value": 45}]}, headers=H).status_code == 200
+    assert user.post(f"/api/jobs/{jid}/cancel", headers=H).status_code == 200
+    assert user.post(url, json={"values": [{"id": "D2", "value": 50}]}, headers=H).json() == {"version": 3}
+    assert subs == [(jid, "param", "2"), (jid, "param", "3")]
+    _fake_sandbox(monkeypatch)
+    ev1 = threading.Event()
+    ev1.set()                                                          # Lauf 1 wurde abgebrochen
+    jobs._run_safe(jid, "param", "2", ev1)
+    ev2 = threading.Event()
+    jobs._cancel[jid] = ev2
+    jobs._run_safe(jid, "param", "3", ev2)
+    j = user.get(f"/api/jobs/{jid}").json()
+    assert (j["status"], j["current_version"]) == ("done", 3), j
+    assert "BLOCK_H = 50  # Hoehe, Annahme\n" in j["versions"][-1]["code"] and j["versions"][-1]["status"] == "ok"
+    assert j["versions"][1]["status"] == "cancelled"
+
+
+def test_version_param_fehlt_nicht_queued(user, monkeypatch):
+    """Ist die Param-Version vor dem Lauf nicht mehr running, bleibt der Auftrag nicht fuer immer queued."""
+    import threading
+
+    from app import db, jobs
+    monkeypatch.setattr(jobs, "_submit", lambda *a: None)
+    pid = _proj(user)
+    jid = _job(user, pid, BLOCK, copy.deepcopy(BLOCK_META))
+    assert user.post(f"/api/jobs/{jid}/param", json={"values": [{"id": "D2", "value": 45}]}, headers=H).status_code == 200
+    db.ex("UPDATE job_versions SET status='cancelled' WHERE job_id=? AND version=2", (jid,))
+    ev = threading.Event()
+    jobs._cancel[jid] = ev
+    jobs._run_safe(jid, "param", "2", ev)
+    j = user.get(f"/api/jobs/{jid}").json()
+    assert (j["status"], j["error"], j["current_version"]) == ("failed", "Neuaufbau abgebrochen.", 1)
+
+
+def test_lernen_gleiche_bezeichnung_zwei_masse(user, monkeypatch):
+    """Zwei Masse mit gleicher Bezeichnung im Auftrag ueberschreiben sich beim Lernen nicht (UPSERT je label_norm)."""
+    from app import jobs
+    _fake_sandbox(monkeypatch)
+    pid = _proj(user)
+    meta = {"dimensions": [
+        {"id": "D3", "label": "Bohrung", "group": "bohrung", "var": "HOLE_D", "value": 6.0, "assumed": False, "editable": True},
+        {"id": "D5", "label": "Bohrung", "group": "bohrung", "var": "HOLE_E", "value": 4.0, "assumed": False,
+         "editable": True}]}
+    jid = _job(user, pid, "HOLE_D = 6.0\nHOLE_E = 4.0\npart = Box(1, 1, 1)\n", meta)
+    r = user.post(f"/api/jobs/{jid}/param", json={"values": [{"id": "D3", "value": 6.5}, {"id": "D5", "value": 4.2}]},
+                  headers=H)
+    assert r.status_code == 200, r.text
+    assert _wait(user, jid)["versions"][-1]["meta"]["dimensions"][0]["label"] == "Bohrung"     # Meta behaelt das Label
+    assert [(x["label"], x["value"], x["dim_id"]) for x in jobs.learned_dims(pid)] == \
+        [("Bohrung (D3)", 6.5, "D3"), ("Bohrung (D5)", 4.2, "D5")]
