@@ -227,10 +227,10 @@ def test_cad_auftrag_fuer_ein_teil(two, monkeypatch, user):
     project = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
     msg = jobs.build_initial_message(project, "Platte nachbauen", {"part_id": pl["id"], "name": "P"})
     text = msg[0]["content"][0]["text"]
-    assert "Modelliert wird nur Teil T2 „Platte“ (montiertes Teil)" in text
+    assert "Modelliert wird nur Teil T2 „Platte“ (montiertes Teil, Draufsicht): Umriss (mm) (" in text
     assert "| Teil |" in text and "| Messschieber |" in text
     alle = jobs.build_initial_message(project, "alles", {"name": "A"})[0]["content"][0]["text"]
-    assert "Teile im Foto: T1 Quader (Grundkörper), T2 Platte (montiertes Teil)" in alle
+    assert "Teile im Foto (Umrisse verbindlich): T1 „Quader“ (Grundkörper, Draufsicht): Umriss (mm) (" in alle
     _, rows = jobs.measurement_table(pid, pl["id"])
     assert rows and all(m["part_id"] != q["id"] for m in rows)
     other = user.post("/api/projects", json={"name": "x"}, headers=H).json()["id"]

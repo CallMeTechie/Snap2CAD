@@ -1509,14 +1509,16 @@ def _csv(pid: int) -> str:
 
     lines = ["ID;Bezeichnung;Art;Wert;Einheit;Unsicherheit;Messschieber;kritisch;Passung;Quelle;Ansicht;Punkte (mm);Teil;Nennmaß"]
     seq = {t["id"]: t["seq"] for t in db.q("SELECT id, seq FROM parts WHERE project_id=?", (pid,))}
+    photos = {p["id"]: p for p in db.q("SELECT * FROM photos WHERE project_id=?", (pid,))}
     for m in rows:
         d = db.jload(m["data"], {}) or {}
-        pts = " ".join(f"{p[0]:.2f}/{p[1]:.2f}" for p in d.get("points") or [])
+        tag, tpts = jobs.top_points(m, d, photos)
+        pts = " ".join(f"{p[0]:.2f}/{p[1]:.2f}" for p in tpts)
         safe_txt = lambda t: ("'" + t) if t[:1] in ("=", "+", "-", "@", "\t", "\r") else t  # noqa: E731
         cells = [f"M{m['seq']}", safe_txt(m["label"]), KIND_LABEL.get(m["kind"], m["kind"]), n(m["value"]), m["unit"],
                  n(m["unc"]),
                  n(m["caliper"]), "ja" if m["critical"] else "", safe_txt(m["fit"] or ""),
-                 jobs.SOURCE_LABEL.get(m["source"], m["source"]), d.get("view", ""), pts,
+                 jobs.SOURCE_LABEL.get(m["source"], m["source"]), f"{d.get('view', '')} {tag}".strip(), pts,
                  f"T{seq[m['part_id']]}" if m["part_id"] in seq else "", n(d.get("nominal"))]
         lines.append(";".join('"' + str(c).replace('"', '""') + '"' if any(x in str(c) for x in ';"\n') else str(c)
                               for c in cells))

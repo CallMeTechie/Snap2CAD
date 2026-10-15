@@ -10,7 +10,7 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from . import ai, auth, config, db, sandbox, settings
-from .parts import cad_text
+from .parts import cad_text, to_top
 
 _pool = ThreadPoolExecutor(max_workers=max(1, config.MAX_CONCURRENT_JOBS), thread_name_prefix="job")
 _cancel: dict[int, threading.Event] = {}
@@ -49,24 +49,36 @@ def _fmt(v, nd=2):
     return "–" if v is None else f"{v:.{nd}f}".rstrip("0").rstrip(".")
 
 
+def top_points(m: dict, d: dict, photos: dict) -> tuple[str, list]:
+    """Punkte einer Messung fuer Tabelle und CSV; Unteransicht in Draufsicht-Koordinaten mit Vermerk."""
+    pts = d.get("points") or []
+    if d.get("view") != "bottom" or not pts or m["photo_id"] not in photos:
+        return "", pts
+    ph = photos[m["photo_id"]]
+    tag = "(unten)" if (db.jload(ph["analysis"], {}) or {}).get("bottom_align") else \
+        "(unten, nicht ausgerichtet, links-rechts gespiegelt)"
+    return tag, to_top(ph, pts)
+
+
 def measurement_table(project_id: int, part_id: int | None = None) -> tuple[str, list[dict]]:
     rows = db.q("SELECT * FROM measurements WHERE project_id=? AND accepted=1 ORDER BY seq", (project_id,))
+    photos = {p["id"]: p for p in db.q("SELECT * FROM photos WHERE project_id=?", (project_id,))}
     if part_id is not None:
-        rows = [m for m in rows if m["part_id"] in (part_id, None)]
+        linked = {r["id"] for r in db.q("SELECT id, data FROM parts WHERE project_id=?", (project_id,))
+                  if (db.jload(r["data"], {}) or {}).get("same_as") == part_id}
+        rows = [m for m in rows if m["part_id"] in (part_id, None) or m["part_id"] in linked]
     seq = {t["id"]: t["seq"] for t in db.q("SELECT id, seq FROM parts WHERE project_id=?", (project_id,))}
     lines = ["| ID | Bezeichnung | Teil | Art | Wert | ± | Messschieber | Nennmaß | kritisch | Passung | Quelle "
              "| Ansicht/Punkte (mm) |",
              "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for m in rows:
         d = db.jload(m["data"], {}) or {}
-        pts = d.get("points") or []
-        where = d.get("view", "")
-        if pts:
-            where += " " + " ".join(f"({p[0]:.1f}, {p[1]:.1f})" for p in pts[:3])
+        tag, pts = top_points(m, d, photos)
+        where = (f"{d.get('view', '')} {tag} " + " ".join(f"({p[0]:.1f}, {p[1]:.1f})" for p in pts[:3])).strip()
         teil = f"T{seq[m['part_id']]}" if m["part_id"] in seq else ""
         lines.append(f"| M{m['seq']} | {m['label']} | {teil} | {m['kind']} | {_fmt(m['value'])} {m['unit']} | "
                      f"{_fmt(m['unc'])} | {_fmt(m['caliper'])} | {_fmt(d.get('nominal'))} | {'ja' if m['critical'] else ''} | "
-                     f"{m['fit'] or ''} | {SOURCE_LABEL.get(m['source'], m['source'])} | {where.strip()} |")
+                     f"{m['fit'] or ''} | {SOURCE_LABEL.get(m['source'], m['source'])} | {where} |")
     return "\n".join(lines), rows
 
 
