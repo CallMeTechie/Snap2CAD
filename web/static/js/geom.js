@@ -17,6 +17,31 @@ export function inPoly(p, P) {
 }
 export function polyArea(P) { let a = 0; for (let i = 0; i < P.length; i++) { const q = P[i], r = P[(i + 1) % P.length]; a += q[0] * r[1] - r[0] * q[1]; } return Math.abs(a) / 2; }
 
+// Naechste Kante eines geschlossenen Polygons (Kante i -> i+1, die letzte n-1 -> 0) in Reichweite tol:
+// { i, p: Fusspunkt, d: Abstand, t: Anteil auf der Kante 0..1 } oder null. Liegt der naechste Punkt auf einem
+// Eckpunkt (Fusspunkt am Kantenende), zaehlt das als Eckpunkt, nicht als Kante: null
+export function nearestOnPolygonEdge(pt, poly, tol) {
+  const n = poly?.length || 0;
+  if (n < 2) return null;
+  let best = null;
+  for (let i = 0; i < n; i++) {
+    const a = poly[i], b = poly[(i + 1) % n], dx = b[0] - a[0], dy = b[1] - a[1], l = dx * dx + dy * dy;
+    const t = l ? Math.max(0, Math.min(1, ((pt[0] - a[0]) * dx + (pt[1] - a[1]) * dy) / l)) : 0;
+    const p = [a[0] + t * dx, a[1] + t * dy], d = Math.hypot(pt[0] - p[0], pt[1] - p[1]);
+    const end = t <= 1e-9 || t >= 1 - 1e-9;
+    // bei gleichem Abstand gewinnt ein Fusspunkt innerhalb einer Kante
+    if (!best || d < best.d - 1e-12 || (Math.abs(d - best.d) <= 1e-12 && best.end && !end)) best = { i, p, d, t, end };
+  }
+  if (best.end || best.d > tol) return null;
+  return { i: best.i, p: best.p, d: best.d, t: best.t };
+}
+// Neues Polygon mit Punkt p nach Index i (zwischen i und i+1); Punkte werden kopiert
+export function insertVertex(poly, i, p) {
+  const out = poly.map(q => [...q]);
+  out.splice(i + 1, 0, [...p]);
+  return out;
+}
+
 // Innere Kandidatenkanten, die auf keiner Teilekante liegen (beide Enden naeher als tol mm)
 export function unassignedSegments(segments, polygons, tol = 1.5) {
   return segments.filter(s => s.kind === "inner" && !polygons.some(P => P.some((a, i) => {
