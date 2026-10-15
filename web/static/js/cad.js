@@ -2,6 +2,7 @@
 import { api, h, clear, icon, num, bytes, toast, fail, mmss, dt, confirmDlg, copyText, fmtValue } from "./lib.js";
 import { S, ensureProject, reloadProject, go, onLeave, refreshMe, jobBadge } from "./app.js";
 import { VIEW_LABEL } from "./photos.js";
+import { DEFAULT_SEL, DIM_GROUP_TEXT, conclusionText, de, dimSel, dimState, hasAnchors, paramBanner, parseDimInput } from "./geom.js";
 
 const PROC = {
   fdm: ["3D-Druck FDM", "Bohrungsausgleich, Wandstärke, Druckrichtung", "PETG"],
@@ -12,6 +13,9 @@ const RULES = { fdm: "FDM: Bohrungen +0,2–0,3 mm, Wandstärke ≥ 1,2 mm, druc
   cnc: "CNC: Innenradien, Normbohrungen, keine Hinterschnitte" };
 const CHIPS = { fdm: ["Bohrungen +0,2 mm für Schrauben", "Wandstärke 2 mm", "Ohne Stützen druckbar machen", "Fase 0,5 mm an der Unterseite"],
   sla: ["Hohl mit 2 mm Wand und Entlüftung", "Kanten 0,3 mm verrunden"], cnc: ["Bohrungen als Senkung M6", "Innenradien vergrößern", "Für FDM aufbereiten"] };
+// Gruppen der Bemaßung: Schlüssel und Schalter über dem Viewer (Spec Stufe B §3); Spalte „Gruppe“ aus DIM_GROUP_TEXT
+const DIM_GROUPS = [["aussen", "Außenmaße"], ["bohrung", "Bohrungen"], ["tiefe", "Tiefen"], ["fase", "Fasen"], ["platte", "Platten"],
+  ["sonst", "Sonstige"]];
 
 function flow(stage) {
   const it = (n, t, st) => h("li", { class: st }, h("span", { class: "n" }, st === "dn" ? "✓" : n), t);
@@ -208,12 +212,19 @@ export async function form(main) {
 export async function job(main, id) {
   let J = await api(`/api/jobs/${id}`);
   if (!main.isConnected) return;  // waehrend des Ladens weg navigiert: keine Uhr und keine Abfrage starten
-  let ver = null, tab = "3d", viewer = null, timer = null, inflight = false, gone = false, fails = 0, jv = 0, liveCode = false, lastSig = "";
+  let ver = null, tab = "3d", viewer = null, timer = null, inflight = false, gone = false, fails = 0, jv = 0, liveCode = false, lastSig = "",
+    followLatest = false;   // nach einem Neuaufbau: am Ende die neue aktuelle Version zeigen
   const root = h("div", { style: { display: "contents" } });
   main.append(root);
   onLeave(() => { gone = true; clearTimeout(timer); clearInterval(clock); viewer?.dispose(); viewer = null; photoCache = null; });
   const running = () => J.status === "queued" || J.status === "running";
-  const sig = () => `${J.status}|${(J.log || []).length}|${J.versions.length}`;
+  // Neuaufbau ohne KI (Spec Stufe B §2): die Ergebnisansicht bleibt stehen, Felder gesperrt; Signatur ohne Protokollzeilen.
+  // Nur wenn die letzte Version selbst eine laufende Param-Version ist: ein KI-Lauf nach einem Neuaufbau legt seine
+  // Version erst nach der Antwort an und zeigt bis dahin den Fortschritt (drawRun).
+  const paramRunning = () => { const L = J.versions[J.versions.length - 1]; return running() && L?.trigger === "param" && L.status === "running"; };
+  const sig = () => (paramRunning() ? `p|${J.versions.length}` : `${J.status}|${(J.log || []).length}|${J.versions.length}`);
+  const canEdit = V => !!V && V.status === "ok" && V.version === J.current_version && !running();
+  const lockText = () => (running() ? "Der Auftrag läuft – bitte warten." : "Werte sind nur in der aktuellen Version änderbar.");
 
   function runStart() {
     const L = J.log || [];
@@ -244,7 +255,12 @@ export async function job(main, id) {
   function draw() {
     lastSig = sig();
     viewer?.dispose(); viewer = null;
-    if (running()) drawRun(); else drawResult();
+    if (running() && !paramRunning()) drawRun(); else drawResult();
+    if (running()) startPoll();
+  }
+  async function cancelJob() {
+    if (!await confirmDlg("Auftrag abbrechen?", "Der laufende Schritt wird beendet. Bereits fertige Versionen bleiben erhalten.", "Abbrechen", true)) return;
+    try { J = await api(`/api/jobs/${id}/cancel`, { method: "POST" }); if (gone) return; jv++; draw(); } catch (e) { fail(e); }
   }
 
   // ---------------------------------------------------------------- Fortschritt
@@ -285,10 +301,7 @@ export async function job(main, id) {
           logPre, codeBox,
           h("div", { class: "chips", style: { justifyContent: "space-between" } },
             h("span", { class: "small muted" }, "Du kannst die Seite verlassen. Der Auftrag läuft weiter und erscheint unter „Meine Aufträge“."),
-            h("button", { class: "btn danger", onclick: async () => {
-              if (!await confirmDlg("Auftrag abbrechen?", "Der laufende Schritt wird beendet. Bereits fertige Versionen bleiben erhalten.", "Abbrechen", true)) return;
-              try { J = await api(`/api/jobs/${id}/cancel`, { method: "POST" }); if (gone) return; jv++; draw(); } catch (e) { fail(e); }
-            } }, "Abbrechen")))));
+            h("button", { class: "btn danger", onclick: cancelJob }, "Abbrechen")))));
     logPre.scrollTop = logPre.scrollHeight;
     startPoll();
   }
@@ -296,6 +309,7 @@ export async function job(main, id) {
   // ---------------------------------------------------------------- Ergebnis
   function drawResult() {
     const vers = J.versions;
+    if (followLatest && !running()) { ver = null; followLatest = false; }
     if (ver === null || !vers.find(v => v.version === ver)) ver = J.current_version || vers[vers.length - 1]?.version || null;
     const V = vers.find(v => v.version === ver);
     const ok = V && V.status === "ok";
@@ -303,7 +317,7 @@ export async function job(main, id) {
     const nWarn = checks.filter(c => c.state === "warn").length, nFail = checks.filter(c => c.state === "fail").length;
     const verSel = h("select", { class: "input", style: { minHeight: "38px", width: "auto" }, onchange: e => { ver = Number(e.target.value); draw(); } },
       [...vers].reverse().map(v => h("option", { value: v.version, selected: v.version === ver },
-        `v${v.version} · ${v.version === J.current_version ? "aktuell · " : ""}${v.status === "ok" ? "geprüft" : v.status === "cancelled" ? "abgebrochen" : v.error ? "Sandbox-Fehler" : "fehlgeschlagen"}`)));
+        `v${v.version} · ${v.version === J.current_version ? "aktuell · " : ""}${v.status === "ok" ? "geprüft" : v.status === "running" ? "läuft" : v.status === "cancelled" ? "abgebrochen" : v.error ? "Sandbox-Fehler" : "fehlgeschlagen"}`)));
     const summary = !V ? h("span", { class: "badge off" }, "keine Version")
       : !ok ? h("span", { class: "badge err" }, "Version fehlerhaft")
         : nFail ? h("span", { class: "badge err" }, `${nFail} Prüfung(en) nicht bestanden`)
@@ -311,12 +325,17 @@ export async function job(main, id) {
 
     const head = h("div", { class: "head" }, h("div", { class: "t" }, h("h1", {}, J.name),
       h("div", { class: "chips" }, vers.length ? h("label", { class: "chips small" }, "Version", verSel) : null, summary, jobBadge(J.status),
+        paramRunning() ? h("span", { class: "badge info", role: "status" }, h("span", { class: "spin", style: { width: "12px", height: "12px" } }),
+          `Neuaufbau mit ${vers[vers.length - 1].request_text} …`) : null,
+        paramRunning() ? h("button", { class: "btn sm danger", onclick: cancelJob }, "Abbrechen") : null,
         S.me.role === "admin" && J.user_id !== S.me.id ? h("span", { class: "badge info" }, "Auftrag eines anderen Benutzers") : null)),
     flow(ok ? 3 : 2));
 
     const errNote = J.status === "failed" || J.status === "cancelled" ? h("div", { class: `note ${J.status === "failed" ? "err" : "warn"}` }, icon("warn"),
       h("div", {}, h("strong", {}, J.status === "failed" ? "Auftrag fehlgeschlagen. " : "Auftrag abgebrochen. "), J.error || "",
-        J.current_version ? ` Die letzte gültige Version ist v${J.current_version}.` : "")) : null;
+        J.current_version ? ` Die letzte gültige Version ist v${J.current_version}.` : "",
+        J.status === "failed" && J.project_id && vers[vers.length - 1]?.trigger === "param"
+          ? " Der Wert ist trotzdem als Messschieberwert gemerkt (Messseite → löschen)." : "")) : null;
 
     // Tabs
     const tabs = [["3d", "3D-Ansicht", ok], ["code", `Code`, !!V?.code], ["claude", "KI-Antwort", !!V?.claude_text], ["foto", "Foto-Abgleich", ok && V.files["outline.json"] > 2]];
@@ -367,12 +386,79 @@ export async function job(main, id) {
         meta.check_before_manufacturing?.length ? h("div", { class: "note warn", style: { flexDirection: "column", gap: "4px" } }, h("strong", {}, "Vor der Fertigung:"),
           h("ul", { class: "ul", style: { paddingLeft: "16px" } }, meta.check_before_manufacturing.map(a => h("li", {}, String(a))))) : null));
     }
-    if (meta.dimensions?.length) {
-      right.append(h("section", { class: "card", style: { gap: "10px" } }, h("h2", {}, "Maße im Modell"),
-        h("table", { class: "t" }, h("thead", {}, h("tr", {}, h("th", {}, "ID"), h("th", {}, "Merkmal"), h("th", { style: { textAlign: "right" } }, "gemessen"), h("th", { style: { textAlign: "right" } }, "Nennmaß"))),
-          h("tbody", {}, meta.dimensions.map(d => h("tr", { title: d.note || "" }, h("td", { class: "mono" }, d.id || ""), h("td", {}, d.label || "", d.note ? h("div", { class: "xs muted" }, d.note) : null),
-            h("td", { class: "num" }, typeof d.measured === "number" ? num(d.measured, 2) : String(d.measured ?? "–")), h("td", { class: "num", style: { fontWeight: 600 } }, typeof d.nominal === "number" ? num(d.nominal, 2) : String(d.nominal ?? "–"))))))));
+    if (meta.dimensions?.length) right.append(dimTable(V, meta.dimensions));
+  }
+
+  // ---------------------------------------------------------------- Bemaßung am Modell (Spec Stufe B §2, §3, §5)
+  async function sendParam(values) {
+    if (values.length > 20) { toast("Höchstens 20 Werte auf einmal.", "err"); return false; }
+    let r;
+    try { r = await api(`/api/jobs/${id}/param`, { method: "POST", body: { values, base: J.current_version } }); }
+    catch (e) { fail(e); return false; }
+    if (r.learned === false) toast("Ohne Projekt – der Wert wird nicht gemerkt.");
+    try {
+      const j = await api(`/api/jobs/${id}`);
+      if (gone) return true;
+      J = j; jv++; ver = null; followLatest = true; draw();
+    } catch {   // Neuaufbau ist angenommen: die Abfrage holt den Stand nach, statt die Felder wieder freizugeben
+      if (gone) return true;
+      jv++; followLatest = true; startPoll();
     }
+    return true;
+  }
+  // Änderungswunsch senden („Änderung anfordern“ und „Schlüsse ziehen“); true = angenommen
+  async function submitIterate(text) {
+    try {
+      J = await api(`/api/jobs/${id}/iterate`, { method: "POST", body: { text } });
+      refreshMe().catch(() => {});
+      if (!gone) { jv++; ver = null; draw(); }
+      return true;
+    } catch (e) { fail(e); return false; }
+  }
+  async function conclude() {
+    const text = conclusionText(J.pending_param || []);
+    if (!text || running() || !S.status?.ai) return;
+    await submitIterate(text);
+  }
+  function dimTable(V, list) {
+    const edit = canEdit(V), inputs = [];
+    const btn = h("button", { class: "btn sm", onclick: () => send(null) }, "Werte übernehmen");
+    // only = ein Feld (Enter): sendet dieses Maß immer, auch unverändert („Annahme bestätigen“, Spec §3);
+    // sonst („Werte übernehmen“) alle geänderten Felder
+    async function send(only) {
+      const vals = [];
+      for (const [d, inp] of inputs) {
+        if (only && inp !== only) continue;
+        if (!only && inp.value.trim() === de(d.value)) continue;
+        const r = parseDimInput(inp.value);
+        if (r.error) { toast(`${d.id}: ${r.error}`, "err"); inp.focus(); return; }
+        if (only || Math.abs(r.value - d.value) >= 0.0005) vals.push({ id: d.id, value: r.value });
+      }
+      if (!vals.length) { toast("Keine geänderten Werte."); return; }
+      const lock = on => { btn.disabled = on; inputs.forEach(([, inp]) => { inp.disabled = on; }); };
+      lock(true);
+      if (!await sendParam(vals)) lock(false);
+    }
+    const rows = list.map(d => {
+      const old = !/^D\d+$/.test(d.id || "");          // Version vor Stufe B: measured/nominal, nicht editierbar
+      const val = typeof d.value === "number" ? d.value : typeof d.nominal === "number" ? d.nominal : null;
+      let cell = h("td", { class: "num", style: { fontWeight: 600 } }, val === null ? "–" : num(val, 2));
+      if (edit && d.editable && typeof d.value === "number") {
+        const inp = h("input", { class: "input mono dimin", inputmode: "decimal", value: de(d.value), "aria-label": `${d.id} ${d.label || ""}`,
+          onclick: e => e.stopPropagation(), onkeydown: e => { if (e.key === "Enter") { e.preventDefault(); send(inp); } } });
+        inputs.push([d, inp]);
+        cell = h("td", { class: "num" }, inp);
+      }
+      const zustand = old ? (typeof d.measured === "number" ? `gemessen ${num(d.measured, 2)}` : "") : dimState(d);
+      return h("tr", { title: d.note || "", style: hasAnchors(d) ? { cursor: "pointer" } : {}, onclick: () => viewer?.highlight(d.id) },
+        h("td", { class: "mono" }, d.id || ""), h("td", {}, d.label || "", d.note ? h("div", { class: "xs muted" }, d.note) : null),
+        h("td", { class: "small" }, DIM_GROUP_TEXT[d.group] || "–"), cell, h("td", { class: "small" }, zustand));
+    });
+    return h("section", { class: "card", style: { gap: "10px" } }, h("h2", {}, "Maße im Modell"),
+      h("table", { class: "t" }, h("thead", {}, h("tr", {}, h("th", {}, "ID"), h("th", {}, "Merkmal"), h("th", {}, "Gruppe"),
+        h("th", { style: { textAlign: "right" } }, "Wert"), h("th", {}, "Zustand"))), h("tbody", {}, rows)),
+      inputs.length ? h("div", { class: "chips" }, btn, h("span", { class: "xs muted" }, "Enter im Feld übernimmt nur diesen Wert · höchstens 20 auf einmal"))
+        : V.version !== J.current_version && list.some(d => d.editable) ? h("span", { class: "xs muted" }, "Werte sind nur in der aktuellen Version änderbar.") : null);
   }
 
   function draw3d(panel, V) {
@@ -380,25 +466,45 @@ export async function job(main, id) {
     const viewBtns = {};
     const vb = (k, t) => (viewBtns[k] = h("button", { "aria-pressed": String(k === "iso"), onclick: () => { viewer?.setView(k); Object.entries(viewBtns).forEach(([q, b]) => b.setAttribute("aria-pressed", String(q === k))); } }, t));
     const views3 = h("div", { class: "views3" });
+    const dims = Array.isArray(V.meta?.dimensions) ? V.meta.dimensions : [];
+    let sel = { ...DEFAULT_SEL };
+    try { sel = dimSel(localStorage.getItem("dims.groups")); } catch { /* Speicher gesperrt: Standard */ }
+    const setSel = (k, on) => {
+      sel = { ...sel, [k]: on };
+      try { localStorage.setItem("dims.groups", JSON.stringify(sel)); } catch { /* */ }
+      viewer?.setGroups(sel);
+    };
+    const cb = (k, t) => h("label", { class: "check small" }, h("input", { type: "checkbox", checked: sel[k], onchange: e => setSel(k, e.target.checked) }), t);
+    const pending = J.pending_param || [];
+    const conclBtn = () => h("button", { class: "btn claude sm", disabled: !pending.length || running() || !S.status?.ai,
+      title: !S.status?.ai ? "KI nicht eingerichtet" : pending.length ? "Die KI leitet abhängige Maße aus den nachgemessenen Werten ab" : "Erst einen Wert am Modell eintragen",
+      onclick: conclude }, icon("sparkle", 14), "Schlüsse ziehen");
+    const bar = h("div", { class: "dimbar", role: "group", "aria-label": "Maße anzeigen" },
+      DIM_GROUPS.map(([k, t]) => cb(k, t)), cb("annahmen", "Annahmen"), cb("nur_annahmen", "Nur Annahmen"), h("span", { style: { flex: "1" } }), conclBtn());
+    const ids = V.trigger === "param" && Array.isArray(V.meta?.param_ids) ? V.meta.param_ids : [];
+    const btext = V.version === J.current_version ? paramBanner(pending.filter(p => ids.includes(p.id))) : "";
+    const banner = btext ? h("div", { class: "note info", role: "status" }, icon("info"), h("span", { style: { flex: "1" } }, btext), conclBtn()) : null;
+    const noProject = !J.project_id && dims.some(d => d.editable) ? h("span", { class: "xs muted" }, "Ohne Projekt – der Wert wird nicht gemerkt.") : null;
     box.append(
       h("div", { class: "vtl" }, h("div", { class: "seg" }, vb("iso", "Iso"), vb("top", "Oben"), vb("front", "Vorn"), vb("side", "Seite"))),
       h("div", { class: "vtr" },
-        h("label", { class: "check" }, h("input", { type: "checkbox", checked: true, onchange: e => viewer?.setDims(e.target.checked) }), "Hauptmaße"),
         h("label", { class: "check" }, h("input", { type: "checkbox", onchange: e => viewer?.setEdges(e.target.checked) }), "Kanten"),
         h("label", { class: "check" }, h("input", { type: "checkbox", onchange: e => viewer?.setSection(e.target.checked) }), "Schnitt")),
-      h("span", { class: "vbl" }, "Ziehen = drehen · Rad / Pinch = zoomen · Rechtsklick oder zwei Finger = verschieben"),
+      h("span", { class: "vbl" }, "Ziehen = drehen · Rad / Pinch = zoomen · Rechtsklick oder zwei Finger = verschieben · Klick auf ein Maß = Wert eintragen"),
       h("div", { class: "vbr", "aria-label": "Zoom" },
         h("button", { class: "iconbtn", "aria-label": "Verkleinern", onclick: () => viewer?.zoom(0.8) }, icon("minus")),
         h("button", { class: "iconbtn", "aria-label": "Vergrößern", onclick: () => viewer?.zoom(1.25) }, icon("plus")),
         h("button", { class: "btn sm", onclick: () => viewer?.fit() }, "Einpassen"),
         h("button", { class: "iconbtn", "aria-label": "Vollbild", onclick: () => document.fullscreenElement ? document.exitFullscreen() : box.requestFullscreen?.() }, icon("full"))));
-    clear(panel, box, views3);
+    clear(panel, bar, banner, noProject, box, views3);
     const loading = h("div", { class: "empty", style: { position: "absolute", inset: 0, justifyContent: "center" } }, h("span", { class: "spin" }), "3D-Modell wird geladen …");
     box.append(loading);
-    import("./viewer.js").then(({ createViewer }) => createViewer(box, `/api/jobs/${id}/v/${V.version}/model.stl`)).then(v => {
+    import("./viewer.js").then(({ createViewer }) => createViewer(box, `/api/jobs/${id}/v/${V.version}/model.stl`, dims, { onSubmit: sendParam })).then(v => {
       loading.remove();
       if (!box.isConnected) { v.dispose(); return; }
       viewer = v;
+      v.setGroups(sel);
+      v.setLocked(!canEdit(V), lockText());
       const snaps = v.snapshots(["top", "front", "side"]);
       clear(views3, [["top", "Oben"], ["front", "Vorn"], ["side", "Seite"]].map(([k, t]) => h("figure", { onclick: () => viewBtns[k].click() },
         h("img", { src: snaps[k], alt: `${t}-Ansicht` }), h("figcaption", {}, t))));
@@ -484,11 +590,10 @@ export async function job(main, id) {
     const ta = h("textarea", { id: "chg", class: "input", rows: 3, maxlength: 4000, placeholder: "z. B. Lagersitz als Sackloch 7 mm tief, Rest 1 mm Boden" });
     const next = Math.max(...J.versions.map(v => v.version)) + 1;
     const us = S.status?.usage || {};
-    const btn = h("button", { class: "btn primary", onclick: async () => {
+    const btn = h("button", { class: "btn primary", disabled: running(), onclick: async () => {
       if (!ta.value.trim()) { ta.focus(); toast("Bitte die Änderung beschreiben", "err"); return; }
       btn.disabled = true;
-      try { J = await api(`/api/jobs/${id}/iterate`, { method: "POST", body: { text: ta.value } }); refreshMe().catch(() => {}); if (gone) return; jv++; ver = null; draw(); }
-      catch (e) { fail(e); btn.disabled = false; }
+      if (!await submitIterate(ta.value)) btn.disabled = false;
     } }, `v${next} erzeugen`);
     return h("section", { class: "card", "aria-labelledby": "it-h" },
       h("div", { class: "row", style: { gap: "32px" } },
@@ -496,7 +601,8 @@ export async function job(main, id) {
           h("h2", { id: "it-h" }, "Verlauf"),
           h("ol", { class: "vers" }, J.versions.map(v => h("li", { "aria-current": String(v.version === ver), onclick: () => { ver = v.version; draw(); } },
             h("span", { class: "vn" }, `v${v.version}`),
-            h("span", { class: "small" }, v.trigger === "create" ? "Erster Entwurf" : v.trigger === "autofix" ? "Automatische Korrektur" : `Änderung: ${(v.request_text || "").slice(0, 80)}`,
+            h("span", { class: "small" }, v.trigger === "create" ? "Erster Entwurf" : v.trigger === "autofix" ? "Automatische Korrektur"
+              : v.trigger === "param" ? `Neuaufbau: ${v.request_text || ""}` : `Änderung: ${(v.request_text || "").slice(0, 80)}`,
               h("span", { class: "muted" }, ` · ${v.status === "ok" ? "geprüft" : v.error ? `Fehler (${v.error.type})` : v.status}`)),
             h("span", { class: "xs muted" }, v.seconds ? `${num(v.seconds, 0)} s` : "")))),
           h("a", { href: "/cad", class: "small" }, "Neuen Auftrag anlegen")),
