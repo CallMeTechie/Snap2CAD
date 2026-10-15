@@ -74,7 +74,7 @@ export default async function (main) {
   const staleEl = h("span", { class: "xs", style: { color: "var(--warn)" }, hidden: true }, "Werkstück geändert – Kanten neu erkennen");
   const upStale = () => { staleEl.hidden = !(src && planar(src.view) && S.project.photos.find(p => p.id === src.photo.id)?.edges_stale); };
   const partsBox = h("div");
-  let edgeDrag = false;
+  let edgeDrag = false, rDrag = false;  // Eckpunkt ziehen (links) bzw. Rechtsklick-Ziehen der Teile-Ebene
 
   const picker = projectPicker(() => { selId = null; init(); });
   let pickerT = 0;
@@ -109,6 +109,7 @@ export default async function (main) {
     ctx: () => ctx, scr: (ix, iy) => scr(ix, iy), toPX: (X, Y) => src.toPX(X, Y), cursorMM: () => cursor?.mm || null,
     photoId: () => (src && planar(src.view) ? src.photo.id : null), active: () => tool === "edges",
     redraw: () => { dirty = true; }, changed: () => { renderList(); dirty = true; }, selectPart: () => renderList(),
+    toEdges: () => { if (tool !== "edges") setTool("edges"); },
   });
 
   // ---------------------------------------------------------------- Quellen
@@ -192,8 +193,8 @@ export default async function (main) {
   const imgPt = (sx, sy) => [(sx - tx) / s, (sy - ty) / s];
 
   // ---------------------------------------------------------------- Kantenfang
-  function snap(ix, iy) {
-    if (!snapOn || !pixels || tool === "pan") return [ix, iy, false];
+  function snap(ix, iy, force = false) {  // force: Eckpunkt der Teile-Ebene wird gezogen, auch im Werkzeug „Verschieben“
+    if (!snapOn || !pixels || (tool === "pan" && !force)) return [ix, iy, false];
     const r = Math.round(Math.min(25, Math.max(2, 7 / s)));
     const { w, h: H, g: G } = pixels;
     const g = (x, y) => G[y * w + x];
@@ -311,14 +312,15 @@ export default async function (main) {
     if (tool === "circle") return "diameter";
     return tool;
   }
+  const EDIT = " · Eckpunkt ziehen · Rechtsklick auf Kante = Punkt · Rechtsklick ziehen = Punkt mit Linie";  // Teile-Ebene, jedes Werkzeug
   const HINTS = {
-    pan: "Ziehen = verschieben · Rad = zoomen · Messung anklicken = auswählen",
-    length: "Strecke: 2 Punkte setzen · Shift = waagerecht/senkrecht · Esc = abbrechen · Ziehen = verschieben",
+    pan: "Ziehen = verschieben · Rad = zoomen · Messung anklicken = auswählen" + EDIT,
+    length: "Strecke: 2 Punkte setzen · Shift = waagerecht/senkrecht · Esc = abbrechen · Ziehen = verschieben" + EDIT,
     height: "Höhe: Fußpunkt auf der Tischkante (0) und Oberkante setzen · Shift = senkrecht",
-    circle: "Kreis: 3 Punkte auf dem Rand setzen · Backspace = letzten Punkt zurück",
-    point: "Punkt: Klick setzt eine Koordinate (Ursprung unten links)",
-    edges: "Kanten: Teil anklicken · Eckpunkt ziehen · Griff + an der Kantenmitte = Punkt einfügen · Entf = Punkt löschen · Esc = abbrechen",
-    angle: "Winkel: Punkt auf Schenkel 1, Scheitel, Punkt auf Schenkel 2",
+    circle: "Kreis: 3 Punkte auf dem Rand setzen · Backspace = letzten Punkt zurück" + EDIT,
+    point: "Punkt: Klick setzt eine Koordinate (Ursprung unten links)" + EDIT,
+    edges: "Kanten: Teil anklicken · Eckpunkt ziehen · Griff + an der Kantenmitte = Punkt einfügen · Rechtsklick auf Kante = Punkt · Rechtsklick ziehen = Punkt mit Linie · Entf = Punkt löschen · Esc = abbrechen",
+    angle: "Winkel: Punkt auf Schenkel 1, Scheitel, Punkt auf Schenkel 2" + EDIT,
   };
   function setTool(k) {
     if (k !== "edges") layer.cancel();
@@ -342,14 +344,14 @@ export default async function (main) {
   }
 
   function evPos(e) { const r = stage.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
-  function updateCursor(e) {
+  function updateCursor(e, force = false) {
     if (!img) return;
     const [sx, sy] = evPos(e);
     let [ix, iy] = imgPt(sx, sy);
     let snapped = false;
-    [ix, iy, snapped] = snap(ix, iy);
+    [ix, iy, snapped] = snap(ix, iy, force || edgeDrag || rDrag);
     let mm = src.toMM(ix, iy);
-    if (e.shiftKey && pts.length && (tool === "length")) {
+    if (e.shiftKey && pts.length && (tool === "length") && !edgeDrag && !rDrag) {
       const p0 = pts[pts.length - 1];
       if (Math.abs(mm[0] - p0[0]) > Math.abs(mm[1] - p0[1])) mm = [mm[0], p0[1]]; else mm = [p0[0], mm[1]];
       [ix, iy] = src.toPX(...mm);
@@ -365,8 +367,12 @@ export default async function (main) {
       const [a, b] = [...pointers.values()];
       pinch = { d: Math.hypot(a[0] - b[0], a[1] - b[1]), s, cx: (a[0] + b[0]) / 2, cy: (a[1] + b[1]) / 2, tx, ty };
       if (edgeDrag) { edgeDrag = false; layer.cancel(); }
+      if (rDrag) { rDrag = false; layer.cancelDrag(); }
       dragStart = null; return;
     }
+    // Eckpunkte der Teile in jedem Werkzeug ziehbar (Vorrang vor dem Werkzeug), Rechtsklick fuegt Punkte und Linien ein
+    if (img && e.button === 0) { updateCursor(e); if (layer.downVertexAny(...evPos(e))) { edgeDrag = true; return; } }
+    if (img && e.button === 2) { updateCursor(e, true); if (layer.downRight(...evPos(e))) { rDrag = true; return; } }
     if (tool === "edges" && e.button === 0) { updateCursor(e); if (layer.down(...evPos(e))) { edgeDrag = true; return; } }
     dragStart = { x: e.clientX, y: e.clientY, tx, ty, moved: false, btn: e.button };
     if (tool === "pan" || e.button !== 0) stage.style.cursor = "grabbing";
@@ -381,6 +387,7 @@ export default async function (main) {
       dirty = true; upStatus(); return;
     }
     if (edgeDrag) { updateCursor(e); layer.move(...evPos(e)); return; }
+    if (rDrag) { updateCursor(e); layer.moveRight(...evPos(e)); return; }
     if (dragStart) {
       const dx = e.clientX - dragStart.x, dy = e.clientY - dragStart.y;
       if (dragStart.moved || Math.hypot(dx, dy) > 5) {
@@ -393,7 +400,13 @@ export default async function (main) {
   const endPointer = e => {
     pointers.delete(e.pointerId);
     if (pointers.size < 2) pinch = null;
-    if (edgeDrag) { edgeDrag = false; if (e.type === "pointercancel") layer.cancel(); else layer.up(); return; }
+    if (edgeDrag) {
+      edgeDrag = false;
+      if (e.type === "pointercancel") { layer.cancel(); return; }
+      if (layer.up() === "tap" && tool !== "edges" && e.button === 0) { updateCursor(e); click(e); }  // Klick ohne Ziehen: Werkzeug wie bisher
+      return;
+    }
+    if (rDrag) { rDrag = false; if (e.type === "pointercancel") layer.cancelDrag(); else { updateCursor(e, true); layer.upRight(...evPos(e)); } return; }
     const d = dragStart; dragStart = null;
     stage.style.cursor = tool === "pan" ? "grab" : "crosshair";
     if (!d || d.moved || d.btn !== 0 || e.type === "pointercancel") return;
@@ -405,6 +418,7 @@ export default async function (main) {
   stage.addEventListener("pointerleave", () => { if (!dragStart) { cursor = null; loupe.hidden = true; dirty = true; upStatus(); } });
   stage.addEventListener("wheel", e => { e.preventDefault(); const [sx, sy] = evPos(e); zoomAt(Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015)), sx, sy); updateCursor(e); }, { passive: false });
   stage.addEventListener("contextmenu", e => e.preventDefault());
+  stage.addEventListener("dblclick", e => { if (tool === "edges" && e.button === 0) layer.dbl(); });
 
   function hit(sx, sy) {
     let best = null, bd = 12;
@@ -443,6 +457,7 @@ export default async function (main) {
   const onKey = e => {
     if (e.target.closest("input,textarea,select,[contenteditable]") || e.metaKey || e.ctrlKey || e.altKey) return;
     const k = e.key.toLowerCase();
+    if (k === "escape" && layer.dragging) { layer.cancelDrag(); e.preventDefault(); return; }
     if (tool === "edges") {
       if (layer.key(e)) { e.preventDefault(); return; }
       if (k === "delete" || k === "backspace" || k === "enter") return;

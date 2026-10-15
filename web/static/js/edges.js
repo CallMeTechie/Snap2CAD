@@ -1,12 +1,12 @@
 // Kanten und Teile auf der Messflaeche: Zeichnen, Bearbeiten, Seitenleiste (Spec 2026-10-14 §4)
 import { api, h, icon, num, toast, fail, confirmDlg, drawTag } from "./lib.js";
 import { S, reloadProject } from "./app.js";
-import { r3, unassignedSegments, pickPolygon } from "./geom.js";
+import { r3, unassignedSegments, pickPolygon, nearestOnPolygonEdge, insertVertex } from "./geom.js";
 
 export const PART_COLORS = ["#0F766E", "#7C3AED", "#B45309", "#BE185D", "#4D7C0F", "#0369A1"];
 export const partColor = p => PART_COLORS[(p.seq - 1) % PART_COLORS.length];
 export const ROLE = { body: "Grundkörper", mounted: "montiertes Teil" };
-const HANDLE = 7, DARK = "#17212B";
+const HANDLE = 7, DARK = "#17212B", MAXV = 64;
 
 function plus(ctx, [x, y], col) {
   ctx.fillStyle = "#fff"; ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.setLineDash([]);
@@ -15,9 +15,10 @@ function plus(ctx, [x, y], col) {
 }
 
 // env: { ctx(), scr(ix, iy), toPX(X, Y), cursorMM() -> [X, Y] | null, photoId() -> id | null, active() -> bool,
-//        redraw(), changed(), selectPart(id) }
+//        redraw(), changed(), selectPart(id), toEdges() }
 export function createPartsLayer(env) {
-  let sel = null, vtx = null, drag = null, drawing = null, segments = [], busy = false;
+  // rdrag: Rechtsklick/-ziehen { mode: "vertex"|"edge"|"new", sx, sy, moved, ... } (Eckpunkt mit Linie, Punkt auf Kante, neues Teil)
+  let sel = null, vtx = null, drag = null, rdrag = null, drawing = null, segments = [], busy = false;
   const list = () => (env.photoId() ? (S.project.parts || []).filter(p => p.photo_id === env.photoId()) : []);
   const P = q => env.scr(...env.toPX(q[0], q[1]));
   const selPart = () => list().find(p => p.id === sel) || null;
@@ -38,8 +39,8 @@ export function createPartsLayer(env) {
       for (const s of unassigned()) { ctx.beginPath(); ctx.moveTo(...P(s.a)); ctx.lineTo(...P(s.b)); ctx.stroke(); }
     }
     for (const part of list()) {
-      const live = drag?.id === part.id;
-      const pts = (live ? drag.poly : part.polygon).map(P);
+      const lp = drag?.id === part.id ? drag.poly : rdrag?.poly && rdrag.id === part.id && !rdrag.full ? rdrag.poly : null, live = !!lp;
+      const pts = (lp || part.polygon).map(P);
       const col = partColor(part), isSel = part.id === sel;
       ctx.setLineDash([]); ctx.fillStyle = col + (isSel ? "22" : "12");
       ctx.beginPath(); pts.forEach((q, i) => (i ? ctx.lineTo(...q) : ctx.moveTo(...q))); ctx.closePath(); ctx.fill();
@@ -56,8 +57,22 @@ export function createPartsLayer(env) {
           ctx.setLineDash([]); ctx.fillStyle = i === vtx ? col : "#fff"; ctx.strokeStyle = col; ctx.lineWidth = 2;
           ctx.beginPath(); ctx.arc(q[0], q[1], HANDLE - 2, 0, 7); ctx.fill(); ctx.stroke();
         });
-        if (!drag) pts.forEach((q, i) => { const r = pts[(i + 1) % pts.length]; plus(ctx, [(q[0] + r[0]) / 2, (q[1] + r[1]) / 2], col); });
+        if (!drag && !rdrag) pts.forEach((q, i) => { const r = pts[(i + 1) % pts.length]; plus(ctx, [(q[0] + r[0]) / 2, (q[1] + r[1]) / 2], col); });
+      } else {  // kleine Eckpunkte: in jedem Werkzeug ziehbar
+        ctx.setLineDash([]); ctx.fillStyle = "#fff"; ctx.strokeStyle = col; ctx.lineWidth = 1.5;
+        pts.forEach(q => { ctx.beginPath(); ctx.arc(q[0], q[1], 3, 0, 7); ctx.fill(); ctx.stroke(); });
       }
+      if (lp && rdrag?.mode === "vertex" && rdrag.moved) {  // neue Linie vom Eckpunkt zum Zeiger
+        const a = pts[rdrag.from], b = pts[rdrag.ins];
+        ctx.setLineDash([5, 4]); ctx.strokeStyle = DARK; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(...a); ctx.lineTo(...b); ctx.stroke();
+      }
+    }
+    if (rdrag?.mode === "new" && rdrag.moved) {
+      const cur = env.cursorMM(), pts = [rdrag.start, ...(cur ? [cur] : [])].map(P);
+      ctx.setLineDash([]); ctx.strokeStyle = DARK; ctx.fillStyle = DARK; ctx.lineWidth = 1.8;
+      ctx.beginPath(); pts.forEach((q, i) => (i ? ctx.lineTo(...q) : ctx.moveTo(...q))); ctx.stroke();
+      pts.forEach(q => { ctx.beginPath(); ctx.arc(q[0], q[1], 4, 0, 7); ctx.fill(); });
     }
     if (drawing) {
       const pts = drawing.map(P), cur = env.cursorMM();
@@ -73,6 +88,23 @@ export function createPartsLayer(env) {
     const part = selPart(); if (!part) return null;
     const i = part.polygon.findIndex(q => { const s = P(q); return Math.hypot(s[0] - sx, s[1] - sy) <= HANDLE + 2; });
     return i >= 0 ? { part, i } : null;
+  }
+  // Eckpunkt irgendeines Teils dieses Fotos, das gewaehlte zuerst, sonst der naechste
+  function hitVertexAny(sx, sy) {
+    const v = hitVertex(sx, sy); if (v) return v;
+    let best = null, bd = HANDLE + 2;
+    for (const part of list()) part.polygon.forEach((q, i) => { const s = P(q), d = Math.hypot(s[0] - sx, s[1] - sy); if (d <= bd) { bd = d; best = { part, i }; } });
+    return best;
+  }
+  // Kante unter dem Zeiger (Abstand <= HANDLE + 2 auf dem Bildschirm), das gewaehlte Teil zuerst: { part, i, t } oder null
+  function hitEdge(sx, sy) {
+    const s = selPart(), ps = s ? [s, ...list().filter(p => p !== s)] : list();
+    let best = null;
+    for (const part of ps) {
+      const r = nearestOnPolygonEdge([sx, sy], part.polygon.map(P), HANDLE + 2);
+      if (r && (!best || r.d < best.d)) best = { part, i: r.i, t: r.t, d: r.d };
+    }
+    return best;
   }
   function hitPlus(sx, sy) {
     const part = selPart(); if (!part) return null;
@@ -118,6 +150,13 @@ export function createPartsLayer(env) {
     }
     return false;
   }
+  // Linksklick auf einen Eckpunkt in jedem Werkzeug (Vorrang vor dem Werkzeug); im Werkzeug „Kanten“ wird das Teil gewaehlt
+  function downVertexAny(sx, sy) {
+    if (drawing || busy || rdrag) return false;
+    const v = hitVertexAny(sx, sy); if (!v) return false;
+    if (env.active()) { if (v.part.id !== sel) select(v.part.id); vtx = v.i; }
+    drag = { id: v.part.id, i: v.i, poly: v.part.polygon.map(q => [...q]), moved: false, sx, sy }; env.redraw(); return true;
+  }
   function move(sx, sy) {
     if (!drag) return false;
     if (!drag.moved && Math.hypot(sx - drag.sx, sy - drag.sy) < 3) return true;
@@ -125,12 +164,61 @@ export function createPartsLayer(env) {
     const mm = env.cursorMM(); if (mm) drag.poly[drag.i] = [r3(mm[0]), r3(mm[1])];
     env.redraw(); return true;
   }
-  async function up() {
+  // "tap": nicht gezogen (ausserhalb von „Kanten“ zaehlt das als normaler Klick des Werkzeugs)
+  function up() {
     const d = drag; drag = null;
     if (!d) return false;
-    if (!d.moved) { env.redraw(); return true; }
-    await save(d.id, { polygon: d.poly });
+    if (!d.moved) { env.redraw(); return "tap"; }
+    save(d.id, { polygon: d.poly });
     return true;
+  }
+  // Rechtsklick: true = die Ebene uebernimmt (auch wenn nichts passiert); ohne Teile-Ebene verschiebt Rechts-Ziehen wie bisher
+  function downRight(sx, sy) {
+    if (!env.photoId()) return false;
+    rdrag = null;
+    const mm = env.cursorMM();
+    if (drawing || busy || drag || !mm) return true;
+    const v = hitVertexAny(sx, sy), e = v ? null : hitEdge(sx, sy);
+    if (v || e) {
+      const poly = (v || e).part.polygon, i = v ? v.i : e.i;
+      let p = [...poly[i]];
+      if (e) { const a = poly[i], b = poly[(i + 1) % poly.length]; p = [r3(a[0] + e.t * (b[0] - a[0])), r3(a[1] + e.t * (b[1] - a[1]))]; }
+      rdrag = { mode: v ? "vertex" : "edge", id: (v || e).part.id, from: i, ins: i + 1, foot: p, poly: insertVertex(poly, i, p),
+        full: poly.length >= MAXV, sx, sy, moved: false };
+    } else if (!hitPart(sx, sy)) rdrag = { mode: "new", start: [r3(mm[0]), r3(mm[1])], sx, sy, moved: false };
+    env.redraw(); return true;
+  }
+  function moveRight(sx, sy) {
+    const r = rdrag; if (!r) return false;
+    if (!r.moved && Math.hypot(sx - r.sx, sy - r.sy) < 4) return true;
+    r.moved = true;
+    const mm = env.cursorMM(); if (mm && r.poly) r.poly[r.ins] = [r3(mm[0]), r3(mm[1])];
+    env.redraw(); return true;
+  }
+  // Loslassen weniger als 4 px vom Start: einfacher Rechtsklick (Punkt auf der Kante, sonst nichts)
+  function upRight(sx, sy) {
+    const r = rdrag; rdrag = null;
+    if (!r) return false;
+    const far = Math.hypot(sx - r.sx, sy - r.sy) >= 4, mm = env.cursorMM();
+    if (r.mode === "new") {
+      if (far && mm) {
+        env.toEdges?.(); sel = null; vtx = null; env.selectPart?.(null);
+        drawing = [r.start, [r3(mm[0]), r3(mm[1])]];
+      }
+      env.redraw(); return true;
+    }
+    if (r.mode === "vertex" && !far) { env.redraw(); return true; }
+    if (r.full) { toast("Höchstens 64 Eckpunkte je Teil", "err"); env.redraw(); return true; }
+    r.poly[r.ins] = far && mm ? [r3(mm[0]), r3(mm[1])] : r.foot;
+    save(r.id, { polygon: r.poly });
+    return true;
+  }
+  // Doppelklick schliesst ein neues Teil; der zweite Klick hat denselben Punkt ein zweites Mal gesetzt
+  function dbl() {
+    if (!drawing) return false;
+    const n = drawing.length;
+    if (n >= 2) { const a = P(drawing[n - 1]), b = P(drawing[n - 2]); if (Math.hypot(a[0] - b[0], a[1] - b[1]) <= 4) drawing.pop(); }
+    finishNew(); return true;
   }
   async function click(sx, sy) {
     if (drawing) {
@@ -160,12 +248,13 @@ export function createPartsLayer(env) {
     return false;
   }
   return {
-    draw, down, move, up, click, key, select,
+    draw, down, move, up, click, key, select, downVertexAny, downRight, moveRight, upRight, dbl,
     startNew() { drawing = []; sel = null; vtx = null; env.redraw(); },
-    cancel() { drawing = null; drag = null; env.redraw(); },
-    reset() { sel = null; vtx = null; drag = null; drawing = null; segments = []; },
+    cancel() { drawing = null; drag = null; rdrag = null; env.redraw(); },
+    cancelDrag() { drag = null; rdrag = null; env.redraw(); },  // Esc beim Ziehen: Polygon unveraendert
+    reset() { sel = null; vtx = null; drag = null; rdrag = null; drawing = null; segments = []; },
     setSegments(s) { segments = s || []; env.redraw(); },
-    get selected() { return sel; }, get drawing() { return !!drawing; },
+    get selected() { return sel; }, get drawing() { return !!drawing; }, get dragging() { return !!(drag || rdrag); },
   };
 }
 
