@@ -64,7 +64,9 @@ def run_check(project: dict, photo_ids: list[int] | None, part_id: int | None, h
     picked = jobs.pick_images(pid, photo_ids)
     msgs = jobs.build_initial_message(project, "", {"photo_ids": photo_ids, "part_id": part_id, "for_check": True,
                                                     "images": picked})
-    text, _ = ai.call(ai.CHECK_SYSTEM, msgs, max_tokens=2000, temperature=0.0)
+    text, usage = ai.call(ai.CHECK_SYSTEM, msgs, max_tokens=6000)
+    if usage.get("stop_reason") == "max_tokens" or ai._json_span(text, "{", "}") is None:
+        raise ai.AIError("KI-Antwort unvollständig – bitte erneut prüfen.")
     res = ai.parse_check(text)
     out = {"items": res["items"], "material": res["material"],
            "images": [{"photo_id": i["photo_id"], "kind": i["kind"]} for i in picked],

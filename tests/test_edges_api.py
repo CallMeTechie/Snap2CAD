@@ -270,6 +270,14 @@ def test_hints_in_edges_json_und_veraltet(two):
     assert ph["edges_stale"] is True   # hints {} vs. gespeichert transparent=2
 
 
+def test_handeingabe_ohne_wirkung_laesst_kanten_aktuell(two):
+    c, pid, phid = two
+    c.post(f"/api/photos/{phid}/edges", json={"use_ai": False}, headers=H)
+    c.patch(f"/api/projects/{pid}", json={"material": "Stahl", "color": "schwarz"}, headers=H)
+    ph = next(p for p in c.get(f"/api/projects/{pid}").json()["photos"] if p["id"] == phid)
+    assert ph["edges_stale"] is False
+
+
 def test_kontrastwarnung(user):
     pid, phid = _upload(user, [{"rect": [60, 80, 60, 40], "gray": 225}])
     ph = user.get(f"/api/projects/{pid}").json()["photos"][0]

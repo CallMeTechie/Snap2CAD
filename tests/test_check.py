@@ -114,7 +114,7 @@ def test_prompt_regeln():
     assert "Fotografiertes Original" in ai.CAD_SYSTEM and "Offene Punkte" in ai.CAD_SYSTEM
 
 
-def test_temperatur_wird_uebergeben(monkeypatch):
+def test_kein_temperature_an_sdk(monkeypatch):
     from contextlib import contextmanager
     from types import SimpleNamespace
 
@@ -134,9 +134,8 @@ def test_temperatur_wird_uebergeben(monkeypatch):
     monkeypatch.setattr(config, "AI_FAKE", False)
     monkeypatch.setattr(settings, "api_key", lambda: "k")
     monkeypatch.setattr(ai, "client", lambda: SimpleNamespace(messages=SimpleNamespace(stream=stream)))
-    ai.call("s", [{"role": "user", "content": "x"}], temperature=0.0)
     ai.call("s", [{"role": "user", "content": "x"}])
-    assert seen[0]["temperature"] == 0.0 and "temperature" not in seen[1]
+    assert "temperature" not in seen[0]
 
 
 def test_nachricht_bilder_und_text(proj):
@@ -202,7 +201,7 @@ def test_cad_check_testmodus(proj, monkeypatch):
     j = r.json()
     assert [(i["kind"], i["severity"]) for i in j["items"]] == [("height", "block"), ("bottom", "warn")]
     assert j["material"]["material"] == "Aluminium" and [i["kind"] for i in j["images"]] == ["top", "bottom"]
-    assert calls[-1]["temperature"] == 0.0 and j["stale"] is False
+    assert "temperature" not in calls[-1] and j["stale"] is False
     p = c.get(f"/api/projects/{pid}").json()
     assert p["material"] == "Aluminium" and p["material_user"] == 0 and p["cad_check"]["stale"] is False
     n = len(calls)
@@ -277,16 +276,17 @@ def test_pruefung_laeuft_bereits(proj):
         assert c.post(f"/api/projects/{pid}/cad-check", json={}, headers=H).status_code == 409
 
 
-def test_temperatur_je_aufruf(proj, monkeypatch):
+@pytest.mark.parametrize("text,stop", [('{"items": [{"kind": "height", "sev', "max_tokens"), ("", "end_turn"),
+                                       ("keine Ahnung", "end_turn"), ('{"items": []}', "max_tokens")])
+def test_unvollstaendige_antwort_ist_502_und_nichts_gespeichert(proj, monkeypatch, text, stop):
     from app import ai
     c, pid, t, b = proj
-    seen, orig = [], ai.call
-    monkeypatch.setattr(ai, "call", lambda s, *a, **k: (seen.append((s, k.get("temperature"))), orig(s, *a, **k))[1])
-    c.post(f"/api/projects/{pid}/cad-check", json={}, headers=H)
-    c.post(f"/api/projects/{pid}/suggest", json={}, headers=H)
-    c.post(f"/api/photos/{t['id']}/edges", json={"use_ai": True}, headers=H)
-    d = dict(seen)
-    assert d[ai.CHECK_SYSTEM] == 0.0 and d[ai.SUGGEST_SYSTEM] is None and d[ai.PARTS_SYSTEM] is None
+    assert c.post(f"/api/projects/{pid}/cad-check", json={}, headers=H).status_code == 200
+    before = c.get(f"/api/projects/{pid}").json()["cad_check"]
+    monkeypatch.setattr(ai, "call", lambda s, *a, **k: (text, {"stop_reason": stop}))
+    r = c.post(f"/api/projects/{pid}/cad-check", json={"force": True}, headers=H)
+    assert r.status_code == 502 and "unvollständig" in r.json()["detail"]
+    assert c.get(f"/api/projects/{pid}").json()["cad_check"] == before
 
 
 def test_fremder_nutzer_stufe_a(proj, app, admin):

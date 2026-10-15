@@ -404,7 +404,7 @@ def _run(job_id: int, trigger: str, request_text: str, ev: threading.Event):
             return  # Auftrag wurde geloescht
         log(job_id, "KI erstellt das Modell …" if trigger != "autofix" else "KI korrigiert den Code …")
         text, usage = ai.call(ai.CAD_SYSTEM, msgs, cancel=ev,
-                              on_progress=lambda n: None, temperature=0.0)
+                              on_progress=lambda n: None)
         msgs.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
         _set(job_id, messages=db.jdump(msgs))
         if ev.is_set():

@@ -261,7 +261,7 @@ def _materialize(messages: list[dict]) -> list[dict]:
 # ------------------------------------------------------------------ Aufruf
 
 def call(system: str, messages: list[dict], max_tokens: int = 16000, cancel: threading.Event | None = None,
-         on_progress=None, temperature: float | None = None) -> tuple[str, dict]:
+         on_progress=None) -> tuple[str, dict]:
     """Ruft Claude auf. Rueckgabe (Text, usage)."""
     if config.AI_FAKE:
         return _fake(system, messages, cancel)
@@ -270,11 +270,10 @@ def call(system: str, messages: list[dict], max_tokens: int = 16000, cancel: thr
     import anthropic
     try:
         text, last = [], time.time()
-        extra = {} if temperature is None else {"temperature": temperature}
         with client().messages.stream(
                 model=settings.model(), max_tokens=max_tokens,
                 system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-                messages=_materialize(messages), **extra) as stream:
+                messages=_materialize(messages)) as stream:
             n = 0
             for chunk in stream.text_stream:
                 text.append(chunk)

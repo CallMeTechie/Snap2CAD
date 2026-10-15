@@ -31,7 +31,12 @@ export async function form(main) {
   const partBox = partsList.length ? h("select", { id: "part", class: "input", onchange: e => { partSel = e.target.value; drawMeas(); onSel(); } },
     h("option", { value: "" }, "Alle Teile (ein Körper)"),
     partsList.map(t => h("option", { value: String(t.id) }, `${t.id_label} · ${t.label}${t.view === "bottom" ? " (unten)" : ""}`))) : null;
-  const sentMeas = () => partSel ? meas.filter(m => m.part_id == null || m.part_id === Number(partSel)) : meas;
+  // wie jobs.measurement_table: Maße ohne Teil, des Teils selbst und der Teile, die als dasselbe Teil verknüpft sind (same_as)
+  const sentMeas = () => {
+    if (!partSel) return meas;
+    const id = Number(partSel), linked = new Set(partsList.filter(t => t.same_as === id).map(t => t.id));
+    return meas.filter(m => m.part_id == null || m.part_id === id || linked.has(m.part_id));
+  };
   const measBox = h("div", { style: { display: "flex", flexDirection: "column", gap: "6px" } });
   function drawMeas() {
     const list = sentMeas();
@@ -90,13 +95,18 @@ export async function form(main) {
   const submit = h("button", { class: "btn primary big wide", type: "submit", form: "cadform", disabled: !!blocked }, icon("cube"), "CAD-Modell erzeugen");
 
   // Pruefung vor dem Modellieren (Spec Stufe A): laeuft automatisch, solange sich die Grundlage geaendert hat
-  let chk = P.cad_check, checking = false, again = false, retryTimer = null;
-  onLeave(() => clearTimeout(retryTimer));
+  let chk = P.cad_check, checking = false, again = false, retryTimer = null, selTimer = null;
+  onLeave(() => { clearTimeout(retryTimer); clearTimeout(selTimer); });
   const sel = () => ({ photo_ids: [...picked], part_id: partSel ? Number(partSel) : null });
   const same = (a, b) => JSON.stringify([...(a || [])].sort()) === JSON.stringify([...(b || [])].sort());
   const needCheck = () => !chk || chk.error || chk.stale || !same(chk.photo_ids, sel().photo_ids) || (chk.part_id ?? null) !== sel().part_id;
   // Auswahl geaendert: laeuft gerade eine Pruefung, danach in jedem Fall neu vergleichen (needCheck prueft dort gegen das neue Ergebnis)
-  function onSel() { if (!st.ai) return; if (checking) again = true; else if (needCheck()) runCheck(); }
+  // Mehrfachklicks (Fotos abhaken) zu einer Pruefung zusammenfassen
+  function onSel() {
+    if (!st.ai) return;
+    clearTimeout(selTimer);
+    selTimer = setTimeout(() => { if (!main.isConnected) return; if (checking) again = true; else if (needCheck()) runCheck(); }, 700);
+  }
   async function runCheck(force = false) {
     if (checking) { again = true; return; }
     clearTimeout(retryTimer);
@@ -120,13 +130,15 @@ export async function form(main) {
   function drawCheck() {
     const blocks = (chk?.items || []).filter(i => i.severity === "block").length;
     submit.replaceChildren(icon("cube"), blocks ? "Trotzdem erzeugen" : "CAD-Modell erzeugen");
-    const mat = chk?.material ? [chk.material.color, chk.material.material, chk.material.finish].filter(Boolean).join(", ") : "";
+    submit.disabled = checking || !!blocked;
+    const byHand = !!P.material_user;
+    const mat = (byHand ? [P.color, P.material, P.finish] : chk?.material ? [chk.material.color, chk.material.material, chk.material.finish] : []).filter(Boolean).join(", ");
     clear(checkBox, h("div", { class: "card-head" }, h("h2", {}, "Vor dem Modellieren"),
         h("button", { class: "btn sm", type: "button", disabled: checking, onclick: () => runCheck(true) }, checking ? h("span", { class: "spin" }) : icon("refresh", 14), "Erneut prüfen")),
       chk?.error ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, `Prüfung nicht möglich: ${chk.error}`)) : null,
       chk && !chk.error ? (chk.items.length ? h("ul", { class: "checks" }, chk.items.map(i => h("li", {}, stateIcon(i.severity === "block" ? "fail" : "warn"), h("span", {}, i.text))))
         : h("div", { class: "note ok" }, icon("check"), h("span", {}, "Die Unterlagen reichen für ein vollständiges Modell."))) : null,
-      mat ? h("span", { class: "xs muted" }, `Werkstück (geschätzt): ${mat} – unter „Fotos prüfen“ änderbar`) : null,
+      mat ? h("span", { class: "xs muted" }, `Werkstück (${byHand ? "von Hand" : "geschätzt"}): ${mat} – unter „Fotos prüfen“ änderbar`) : null,
       chk?.checked_at ? h("span", { class: "xs muted" }, `Geprüft ${dt(chk.checked_at)}${chk.stale ? " · veraltet" : ""}`) : null);
     const imgs = chk?.images || [], fname = id => (P.photos.find(p => p.id === id)?.filename || `Foto ${id}`);
     clear(imgBox, h("span", { class: "label" }, `Bilder für die KI · ${imgs.length}`),

@@ -800,8 +800,10 @@ def _hints(project: dict) -> dict:
     """Hinweise fuer die Kantenerkennung nur aus Handeingaben (Spec §3); KI-Schaetzungen wirken nicht."""
     if not project.get("material_user"):
         return {}
-    return {"transparent": project.get("transparent") or 0,
-            "light": (project.get("color") or "").strip().lower() in LIGHT_COLORS}
+    h = {"transparent": project.get("transparent") or 0,
+         "light": (project.get("color") or "").strip().lower() in LIGHT_COLORS}
+    # ohne relevante Werte wirkt die Handeingabe wie keine: gleich normalisieren, sonst false-positive edges_stale
+    return h if h["transparent"] or h["light"] else {}
 
 
 class ProjectPatch(BaseModel):
@@ -899,7 +901,7 @@ def _analyze_store(phid: int, img, fmt: str | None, view: str, hints: dict | Non
             a["contrast"] = res["contrast"]
             a["outline_hints"] = hints or {}
         except Exception:  # noqa: BLE001 – Umriss ist optional
-            a["outline_mm"] = None
+            a["outline_mm"], a["outline_hints"] = None, hints or {}
         finally:
             _detect_lock.release()
     return a
