@@ -57,6 +57,7 @@ export default async function (main) {
       h("button", { class: "btn", type: "button", onclick: () => camIn.click() }, icon("camera"), "Foto aufnehmen")),
     h("span", { class: "hint" }, `JPG, PNG, HEIC · Originalauflösung · bis ${S.status?.max_upload_mb || 25} MB`), fileIn, camIn);
   const list = h("ul", { class: "plist" });
+  const wsBox = h("div", {});
   const detail = h("section", { class: "card", "aria-labelledby": "det-h" });
   const pending = [];
 
@@ -67,7 +68,7 @@ export default async function (main) {
       h("label", { class: "field", style: { gap: "4px" } }, h("span", { class: "label" }, "Unterlage"), fmtSel),
       h("label", { class: "field", style: { gap: "4px" } }, h("span", { class: "label" }, "Ansicht"), viewSel))),
     h("div", { class: "photos-layout" },
-      h("aside", { "aria-label": "Hochgeladene Fotos", style: { display: "flex", flexDirection: "column", gap: "12px" } }, drop, list,
+      h("aside", { "aria-label": "Hochgeladene Fotos", style: { display: "flex", flexDirection: "column", gap: "12px" } }, drop, wsBox, list,
         h("button", { class: "btn ghost sm", style: { alignSelf: "flex-start" }, onclick: tipsDialog }, icon("info", 16), "Fototipps")),
       detail));
 
@@ -132,8 +133,30 @@ export default async function (main) {
 
   function draw() {
     if (!S.project.photos.some(p => p.id === selected)) selected = (S.project.photos.find(p => p.status !== "nicht_auswertbar") || S.project.photos[0])?.id ?? null;
+    clear(wsBox, werkstueck());
     drawList();
     drawDetail();
+  }
+
+  function werkstueck() {
+    const P = S.project, mk = (k, ph) => h("input", { class: "input", value: P[k] || "", placeholder: ph, maxlength: 40 });
+    const color = mk("color", "z. B. silber"), material = mk("material", "z. B. Aluminium");
+    const transp = h("select", { class: "input" }, [["", "unbekannt"], ["0", "nein"], ["1", "teilweise"], ["2", "ja"]].map(([v, t]) => h("option", { value: v, selected: String(P.transparent ?? "") === v }, t)));
+    const finish = h("select", { class: "input" }, [["", "unbekannt"], ["matt", "matt"], ["glaenzend", "glänzend"]].map(([v, t]) => h("option", { value: v, selected: (P.finish || "") === v }, t)));
+    const save = async () => {
+      const body = { color: color.value.trim(), material: material.value.trim() };
+      if (transp.value !== "") body.transparent = Number(transp.value);
+      if (finish.value) body.finish = finish.value;
+      try { S.project = await api(`/api/projects/${P.id}`, { method: "PATCH", body }); draw(); } catch (e) { fail(e); }
+    };
+    [color, material, transp, finish].forEach(el => el.addEventListener("change", save));
+    const reset = async () => { try { S.project = await api(`/api/projects/${P.id}`, { method: "PATCH", body: { clear_material: true } }); draw(); } catch (e) { fail(e); } };
+    return h("section", { class: "card", style: { gap: "8px" } }, h("div", { class: "card-head" }, h("h3", {}, "Werkstück"),
+        h("span", { class: "xs muted" }, P.material_user ? "von Hand gesetzt" : (P.material ? "von der KI geschätzt" : "noch nicht gesetzt"))),
+      h("div", { class: "grid2" }, h("label", { class: "field" }, h("span", { class: "flabel" }, "Farbe"), color), h("label", { class: "field" }, h("span", { class: "flabel" }, "Material"), material),
+        h("label", { class: "field" }, h("span", { class: "flabel" }, "Transparent"), transp), h("label", { class: "field" }, h("span", { class: "flabel" }, "Oberfläche"), finish)),
+      h("span", { class: "xs muted" }, "Vor „Kanten erkennen“ setzen – die Erkennung nutzt diese Angaben."),
+      P.material_user ? h("button", { class: "btn sm ghost", style: { alignSelf: "flex-start" }, onclick: reset }, "Zurücksetzen") : null);
   }
 
   function alignBox(p) {

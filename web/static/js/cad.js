@@ -1,6 +1,6 @@
 // Schritt 4: CAD-Modell – Auftrag, Fortschritt, Ergebnis
 import { api, h, clear, icon, num, bytes, toast, fail, mmss, dt, confirmDlg, copyText, fmtValue } from "./lib.js";
-import { S, ensureProject, go, onLeave, refreshMe, jobBadge } from "./app.js";
+import { S, ensureProject, reloadProject, go, onLeave, refreshMe, jobBadge } from "./app.js";
 import { VIEW_LABEL } from "./photos.js";
 
 const PROC = {
@@ -28,7 +28,7 @@ export async function form(main) {
   const crit = meas.filter(m => m.critical);
   const partsList = P.parts || [];
   let partSel = "";
-  const partBox = partsList.length ? h("select", { id: "part", class: "input", onchange: e => { partSel = e.target.value; drawMeas(); } },
+  const partBox = partsList.length ? h("select", { id: "part", class: "input", onchange: e => { partSel = e.target.value; drawMeas(); onSel(); } },
     h("option", { value: "" }, "Alle Teile (ein Körper)"),
     partsList.map(t => h("option", { value: String(t.id) }, `${t.id_label} · ${t.label}${t.view === "bottom" ? " (unten)" : ""}`))) : null;
   const sentMeas = () => partSel ? meas.filter(m => m.part_id == null || m.part_id === Number(partSel)) : meas;
@@ -74,10 +74,12 @@ export async function form(main) {
   const usable = P.photos.filter(p => p.files.includes("rect") || p.files.includes("gauge") || ((p.view === "tilted" || p.view === "overview") && p.files.includes("orig")));
   const picked = new Set(usable.filter(p => p.status !== "unsicher").slice(0, 6).map(p => p.id));
   const photoFigs = h("div", { class: "thumbs" });
+  const imgBox = h("div", { style: { display: "flex", flexDirection: "column", gap: "4px" } });
+  const checkBox = h("section", { class: "card" });
   const drawPhotos = () => clear(photoFigs, usable.length ? usable.map(p => h("figure", {},
     h("label", { style: { cursor: "pointer", display: "flex", flexDirection: "column", gap: "4px" } },
       h("img", { src: `/api/photos/${p.id}/${p.files.includes("rect") ? "rect" : p.files.includes("gauge") ? "gauge" : "thumb"}.jpg`, alt: p.filename, style: { opacity: picked.has(p.id) ? 1 : 0.35 } }),
-      h("span", { class: "check xs", style: { minHeight: "auto" } }, h("input", { type: "checkbox", checked: picked.has(p.id), onchange: e => { e.target.checked ? picked.add(p.id) : picked.delete(p.id); drawPhotos(); } }),
+      h("span", { class: "check xs", style: { minHeight: "auto" } }, h("input", { type: "checkbox", checked: picked.has(p.id), onchange: e => { e.target.checked ? picked.add(p.id) : picked.delete(p.id); drawPhotos(); onSel(); } }),
         `${p.filename.replace(/\.\w+$/, "")} · ${VIEW_LABEL[p.view]}${p.files.includes("gauge") && p.view !== "tilted" && p.view !== "gauge" ? " + Höhe" : ""}`))))
     : h("p", { class: "hint" }, "Keine entzerrten Fotos – das Modell entsteht dann nur aus Maßen und Beschreibung."));
   drawPhotos();
@@ -86,6 +88,49 @@ export async function form(main) {
   const blocked = !st.ai ? "KI ist nicht eingerichtet (Verwaltung → Einstellungen)." : !st.sandbox ? "Die CAD-Sandbox läuft nicht." :
     (us.quota != null && us.used >= us.quota) ? `Monatskontingent erreicht (${us.used} / ${us.quota}).` : "";
   const submit = h("button", { class: "btn primary big wide", type: "submit", form: "cadform", disabled: !!blocked }, icon("cube"), "CAD-Modell erzeugen");
+
+  // Pruefung vor dem Modellieren (Spec Stufe A): laeuft automatisch, solange sich die Grundlage geaendert hat
+  let chk = P.cad_check, checking = false, again = false;
+  const sel = () => ({ photo_ids: [...picked], part_id: partSel ? Number(partSel) : null });
+  const same = (a, b) => JSON.stringify([...(a || [])].sort()) === JSON.stringify([...(b || [])].sort());
+  const needCheck = () => !chk || chk.error || chk.stale || !same(chk.photo_ids, sel().photo_ids) || (chk.part_id ?? null) !== sel().part_id;
+  // Auswahl geaendert: laeuft gerade eine Pruefung, danach in jedem Fall neu vergleichen (needCheck prueft dort gegen das neue Ergebnis)
+  function onSel() { if (checking) again = true; else if (needCheck()) runCheck(); }
+  async function runCheck(force = false) {
+    if (checking) { again = true; return; }
+    checking = true; drawCheck();
+    try { chk = await api(`/api/projects/${P.id}/cad-check`, { method: "POST", body: { ...sel(), force } }); await reloadProject().catch(() => {}); }
+    catch (e) {
+      if (e.status === 409) { again = false; setTimeout(() => { if (main.isConnected) runCheck(false); }, 3000); return; }
+      chk = { error: e.message, items: [], images: [] };
+    } finally {
+      checking = false; drawCheck();
+      const rerun = again && !chk?.error; again = false;
+      if (rerun && needCheck()) runCheck();
+    }
+  }
+  const IMG_KIND = { top: "Draufsicht", bottom: "Von unten", gauge: "Höhenlehre", tilted: "Schrägfoto (Original)" };
+  function imgCount() {   // wie jobs.pick_images: je Foto ein Bild nach Ansicht, dazu die Höhenlehre
+    let n = 0;
+    for (const p of usable) if (picked.has(p.id)) n += (p.view === "tilted" || p.view === "overview" || ((p.view === "top" || p.view === "bottom") && p.files.includes("rect")) ? 1 : 0) + (p.files.includes("gauge") ? 1 : 0);
+    return n;
+  }
+  function drawCheck() {
+    const blocks = (chk?.items || []).filter(i => i.severity === "block").length;
+    submit.replaceChildren(icon("cube"), blocks ? "Trotzdem erzeugen" : "CAD-Modell erzeugen");
+    const mat = chk?.material ? [chk.material.color, chk.material.material, chk.material.finish].filter(Boolean).join(", ") : "";
+    clear(checkBox, h("div", { class: "card-head" }, h("h2", {}, "Vor dem Modellieren"),
+        h("button", { class: "btn sm", type: "button", disabled: checking, onclick: () => runCheck(true) }, checking ? h("span", { class: "spin" }) : icon("refresh", 14), "Erneut prüfen")),
+      chk?.error ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, `Prüfung nicht möglich: ${chk.error}`)) : null,
+      chk && !chk.error ? (chk.items.length ? h("ul", { class: "checks" }, chk.items.map(i => h("li", {}, stateIcon(i.severity === "block" ? "fail" : "warn"), h("span", {}, i.text))))
+        : h("div", { class: "note ok" }, icon("check"), h("span", {}, "Die Unterlagen reichen für ein vollständiges Modell."))) : null,
+      mat ? h("span", { class: "xs muted" }, `Werkstück (geschätzt): ${mat} – unter „Fotos prüfen“ änderbar`) : null,
+      chk?.checked_at ? h("span", { class: "xs muted" }, `Geprüft ${dt(chk.checked_at)}${chk.stale ? " · veraltet" : ""}`) : null);
+    const imgs = chk?.images || [], fname = id => (P.photos.find(p => p.id === id)?.filename || `Foto ${id}`);
+    clear(imgBox, h("span", { class: "label" }, `Bilder für die KI · ${imgs.length}`),
+      imgs.map(i => h("span", { class: "small" }, `${fname(i.photo_id)} · ${IMG_KIND[i.kind] || i.kind}`)),
+      imgCount() > 6 ? h("span", { class: "xs", style: { color: "var(--warn)" } }, "Nur die ersten 6 Bilder gehen mit") : null);
+  }
 
   main.append(
     h("div", { class: "head" }, h("div", { class: "t" }, h("h1", {}, "CAD-Modell erzeugen"),
@@ -100,7 +145,8 @@ export async function form(main) {
             project_id: P.id, name: name.value.trim(), request: zweck.value.trim(), process: proc, material: material.value.trim(),
             cutter_d: proc === "cnc" ? parseFloat(cutter.value.replace(",", ".")) || null : null, setups: proc === "cnc" ? setups.value : "",
             fits: fits.map(f => ({ id: `M${f.m.seq}`, fit: f.fit.value.trim(), depth: f.depth.value === "–" ? "" : f.depth.value })),
-            extra: extra.value.trim(), photo_ids: [...picked], part_id: partSel ? Number(partSel) : null } });
+            extra: extra.value.trim(), photo_ids: [...picked], part_id: partSel ? Number(partSel) : null,
+            check_items: (chk?.items || []).map(i => ({ kind: i.kind, severity: i.severity, text: i.text })) } });
           refreshMe().catch(() => {});
           go(`/cad/${job.id}`);
         } catch (e) { fail(e); submit.disabled = false; }
@@ -126,6 +172,7 @@ export async function form(main) {
         h("h2", { id: "s-h" }, "Grundlage für das Modell"),
         h("div", { style: { display: "flex", flexDirection: "column", gap: "8px" } }, h("span", { class: "label" }, `Entzerrte Fotos · ${picked.size}`), photoFigs),
         measBox,
+        imgBox,
         h("dl", { class: "kv" },
           h("dt", {}, "Modell"), h("dd", { class: "mono small" }, st.ai_fake ? "Testmodus (AI_FAKE)" : `${st.model} · Server-Key`),
           h("dt", {}, "Regeln"), rules,
@@ -133,10 +180,13 @@ export async function form(main) {
           h("dt", {}, "Korrektur"), h("dd", {}, `bei Fehler bis zu ${st.limits?.autofix ?? 2} automatische Versuche`),
           h("dt", {}, "Kontingent"), h("dd", {}, us.quota == null ? `${us.used ?? 0} Läufe diesen Monat (unbegrenzt)` : `${us.used} von ${us.quota} Läufen diesen Monat`)),
         blocked ? h("div", { class: "note err" }, icon("warn"), h("span", {}, blocked)) : null,
+        checkBox,
         submit,
         h("a", { href: "/auftraege", class: "small", style: { textAlign: "center" } }, "Frühere Aufträge ansehen"))));
   drawMeas();
   setProc(proc);
+  drawCheck();
+  if (needCheck()) runCheck();
   zweck.focus();
 }
 
