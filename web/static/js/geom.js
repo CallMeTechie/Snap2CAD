@@ -1,4 +1,4 @@
-// Reine 2D-Geometrie fuer Messen und Kanten-Werkzeug, ohne DOM (geprueft mit node --test tests/js/*.test.mjs)
+// Reine Geometrie fuer Messen, Kanten-Werkzeug und Bemaßung am Modell, ohne DOM (geprueft mit node --test tests/js/*.test.mjs)
 
 export const r3 = v => Math.round(v * 1000) / 1000;
 
@@ -36,4 +36,97 @@ export function pickPolygon(p, polygons, reach = 8) {
     if (k < bk) { bk = k; best = i; }
   });
   return best;
+}
+
+// ------------------------------------------------------------------ Bemaßung am Modell (Spec Stufe B §3/§5, B5)
+
+export const DIM_GROUP_KEYS = ["aussen", "bohrung", "tiefe", "fase", "platte", "sonst"];
+// Spalte „Gruppe“ der Masstabelle (cad.js) und Liste der Messseite (measure.js), gleich jobs.GROUP_TEXT
+export const DIM_GROUP_TEXT = Object.freeze({ aussen: "außen", bohrung: "Bohrung", tiefe: "Tiefe", fase: "Fase", platte: "Platte",
+  sonst: "sonstige" });
+export const DEFAULT_SEL = Object.freeze({ aussen: true, bohrung: false, tiefe: false, fase: false, platte: false, sonst: false,
+  annahmen: true, nur_annahmen: false });
+
+// Gespeicherte Auswahl (localStorage „dims.groups“): nur bekannte Schluessel mit echtem Wahrheitswert
+export function dimSel(raw) {
+  let o = null;
+  try { o = JSON.parse(raw); } catch { /* kein JSON: Standard */ }
+  const out = { ...DEFAULT_SEL };
+  if (o && typeof o === "object" && !Array.isArray(o)) for (const k of Object.keys(DEFAULT_SEL)) if (typeof o[k] === "boolean") out[k] = o[k];
+  return out;
+}
+
+const groupOf = d => (DIM_GROUP_KEYS.includes(d.group) ? d.group : "sonst");
+// sichtbar: Gruppe an oder (Annahme und „Annahmen“ an); „Nur Annahmen“: nur Annahmen, gleich welche Gruppe
+export function visibleDims(dims, sel) {
+  if (sel.nur_annahmen) return dims.filter(d => d.assumed === true);
+  return dims.filter(d => sel[groupOf(d)] === true || (d.assumed === true && sel.annahmen === true));
+}
+
+const fin3 = p => Array.isArray(p) && p.length === 3 && p.every(v => typeof v === "number" && Number.isFinite(v));
+export function hasAnchors(d) { return !!d && fin3(d.a) && fin3(d.b); }
+
+const vsub = (a, b) => a.map((v, i) => v - b[i]);
+const vadd = (a, b) => a.map((v, i) => v + b[i]);
+const vmul = (a, k) => a.map(v => v * k);
+const vdot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const vlen = a => Math.hypot(a[0], a[1], a[2]);
+const vperp = (v, u) => vsub(v, vmul(u, vdot(v, u)));
+
+// Masslinie a->b, versetzt senkrecht zur Linie und weg von der Modellmitte (8 % der Modellgroesse, mindestens 2 mm);
+// liegt die Mitte auf der Linie, zeigt der Versatz nach +Z, bei senkrechter Linie nach +X
+export function dimGeometry(a, b, center, size) {
+  const ab = vsub(b, a), n = vlen(ab);
+  if (!(n > 1e-9)) return null;
+  const u = vmul(ab, 1 / n), m = vmul(vadd(a, b), 0.5);
+  const off = Math.max(0.08 * size, 2), over = off * 0.25;
+  let w = vperp(vsub(m, center), u);
+  if (vlen(w) < 1e-6 * Math.max(1, size)) {
+    for (const ax of [[0, 0, 1], [1, 0, 0], [0, 1, 0]]) { w = vperp(ax, u); if (vlen(w) > 0.1) break; }
+  }
+  w = vmul(w, 1 / vlen(w));
+  const o = vmul(w, off), oo = vmul(w, off + over);
+  return { line: [vadd(a, o), vadd(b, o)], ext: [[a, vadd(a, oo)], [b, vadd(b, oo)]], label: vadd(m, o), off };
+}
+
+export const DIM_COLORS = Object.freeze({ assumed: "#b42318", user: "#1a7f37", base: "#1f6fb2", stale: "#8a939b" });
+export function dimStyle(d) {
+  if (d.anchors_stale) return { color: DIM_COLORS.stale, dashed: true };
+  if (d.assumed) return { color: DIM_COLORS.assumed, dashed: false };
+  if (d.user_set) return { color: DIM_COLORS.user, dashed: false };
+  return { color: DIM_COLORS.base, dashed: !!d.derived_from };
+}
+export function dimState(d) {
+  if (d.assumed) return "Annahme";
+  if (d.user_set) return "nachgemessen";
+  return d.derived_from ? `abgeleitet von ${d.derived_from}` : "";
+}
+
+export const de = v => String(r3(v)).replace(".", ",");
+
+// Eingabe im Label oder in der Tabelle: Ziffern mit Komma oder Punkt, 0 < Wert <= 5000 mm, auf 3 Stellen gerundet
+export function parseDimInput(s) {
+  const t = String(s ?? "").trim();
+  if (!t) return { error: "Bitte einen Wert eingeben." };
+  if (!/^\d+(?:[.,]\d+)?$/.test(t)) return { error: "Kein gültiger Wert – z. B. 45 oder 45,5." };
+  const v = r3(Number(t.replace(",", ".")));
+  if (!(v > 0 && v <= 5000)) return { error: "Der Wert muss größer als 0 und höchstens 5000 mm sein." };
+  return { value: v };
+}
+
+const BANNER_TAIL = " – Schlüsse auf abhängige Maße ziehen?";
+// Hinweis nach einem Neuaufbau: Mass war Annahme oder neuer Wert weicht mehr als 10 % vom alten ab
+export function paramBanner(list) {
+  const parts = list.filter(p => p.old_assumed || (p.old > 0 && Math.abs(p.value - p.old) > 0.1 * p.old))
+    .map(p => (p.old_assumed ? `${de(p.value)} mm ersetzt eine Annahme (${de(p.old)} mm)` : `${de(p.value)} mm statt ${de(p.old)} mm (${p.label})`));
+  return parts.length ? parts.join("; ") + BANNER_TAIL : "";
+}
+
+// Text des Aenderungswunsches fuer „Schluesse ziehen“ (Spec §5)
+export function conclusionText(list) {
+  if (!list.length) return "";
+  const items = list.map(p => `${p.id} ${p.label} = ${de(p.value)} mm`
+    + (p.old == null ? "" : ` (vorher ${p.old_assumed ? "Annahme " : ""}${de(p.old)})`));
+  return `Nachgemessen mit dem Messschieber: ${items.join("; ")}. Leite daraus abhängige Maße ab (Tiefen, Dicken, Abstände, `
+    + "die an diesen Maßen hängen), trage bei jedem geänderten Maß derived_from und eine kurze Begründung ein und ändere sonst nichts.";
 }
