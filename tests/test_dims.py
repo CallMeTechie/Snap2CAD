@@ -256,3 +256,121 @@ def test_lernen_migration_legt_tabelle_an():
     db._migrate(c)
     cols = [r[1] for r in c.execute("PRAGMA table_info(model_dims)")]
     assert cols == ["id", "project_id", "label", "label_norm", "grp", "value", "job_id", "dim_id", "note", "created_at"]
+
+
+# ------------------------------------------------------------------ B1: Editierbarkeit, Anker, Pruefpunkt
+
+def test_parse_editable_nach_codepruefung():
+    from app import jobs
+    code = "LENGTH = 80.0  # M1\nWIDTH = 2 * 25\nHOLE_D = 4.5\nHOLE_D = 5.0\nTHICKNESS = 6.5\nLENGTH_X = 3\n"
+    meta = {"dimensions": [
+        {"id": "D1", "var": "LENGTH", "value": 80.0, "note": ""},
+        {"id": "D2", "var": "WIDTH", "value": 50.0, "note": ""},
+        {"id": "D3", "var": "HOLE_D", "value": 4.5, "note": ""},
+        {"id": "D4", "var": "THICKNESS", "value": 6.0, "note": "Annahme"},
+        {"id": "D5", "var": "MISSING", "value": 1.0, "note": ""},
+        {"id": "D6", "var": None, "value": 3.0, "note": ""}]}
+    jobs.mark_editable(meta, code)
+    d = {x["id"]: x for x in meta["dimensions"]}
+    assert [d[k]["editable"] for k in ("D1", "D2", "D3", "D4", "D5", "D6")] == [True, False, False, True, False, False]
+    assert d["D3"]["note"] == "Konstante mehrfach belegt" and d["D1"]["value"] == 80.0
+    assert d["D4"]["value"] == 6.5 and d["D4"]["note"] == "Annahme; Wert aus dem Code"
+    jobs.mark_editable(meta, code)
+    assert d["D4"]["note"] == "Annahme; Wert aus dem Code" and d["D3"]["note"] == "Konstante mehrfach belegt"
+
+
+def test_parse_editable_var_doppelt():
+    """Zwei Masse mit derselben Konstante: beide nicht editierbar, sonst widerspraechen sie sich nach dem Neuaufbau."""
+    from app import jobs
+    meta = {"dimensions": [{"id": "D1", "var": "LENGTH", "value": 80.0, "note": ""},
+                           {"id": "D2", "var": "LENGTH", "value": 80.0, "note": "Kante"},
+                           {"id": "D3", "var": "WIDTH", "value": 50.0, "note": ""},
+                           {"id": "D4", "var": "WIDTH)|(.*", "value": 50.0, "note": ""}]}
+    jobs.mark_editable(meta, "LENGTH = 80.0\nWIDTH = 50.0\n")
+    d = {x["id"]: x for x in meta["dimensions"]}
+    assert [d[k]["editable"] for k in ("D1", "D2", "D3", "D4")] == [False, False, True, False]
+    assert d["D1"]["note"] == "Konstante mehrfach belegt" and d["D2"]["note"] == "Kante; Konstante mehrfach belegt"
+
+
+def test_anker_aus_dim_anchors_vor_ab_und_abstand():
+    from app import jobs
+    meta = {"dimensions": [
+        {"id": "D1", "var": "A", "value": 10.0, "a": [0, 0, 0], "b": [5, 0, 0]},
+        {"id": "D2", "var": "B", "value": 5.0, "a": [0, 0, 0], "b": [0, 5, 0]},
+        {"id": "D3", "var": "C", "value": 5.0, "a": [0, 0, 0], "b": [0, 7, 0]},
+        {"id": "D4", "var": "DD", "value": 100.0, "a": [0, 0, 0], "b": [100.9, 0, 0]},
+        {"id": "D5", "var": "EE", "value": 100.0, "a": [0, 0, 0], "b": [101.1, 0, 0]},
+        {"id": "D6", "var": "FF", "value": 5.0, "a": [0, 0, 0], "b": [5.09, 0, 0]},
+        {"id": "D7", "var": "GG", "value": 5.0},
+        {"id": "D8", "var": None, "value": 5.0, "a": [0, 0, 0], "b": [5, 0, 0]},
+        {"id": "D9", "var": "HH", "value": 5.0, "anchors_stale": True, "a": [0, 0, 0], "b": [5, 0, 0]}]}
+    result = {"dim_anchors": {"D1": [[0, 0, 0], [10, 0, 0]], "D7": [[0, 0, 0], [0, 0]], "D9": [[1, 1, 1], [1, 1, 6]]}}
+    jobs._apply_anchors(meta, result)
+    d = {x["id"]: x for x in meta["dimensions"]}
+    assert (d["D1"]["a"], d["D1"]["b"]) == ([0.0, 0.0, 0.0], [10.0, 0.0, 0.0])
+    assert d["D2"]["b"] == [0.0, 5.0, 0.0] and "a" in d["D4"] and "a" in d["D6"]
+    assert [k for k in ("D3", "D5", "D7", "D8") if "a" in d[k] or "b" in d[k]] == []
+    assert d["D9"]["b"] == [1.0, 1.0, 6.0] and "anchors_stale" not in d["D9"]
+
+
+def test_anker_server_filtert():
+    """dim_anchors kommt aus dem Prozess des Modellcodes: der Server filtert erneut und speichert nur Gueltiges."""
+    from app import jobs
+    raw = {"D1": [[0, 0, 0], [1.23456, 0, 0]], "D1\n": [[0, 0, 0], [1, 0, 0]], "M1": [[0, 0, 0], [1, 0, 0]],
+           "D2": [[0, 0, "1"], [1, 0, 0]], "D3": [[0, 0, 0]], "D4": "kaputt", "D5": [[0, 0, 0], [0, 0, True]],
+           "<img src=x>": [[0, 0, 0], [1, 0, 0]], "D6": [[0, 0, 0], [0, 2, 0]]}
+    raw.update({f"D{i}": [[0, 0, 0], [i, 0, 0]] for i in range(100, 400)})
+    result = {"bbox": [1, 2, 3], "dim_anchors": raw}
+    jobs._filter_anchors(result)
+    da = result["dim_anchors"]
+    assert da["D1"] == [[0.0, 0.0, 0.0], [1.2346, 0.0, 0.0]] and da["D6"] == [[0.0, 0.0, 0.0], [0.0, 2.0, 0.0]]
+    assert not {"D1\n", "M1", "D2", "D3", "D4", "D5", "<img src=x>"} & set(da) and len(da) == 200
+    for bad in ([1, 2], None, "D1"):
+        r = {"bbox": [1, 2, 3], "dim_anchors": bad}
+        jobs._filter_anchors(r)
+        assert r == {"bbox": [1, 2, 3]}
+    jobs._filter_anchors(None)
+
+
+def test_anker_rueckfall_param_gestreckt_und_stale():
+    from app import jobs
+    meta = {"dimensions": [
+        {"id": "D1", "var": "H", "value": 45.0, "a": [0, 0, 0], "b": [0, 0, 75]},
+        {"id": "D2", "var": "W", "value": 40.0, "a": [0, 0, 0], "b": [40, 0, 0]},
+        {"id": "D3", "var": "DD", "value": 6.0, "a": [0, 0, 0], "b": [6, 0, 0], "anchors_stale": True}]}
+    jobs._apply_anchors(meta, {"dim_anchors": {"D3": [[1, 0, 0], [7, 0, 0]]}}, changed={"D1"})
+    d = {x["id"]: x for x in meta["dimensions"]}
+    assert d["D1"]["b"] == [0.0, 0.0, 45.0] and "anchors_stale" not in d["D1"]
+    assert d["D2"]["anchors_stale"] is True and d["D2"]["b"] == [40.0, 0.0, 0.0]
+    assert "anchors_stale" not in d["D3"] and d["D3"]["a"] == [1.0, 0.0, 0.0]
+
+
+def test_pruefpunkt_kritisch_ueber_ref(user):
+    from app import jobs
+    pid = _proj(user)
+    _meas(user, pid, "Länge", 80.0, critical=True)                                   # M1
+    res = {"valid": True, "solids": 1, "stl": {"watertight": True, "triangles": 12}}
+
+    def crit(dims):
+        return next(c for c in jobs.compute_checks(res, {"dimensions": dims}, pid) if c["id"] == "critical")
+    assert crit([{"id": "D1", "ref": "M1", "value": 80.1}])["state"] == "ok"
+    far = crit([{"id": "D1", "ref": "M1", "value": 85.0}])
+    assert far["state"] == "warn" and far["detail"] == "stark gerundet: M1 80,00 → 85,00"
+    assert crit([{"id": "D1", "ref": None, "value": 80.0}])["detail"] == "nicht ausgewiesen: M1"
+    assert crit([{"id": "M1", "nominal": 80.0}])["state"] == "ok"                      # alte Version
+
+
+def test_anker_nach_ki_lauf(user):
+    pid = _proj(user)
+    _meas(user, pid, "Länge", 80.0)                                                   # M1
+    r = user.post("/api/jobs", json={"project_id": pid, "name": "Platte", "request": "x"}, headers=H)
+    j = _wait(user, r.json()["id"])
+    v = j["versions"][-1]
+    assert j["status"] == "done" and v["status"] == "ok", j
+    d = {x["id"]: x for x in v["meta"]["dimensions"]}
+    assert set(v["result"]["dim_anchors"]) == {"D1", "D2", "D3", "D4", "D5", "D6"}
+    assert d["D1"]["ref"] == "M1" and d["D2"]["ref"] is None
+    assert (d["D3"]["a"], d["D3"]["b"]) == ([40.0, 25.0, 0.0], [40.0, 25.0, 6.0]) and d["D4"]["a"][2] == 6.0
+    assert (d["D7"]["a"], d["D7"]["b"]) == ([0.0, -4.0, 6.0], [0.0, 4.0, 6.0]) and "anchors_stale" not in d["D7"]
+    assert "a" not in d["D8"] and all(x["editable"] for k, x in d.items() if k != "D9")
+    assert d["D9"]["editable"] is False and (d["D9"]["a"], d["D9"]["b"]) == ([15.0, 0.0, 6.0], [40.0, 0.0, 6.0])

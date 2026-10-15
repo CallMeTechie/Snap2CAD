@@ -1,11 +1,13 @@
 """CAD-Auftraege: KI -> Code -> Sandbox -> Pruefung -> ggf. Selbstkorrektur."""
 from __future__ import annotations
 
+import math
 import os
 import re
 import shutil
 import threading
 import traceback
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -289,6 +291,105 @@ def _de(v: float, nd: int = 2) -> str:
     return f"{v:.{nd}f}".replace(".", ",")
 
 
+# ------------------------------------------------------------------ Masse am Modell (Spec Stufe B §1, §2)
+
+def _meas_ids(project_id: int | None) -> set[str]:
+    """M-Nummern der uebernommenen Messungen: nur diese duerfen als ref stehen."""
+    if not project_id:
+        return set()
+    return {f"M{r['seq']}" for r in db.q("SELECT seq FROM measurements WHERE project_id=? AND accepted=1", (project_id,))}
+
+
+def _const_re(var: str) -> re.Pattern:
+    return re.compile(rf"^{re.escape(var)}\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*(#.*)?$", re.M)
+
+
+def _add_note(note: str | None, add: str) -> str:
+    return note if note and add in note else (f"{note}; {add}" if note else add)
+
+
+def mark_editable(meta: dict, code: str):
+    """editable nur bei genau einer Zeile `VAR =` im Muster der Spec und genau einem Mass mit dieser var;
+    Codewert gilt ab Abweichung > 0,01."""
+    dims = [d for d in meta.get("dimensions", []) if isinstance(d, dict)]
+    used = Counter(d.get("var") for d in dims if d.get("var"))
+    for d in dims:
+        var, value = d.get("var"), d.get("value")
+        d["editable"] = False
+        if not isinstance(var, str) or not ai._VAR.fullmatch(var) or not isinstance(value, (int, float)):
+            continue
+        if used[var] > 1 or len(re.findall(rf"^{re.escape(var)}\s*=", code, re.M)) > 1:
+            d["note"] = _add_note(d.get("note"), "Konstante mehrfach belegt")
+            continue
+        m = _const_re(var).search(code)
+        if not m:
+            continue
+        d["editable"] = True
+        v = float(m.group(1))
+        if abs(v - value) > 0.01:
+            d["value"] = v
+            d["note"] = _add_note(d.get("note"), "Wert aus dem Code")
+
+
+def _filter_anchors(result: dict | None):
+    """dim_anchors serverseitig erneut filtern (Spec Regel 13): der Laeufer teilt den Prozess mit dem Modellcode und
+    ist keine Vertrauensgrenze. Nur gefilterte Eintraege werden gespeichert und an den Browser geliefert."""
+    if not isinstance(result, dict) or "dim_anchors" not in result:
+        return
+    raw = result.pop("dim_anchors")
+    if not isinstance(raw, dict):
+        return
+    out = {}
+    for k, v in raw.items():
+        if len(out) >= ai.MAX_DIMS:
+            break
+        if type(k) is not str or not ai._DIM_ID.fullmatch(k) or not isinstance(v, (list, tuple)) or len(v) != 2:
+            continue
+        a, b = ai.point3(v[0]), ai.point3(v[1])
+        if a and b:
+            out[k] = [[round(x, 4) for x in a], [round(x, 4) for x in b]]
+    result["dim_anchors"] = out
+
+
+def _stretch(a: list[float], b: list[float], value: float) -> tuple[list[float], list[float]]:
+    """Anker entlang a->b auf die neue Laenge strecken (Rueckfall ohne DIM_ANCHORS-Eintrag)."""
+    n = math.dist(a, b)
+    return (a, b) if n <= 1e-9 else (a, [a[i] + (b[i] - a[i]) * value / n for i in range(3)])
+
+
+def _apply_anchors(meta: dict, result: dict | None, changed: set[str] | None = None):
+    """Je Mass zuerst dim_anchors (Regel 13), sonst a/b; gelten nur bei Abstand = Wert ± max(0,1 mm; 1 %).
+    changed (Param-Lauf): geaendertes Mass ohne Eintrag wird gestreckt, jedes andere ohne Eintrag ist anchors_stale."""
+    da = (result or {}).get("dim_anchors")
+    da = da if isinstance(da, dict) else {}
+    for d in meta.get("dimensions", []):
+        if not isinstance(d, dict):
+            continue
+        value, src = d.get("value"), da.get(d.get("id"))
+        a = b = None
+        if isinstance(src, (list, tuple)) and len(src) == 2:
+            a, b = ai.point3(src[0]), ai.point3(src[1])
+        stale = False
+        if not (a and b):
+            a, b = ai.point3(d.get("a")), ai.point3(d.get("b"))
+            if changed is not None and a and b:
+                if d.get("id") in changed:
+                    a, b = _stretch(a, b, value)
+                    stale = d.get("anchors_stale") is True
+                else:
+                    stale = True
+        ok = bool(d.get("var") and isinstance(value, (int, float)) and a and b
+                  and abs(math.dist(a, b) - value) <= max(0.1, 0.01 * value))
+        d.pop("anchors_stale", None)
+        if ok:
+            d["a"], d["b"] = [round(x, 4) for x in a], [round(x, 4) for x in b]
+            if stale:
+                d["anchors_stale"] = True
+        else:
+            d.pop("a", None)
+            d.pop("b", None)
+
+
 def compute_checks(result: dict, meta: dict, project_id: int | None) -> list[dict]:
     checks = []
     checks.append({"id": "valid", "label": "Gültiger Volumenkörper (B-Rep)",
@@ -323,15 +424,27 @@ def compute_checks(result: dict, meta: dict, project_id: int | None) -> list[dic
     if project_id:
         crit = db.q("SELECT seq,label,value,caliper,unc FROM measurements WHERE project_id=? AND accepted=1 AND critical=1",
                     (project_id,))
-        dims = {str(d.get("id", "")).upper(): d for d in meta.get("dimensions", []) if isinstance(d, dict)}
-        missing = [f"M{c['seq']}" for c in crit if f"M{c['seq']}" not in dims]
+        # Stufe B: Modellmasse (D-Nummern) zeigen ueber ref auf die Messung und tragen value; alte Versionen: id = M-Nummer
+        by_m: dict[str, tuple[dict, str]] = {}
+        for d in meta.get("dimensions", []):
+            if not isinstance(d, dict):
+                continue
+            did = str(d.get("id", "")).upper()
+            if did.startswith("D"):
+                if d.get("ref"):
+                    by_m.setdefault(str(d["ref"]).upper(), (d, "value"))
+            else:
+                by_m.setdefault(did, (d, "nominal"))
+        missing = [f"M{c['seq']}" for c in crit if f"M{c['seq']}" not in by_m]
         far = []
         for c in crit:
-            d = dims.get(f"M{c['seq']}")
+            hit = by_m.get(f"M{c['seq']}")
             ref = c["caliper"] if c["caliper"] is not None else c["value"]
             try:
-                if d and ref is not None and abs(float(d.get("nominal")) - ref) > max(2 * (c["unc"] or 0.5), 0.3):
-                    far.append(f"M{c['seq']} {_de(ref)} → {_de(float(d['nominal']))}")
+                if hit and ref is not None:
+                    v = float(hit[0].get(hit[1]))
+                    if abs(v - ref) > max(2 * (c["unc"] or 0.5), 0.3):
+                        far.append(f"M{c['seq']} {_de(ref)} → {_de(v)}")
             except (TypeError, ValueError):
                 pass
         if crit:
@@ -496,7 +609,7 @@ def _run(job_id: int, trigger: str, request_text: str, ev: threading.Event):
         vdir.mkdir(parents=True, exist_ok=True)
         (vdir / "claude.txt").write_text(text, encoding="utf-8")
         try:
-            meta, code = ai.parse_cad(text)
+            meta, code = ai.parse_cad(text, _meas_ids(job["project_id"]))
         except ai.AIError as e:
             meta, code = {}, ""
             err = {"stage": "antwort", "type": "FormatError", "message": str(e), "line": None, "code": None}
@@ -505,6 +618,8 @@ def _run(job_id: int, trigger: str, request_text: str, ev: threading.Event):
             log(job_id, f"Version {version}: Antwort im falschen Format", "warn")
             result, checks = None, []
         else:
+            mark_editable(meta, code)
+            learned_chk = reconcile_learned(meta, job["project_id"], job_id)   # Spec §4: nur nach KI-Laeufen
             (vdir / "model.py").write_text(code, encoding="utf-8")
             db.ex("UPDATE job_versions SET code=?, meta=? WHERE job_id=? AND version=?",
                   (code, db.jdump(meta), job_id, version))
@@ -515,11 +630,17 @@ def _run(job_id: int, trigger: str, request_text: str, ev: threading.Event):
                 return
             err = None if res["ok"] else res["error"]
             result = res.get("result")
+            _filter_anchors(result)                 # Spec Regel 13: nur gefilterte Anker speichern
+            if result:
+                _apply_anchors(meta, result)
             checks = compute_checks(result, meta, job["project_id"]) if result else []
+            if result and learned_chk:
+                checks.append(learned_chk)
             failed = err is not None or any(c["state"] == "fail" for c in checks)
-            db.ex("UPDATE job_versions SET status=?, error=?, result=?, checks=?, seconds=? WHERE job_id=? AND version=?",
+            db.ex("UPDATE job_versions SET status=?, error=?, result=?, checks=?, seconds=?, meta=? "
+                  "WHERE job_id=? AND version=?",
                   ("failed" if failed else "ok", db.jdump(err) if err else None, db.jdump(result) if result else None,
-                   db.jdump(checks), res.get("seconds"), job_id, version))
+                   db.jdump(checks), res.get("seconds"), db.jdump(meta), job_id, version))
             if not failed:
                 warn = sum(1 for c in checks if c["state"] == "warn")
                 bb = result["bbox"]
