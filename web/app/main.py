@@ -758,6 +758,8 @@ def _project_public(p: dict, detail: bool = False) -> dict:
                                db.q("SELECT * FROM measurements WHERE project_id=? ORDER BY seq", (p["id"],))]
         out["grid_h"] = _grid_h(fmt)
         out["parts"] = parts.public_list(p["id"])
+        out["model_dims"] = [{k: r[k] for k in ("id", "label", "grp", "value", "job_id", "dim_id", "created_at")}
+                             for r in jobs.learned_dims(p["id"])]
     return out
 
 
@@ -867,6 +869,18 @@ def project_delete(pid: int, u: dict = Depends(auth.require_user)):
     _own_project(pid, u)
     _delete_project_files(pid)
     db.ex("DELETE FROM projects WHERE id=?", (pid,))
+    return {"ok": True}
+
+
+@app.delete("/api/projects/{pid}/model-dims/{mid}")
+def model_dim_delete(pid: int, mid: int, u: dict = Depends(auth.require_user)):
+    """Spec Stufe B §4: gelernten Messschieberwert loeschen (die Pruefung wird damit veraltet)."""
+    _own_project(pid, u)
+    row = db.q1("SELECT id, label FROM model_dims WHERE id=? AND project_id=?", (mid, pid))
+    if not row:
+        raise HTTPException(404, "Messschieberwert nicht gefunden")
+    db.ex("DELETE FROM model_dims WHERE id=?", (mid,))
+    db.audit("model_dim_delete", f"Projekt {pid}: {row['label']}"[:500], user_id=u["id"], actor=u["username"])
     return {"ok": True}
 
 
@@ -1597,6 +1611,13 @@ def _csv(pid: int) -> str:
     def n(v):
         return "" if v is None else f"{v:.3f}".rstrip("0").rstrip(".").replace(".", ",")
 
+    def safe_txt(t: str) -> str:   # keine Formeln in Tabellenprogrammen
+        return ("'" + t) if t[:1] in ("=", "+", "-", "@", "\t", "\r") else t
+
+    def cell(c) -> str:
+        s = str(c)
+        return '"' + s.replace('"', '""') + '"' if any(x in s for x in ';"\n') else s
+
     lines = ["ID;Bezeichnung;Art;Wert;Einheit;Unsicherheit;Messschieber;kritisch;Passung;Quelle;Ansicht;Punkte (mm);Teil;Nennmaß"]
     seq = {t["id"]: t["seq"] for t in db.q("SELECT id, seq FROM parts WHERE project_id=?", (pid,))}
     photos = {p["id"]: p for p in db.q("SELECT * FROM photos WHERE project_id=?", (pid,))}
@@ -1604,14 +1625,16 @@ def _csv(pid: int) -> str:
         d = db.jload(m["data"], {}) or {}
         tag, tpts = jobs.top_points(m, d, photos)
         pts = " ".join(f"{p[0]:.2f}/{p[1]:.2f}" for p in tpts)
-        safe_txt = lambda t: ("'" + t) if t[:1] in ("=", "+", "-", "@", "\t", "\r") else t  # noqa: E731
         cells = [f"M{m['seq']}", safe_txt(m["label"]), KIND_LABEL.get(m["kind"], m["kind"]), n(m["value"]), m["unit"],
                  n(m["unc"]),
                  n(m["caliper"]), "ja" if m["critical"] else "", safe_txt(m["fit"] or ""),
                  jobs.SOURCE_LABEL.get(m["source"], m["source"]), f"{d.get('view', '')} {tag}".strip(), pts,
                  f"T{seq[m['part_id']]}" if m["part_id"] in seq else "", n(d.get("nominal"))]
-        lines.append(";".join('"' + str(c).replace('"', '""') + '"' if any(x in str(c) for x in ';"\n') else str(c)
-                              for c in cells))
+        lines.append(";".join(cell(c) for c in cells))
+    for r in jobs.learned_dims(pid):   # Stufe B §4: Messschieber am Modell, Quelle „Modell“
+        cells = [r["dim_id"] or "", safe_txt(r["label"]), jobs.GROUP_TEXT.get(r["grp"], r["grp"]), n(r["value"]), "mm", "",
+                 n(r["value"]), "", "", "Modell", f"Auftrag {r['job_id']}" if r["job_id"] else "", "", "", ""]
+        lines.append(";".join(cell(c) for c in cells))
     return "﻿" + "\r\n".join(lines) + "\r\n"
 
 

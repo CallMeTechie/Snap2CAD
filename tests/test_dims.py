@@ -736,3 +736,66 @@ def test_lernen_gleiche_bezeichnung_zwei_masse(user, monkeypatch):
     assert _wait(user, jid)["versions"][-1]["meta"]["dimensions"][0]["label"] == "Bohrung"     # Meta behaelt das Label
     assert [(x["label"], x["value"], x["dim_id"]) for x in jobs.learned_dims(pid)] == \
         [("Bohrung (D3)", 6.5, "D3"), ("Bohrung (D5)", 4.2, "D5")]
+
+
+# ------------------------------------------------------------------ B4: Pruefsumme, API, CSV
+
+def test_hash_ohne_gelernte_werte_unveraendert(user):
+    """Bestehende Projekte: Pruefsumme ohne model_dims-Schluessel, sonst waere jede gespeicherte Pruefung veraltet."""
+    import hashlib
+
+    from app import check, db
+    pid = _proj(user)
+    p = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
+    blob = check.hash_blob(p, None, None)
+    assert set(blob) == {"photos", "meas", "parts", "part_id", "material"}
+    assert check.cad_hash(p, None, None) == hashlib.sha256(
+        json.dumps(blob, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def test_lernen_hash_veraltet_und_loeschen(user):
+    from app import check, db, jobs
+    pid = _proj(user)
+    jid = _job(user, pid, "X = 1\n", {"dimensions": []})
+
+    def h():
+        return check.cad_hash(db.q1("SELECT * FROM projects WHERE id=?", (pid,)), None, None)
+    h0 = h()
+    jobs.learn_dims(pid, jid, [{"id": "D2", "label": "Höhe Block", "group": "aussen", "value": 45.0}])
+    assert h() != h0
+    md = user.get(f"/api/projects/{pid}").json()["model_dims"]
+    assert [(m["label"], m["value"], m["grp"], m["dim_id"], m["job_id"]) for m in md] == \
+        [("Höhe Block", 45.0, "aussen", "D2", jid)]
+    assert set(md[0]) == {"id", "label", "grp", "value", "job_id", "dim_id", "created_at"}
+    assert user.delete(f"/api/projects/{pid}/model-dims/{md[0]['id']}", headers=H).json() == {"ok": True}
+    assert user.get(f"/api/projects/{pid}").json()["model_dims"] == [] and h() == h0
+    assert db.q1("SELECT detail FROM audit WHERE action='model_dim_delete' ORDER BY id DESC LIMIT 1")["detail"] == \
+        f"Projekt {pid}: Höhe Block"
+    assert user.delete(f"/api/projects/{pid}/model-dims/{md[0]['id']}", headers=H).status_code == 404
+
+
+def test_lernen_loeschen_fremd(user, app, admin):
+    from fastapi.testclient import TestClient
+
+    from app import jobs
+    pid = _proj(user)
+    jid = _job(user, pid, "X = 1\n", {"dimensions": []})
+    jobs.learn_dims(pid, jid, [{"id": "D2", "label": "Höhe Block", "group": "aussen", "value": 45.0}])
+    mid = jobs.learned_dims(pid)[0]["id"]
+    tok = admin.post("/api/admin/invites", json={"role": "user", "days": 1}, headers=H).json()["link"].rsplit("/", 1)[1]
+    f = TestClient(app)
+    f.post(f"/api/invite/{tok}", json={"username": f"fremdm{pid}", "display_name": "Fremd",
+                                       "password": "Schieblehre-Messing-7"}, headers=H)
+    own = f.post("/api/projects", json={"name": "f"}, headers=H).json()["id"]
+    assert f.delete(f"/api/projects/{pid}/model-dims/{mid}", headers=H).status_code == 404
+    assert f.delete(f"/api/projects/{own}/model-dims/{mid}", headers=H).status_code == 404
+    assert len(jobs.learned_dims(pid)) == 1
+
+
+def test_lernen_csv_modell_zeilen(user):
+    from app import jobs
+    pid = _proj(user)
+    jid = _job(user, pid, "X = 1\n", {"dimensions": []})
+    jobs.learn_dims(pid, jid, [{"id": "D2", "label": "=Höhe", "group": "aussen", "value": 45.5}])
+    csv = user.get(f"/api/projects/{pid}/measurements.csv").text
+    assert f"\r\nD2;'=Höhe;außen;45,5;mm;;45,5;;;Modell;Auftrag {jid};;;\r\n" in csv
