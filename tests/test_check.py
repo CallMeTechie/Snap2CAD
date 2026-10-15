@@ -93,3 +93,47 @@ def test_werkstueck_felder(proj):
     assert c.patch(f"/api/projects/{pid}", json={"finish": "rau"}, headers=H).status_code == 400
     r = c.patch(f"/api/projects/{pid}", json={"clear_material": True}, headers=H).json()
     assert r["material"] is None and r["material_user"] == 0
+
+
+def test_parse_check_defensiv():
+    from app import ai
+    txt = ('Hier: {"items": [{"kind": "hoehe", "text": "' + "x" * 300 + '"}, {"kind": "bottom", "severity": "block", "text": 5},'
+           ' {"kind": "height", "severity": "block", "text": "Höhe\\n fehlt"}],'
+           ' "material": {"color": "silber", "transparent": 7, "finish": "rau", "note": ["x"]}}')
+    r = ai.parse_check(txt)
+    assert r["items"] == [{"kind": "other", "severity": "warn", "text": "x" * 200},
+                          {"kind": "height", "severity": "block", "text": "Höhe fehlt"}]
+    assert r["material"] == {"color": "silber", "material": None, "transparent": None, "finish": None, "note": ""}
+    assert ai.parse_check("[]")["items"] == [] and ai.parse_check("kein json")["material"] is None
+
+
+def test_prompt_regeln():
+    from app import ai
+    assert "ist verbindlich" in ai.CAD_SYSTEM and "Innenbohrungen" in ai.CAD_SYSTEM
+    assert "so einfach wie möglich" not in ai.CAD_SYSTEM
+    assert "Fotografiertes Original" in ai.CAD_SYSTEM and "Offene Punkte" in ai.CAD_SYSTEM
+
+
+def test_temperatur_wird_uebergeben(monkeypatch):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from app import ai, config, settings
+    seen = []
+
+    class Stream:
+        text_stream = iter(["ok"])
+
+        def get_final_message(self):
+            return SimpleNamespace(usage=SimpleNamespace(input_tokens=1, output_tokens=1), model="m", stop_reason="end_turn")
+
+    @contextmanager
+    def stream(**kw):
+        seen.append(kw)
+        yield Stream()
+    monkeypatch.setattr(config, "AI_FAKE", False)
+    monkeypatch.setattr(settings, "api_key", lambda: "k")
+    monkeypatch.setattr(ai, "client", lambda: SimpleNamespace(messages=SimpleNamespace(stream=stream)))
+    ai.call("s", [{"role": "user", "content": "x"}], temperature=0.0)
+    ai.call("s", [{"role": "user", "content": "x"}])
+    assert seen[0]["temperature"] == 0.0 and "temperature" not in seen[1]
