@@ -117,8 +117,9 @@ Seite), measure (ein Maß fehlt oder widerspricht), sharpness (Kante unscharf, v
 severity: block = ohne diese Angabe wird das Modell geraten; warn = die Genauigkeit leidet.
 Jeder Text sagt, was der Nutzer tun soll (z. B. „Höhenlehre fotografieren oder Höhe als Maß eingeben“).
 Höchstens 8 Punkte, keine Punkte zu Dingen, die schon in der Messtabelle stehen.
-Bei transparenten oder teiltransparenten Teilen (siehe Zeile „Fotografiertes Original“) sind durchscheinende
-Strukturen Innenbohrungen oder Innenkonturen, keine Nuten, Rillen oder Stufen – dafür keinen Punkt und kein
+Bei transparenten oder teiltransparenten Teilen (laut Zeile „Fotografiertes Original“ oder deiner eigenen
+Schätzung) sind durchscheinende Strukturen Innenbohrungen oder Innenkonturen, keine Nuten, Rillen oder Stufen –
+dafür keinen Punkt und kein
 weiteres Foto verlangen.
 
 Schätze außerdem das fotografierte Teil: color (ein Wort, z. B. silber, schwarz, weiß), material (z. B. Aluminium,
