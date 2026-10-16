@@ -126,7 +126,7 @@ export function createPartsLayer(env) {
       try { await api(`/api/parts/${id}`, { method: "PATCH", body }); } catch (e) { fail(e); }
       await reloadProject().catch(fail);
     } finally { busy = false; }
-    env.changed();
+    if (S.project) env.changed();   // Zugriff auf das Projekt verloren (Hook api.onNotFound): Seite wird verlassen
   }
   async function finishNew() {
     if (!drawing || drawing.length < 3) { toast("Mindestens 3 Punkte setzen", "err"); return; }

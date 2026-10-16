@@ -14,12 +14,12 @@ from pathlib import Path
 from typing import Literal
 
 import cv2
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from . import ai, auth, check, config, db, geom, jobs, parts, preview, sandbox, settings
+from . import access, ai, auth, check, config, db, geom, jobs, parts, preview, projcopy, projects, sandbox, settings, teams
 
 sys.path.insert(0, str(config.ROOT))
 from core import edges, matgen, vision  # noqa: E402
@@ -43,6 +43,8 @@ def _startup():
     auth.ensure_admin()
     auth.purge_expired()
     jobs.startup()
+    projcopy.cleanup_tmp()   # Reste abgebrochener Kopien (Spec Teams §4)
+    projects.sweep()   # Auftraege ohne Ersteller und Projekt, Fotoordner ohne Zeile (Plan, Lueckenfuellung 22)
     ki = "Testmodus" if config.AI_FAKE else {"env": "an (Umgebung)", "db": "an", "none": "aus",
                                              "locked": "aus (Schlüssel nicht entschlüsselbar)"}[settings.api_key_source()]
     print(f"Snap2CAD {VERSION} · KI: {ki} · Modell {settings.model()} · Sandbox {config.SANDBOX_MODE}", flush=True)
@@ -64,6 +66,7 @@ async def lifespan(_app):
 
 
 app = FastAPI(title="Snap2CAD", version=VERSION, docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+app.include_router(teams.router)   # Teams (Spec Teams §3, §5)
 
 
 # ------------------------------------------------------------------ Middleware
@@ -161,32 +164,21 @@ def _disposition(filename: str) -> str:
     return f"attachment; filename=\"{ascii_fn}\"; filename*=UTF-8''{quote(filename)}"
 
 
-def _own_project(pid: int, user: dict) -> dict:
-    p = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
-    if not p or (p["user_id"] != user["id"] and user["role"] != "admin"):
-        raise HTTPException(404, "Projekt nicht gefunden")
-    return p
+def _own_project(pid: int, user: dict, need: str = "write") -> dict:
+    """Spec Teams §2: Rechte ueber access (need read | write | delete | move | copy); Standard write."""
+    return access.require_project(user, pid, need)
 
 
-def _own_photo(phid: int, user: dict) -> tuple[dict, dict]:
-    ph = db.q1("SELECT * FROM photos WHERE id=?", (phid,))
-    if not ph:
-        raise HTTPException(404, "Foto nicht gefunden")
-    return ph, _own_project(ph["project_id"], user)
+def _own_photo(phid: int, user: dict, need: str = "write") -> tuple[dict, dict]:
+    return access.require_photo(user, phid, need)
 
 
-def _own_meas(mid: int, user: dict) -> tuple[dict, dict]:
-    m = db.q1("SELECT * FROM measurements WHERE id=?", (mid,))
-    if not m:
-        raise HTTPException(404, "Maß nicht gefunden")
-    return m, _own_project(m["project_id"], user)
+def _own_meas(mid: int, user: dict, need: str = "write") -> tuple[dict, dict]:
+    return access.require_meas(user, mid, need)
 
 
-def _own_part(part_id: int, user: dict) -> tuple[dict, dict]:
-    t = db.q1("SELECT * FROM parts WHERE id=?", (part_id,))
-    if not t:
-        raise HTTPException(404, "Teil nicht gefunden")
-    return t, _own_project(t["project_id"], user)
+def _own_part(part_id: int, user: dict, need: str = "write") -> tuple[dict, dict]:
+    return access.require_part(user, part_id, need)
 
 
 def _refresh(p: dict):
@@ -194,15 +186,13 @@ def _refresh(p: dict):
         parts.refresh(p, *_factors(p))
 
 
-def _own_job(jid: int, user: dict) -> dict:
-    j = db.q1("SELECT * FROM jobs WHERE id=?", (jid,))
-    if not j or (j["user_id"] != user["id"] and user["role"] != "admin"):
-        raise HTTPException(404, "Auftrag nicht gefunden")
-    return j
+def _own_job(jid: int, user: dict, need: str = "write") -> dict:
+    """Auftraege folgen ihrem Projekt (access.require_job); need read | write | delete. Vor jobs.delete aufrufen."""
+    return access.require_job(user, jid, need)
 
 
 def _photo_dir(phid: int) -> Path:
-    return config.DATA_DIR / "photos" / str(phid)
+    return projects.photo_dir(phid)   # eine Stelle fuer den Fotoordner (web/app/projects.py)
 
 
 def _photo_public(ph: dict, hints: dict | None = None) -> dict:
@@ -281,6 +271,8 @@ def me(request: Request):
                       "sandbox_mode": config.SANDBOX_MODE}}
     out["user"] = auth.public_user(u)
     out["usage"] = _usage(u)
+    out["team_invites"] = db.q1("SELECT COUNT(*) n FROM team_invites WHERE user_id=? AND status='offen'",
+                                (u["id"],))["n"]
     return out
 
 
@@ -460,7 +452,9 @@ def admin_users(a: dict = Depends(auth.require_admin)):
     for u in users:
         pu = auth.public_user(u)
         pu["usage"] = _usage(u)
-        pu["jobs"] = db.q1("SELECT COUNT(*) n FROM jobs WHERE user_id=?", (u["id"],))["n"]
+        pu["jobs"] = db.q1("SELECT COUNT(*) n FROM jobs WHERE user_id=?", (u["id"],))["n"]   # nur selbst angelegte, nur Zahl
+        pu["team_projects"] = db.q1("SELECT COUNT(*) n FROM projects WHERE user_id=? AND team_id IS NOT NULL",
+                                    (u["id"],))["n"]   # bleiben beim Loeschen im Team (Spec Teams §5)
         pu["pending_reset"] = bool(db.q1("SELECT id FROM resets WHERE user_id=? AND used_at IS NULL AND expires_at>?",
                                          (u["id"], db.now())))
         pu["sessions"] = db.q1("SELECT COUNT(*) n FROM sessions WHERE user_id=? AND expires_at>?", (u["id"], db.now()))["n"]
@@ -548,6 +542,9 @@ def admin_user_logout(uid: int, a: dict = Depends(auth.require_admin)):
 
 @app.delete("/api/admin/users/{uid}")
 def admin_user_delete(uid: int, request: Request, a: dict = Depends(auth.require_admin)):
+    """Spec Teams §5: Aufträge ohne Projekt und in privaten Projekten sowie die privaten Projekte samt Dateien weg;
+    Team-Projekte und deren Aufträge bleiben (Ersteller leer); Mitgliedschaften und Einladungen per Kaskade;
+    Leiter-Nachfolge in derselben Transaktion wie DELETE FROM users."""
     u = db.q1("SELECT * FROM users WHERE id=?", (uid,))
     if not u:
         raise HTTPException(404, "Benutzer nicht gefunden")
@@ -558,14 +555,38 @@ def admin_user_delete(uid: int, request: Request, a: dict = Depends(auth.require
             raise HTTPException(400, "Der letzte Administrator kann nicht gelöscht werden.")
         db.ex("UPDATE users SET status='disabled' WHERE id=?", (uid,))
     auth.end_sessions(uid)
-    for j in db.q("SELECT * FROM jobs WHERE user_id=?", (uid,)):
-        jobs.delete(j)
-    for p in db.q("SELECT id FROM projects WHERE user_id=?", (uid,)):
-        _delete_project_files(p["id"])
-    db.ex("DELETE FROM users WHERE id=?", (uid,))
-    db.audit("user_deleted", f"„{u['username']}“ mit allen Daten gelöscht", user_id=a["id"], actor=a["username"],
-             ip=auth.client_ip(request))
-    return {"ok": True}
+    for j in db.q("SELECT j.* FROM jobs j LEFT JOIN projects p ON p.id=j.project_id WHERE j.user_id=? AND p.team_id IS NULL",
+                  (uid,)):
+        jobs.delete(j)   # ohne Projekt oder in privaten Projekten; nie in db.atomic()
+    private = [r["id"] for r in db.q("SELECT id FROM projects WHERE user_id=? AND team_id IS NULL", (uid,))]
+    kept = db.q1("SELECT COUNT(*) n FROM projects WHERE user_id=? AND team_id IS NOT NULL", (uid,))["n"]
+
+    late: dict[str, list[int]] = {"jobs": [], "photos": []}
+
+    def drop_user():
+        # Gesamtreview S-2: private Projekte, die nach dem Lesen der Liste noch angelegt wurden, ebenfalls loeschen,
+        # sonst bliebe ein Projekt ohne Besitzer und ohne Team; ihre Auftraege und Fotoordner nach dem COMMIT
+        extra = [r["id"] for r in db.q("SELECT id FROM projects WHERE user_id=? AND team_id IS NULL", (uid,))]
+        marks = ",".join("?" * len(extra)) or "NULL"
+        late["jobs"] = [r["id"] for r in db.q(
+            f"SELECT id FROM jobs WHERE (user_id=? AND (project_id IS NULL OR project_id IN ({marks}))) "
+            f"OR (user_id IS NULL AND project_id IN ({marks}))", (uid, *extra, *extra))]
+        if extra:
+            late["photos"] = [r["id"] for r in db.q(f"SELECT id FROM photos WHERE project_id IN ({marks})", tuple(extra))]
+            db.ex(f"DELETE FROM projects WHERE id IN ({marks})", tuple(extra))
+        teams.succeed_leaders(uid, a)
+        db.ex("DELETE FROM users WHERE id=?", (uid,))
+    projects.delete_projects(private, then=drop_user)
+    for jid in late["jobs"]:   # nach dem COMMIT, nie in db.atomic()
+        j = db.q1("SELECT * FROM jobs WHERE id=?", (jid,))
+        if j:
+            jobs.delete(j)
+    for phid in late["photos"]:
+        shutil.rmtree(projects.photo_dir(phid), ignore_errors=True)
+    db.audit("user_deleted", f"„{u['username']}“ mit allen privaten Daten gelöscht, "
+                             f"{teams.plural(kept, 'Team-Projekt bleibt', 'Team-Projekte bleiben')}",
+             user_id=a["id"], actor=a["username"], ip=auth.client_ip(request))
+    return {"ok": True, "team_projects_kept": kept}
 
 
 @app.get("/api/admin/invites")
@@ -743,8 +764,9 @@ def mat_layout(format: str = "A4", u: dict = Depends(auth.require_user)):
 
 # ------------------------------------------------------------------ Projekte
 
-def _project_public(p: dict, detail: bool = False) -> dict:
+def _project_public(p: dict, u: dict, detail: bool = False) -> dict:
     out = dict(p)
+    out.update(access.project_fields(u, p))   # team_id, team_name, my_role, creator, creator_is_member (Spec Teams §4)
     out["cad_check"] = check.public_check(p) if detail else None
     out["n_photos"] = db.q1("SELECT COUNT(*) n FROM photos WHERE project_id=?", (p["id"],))["n"]
     out["n_measurements"] = db.q1("SELECT COUNT(*) n FROM measurements WHERE project_id=? AND accepted=1", (p["id"],))["n"]
@@ -786,35 +808,60 @@ def _library_fields(p: dict) -> dict:
 
 
 @app.get("/api/projects")
-def projects(u: dict = Depends(auth.require_user)):
-    return [{**_project_public(p), **_library_fields(p)} for p in
-            db.q("SELECT * FROM projects WHERE user_id=? ORDER BY archived, id DESC", (u["id"],))]
+def project_list(scope: str = "private", u: dict = Depends(auth.require_user)):
+    """Spec Teams §4: private (Standard), team:<id> (nur Mitglieder) oder all (privat und alle eigenen Teams)."""
+    if scope == "private":
+        rows = db.q("SELECT * FROM projects WHERE user_id=? AND team_id IS NULL ORDER BY archived, id DESC", (u["id"],))
+    elif scope == "all":
+        rows = db.q("SELECT p.* FROM projects p LEFT JOIN team_members m ON m.team_id=p.team_id AND m.user_id=? "
+                    "WHERE (p.team_id IS NULL AND p.user_id=?) OR m.user_id IS NOT NULL ORDER BY p.archived, p.id DESC",
+                    (u["id"], u["id"]))
+    elif _team_scope(scope) is not None:
+        tid = _team_scope(scope)
+        access.require_team(u, tid, "lesend")
+        rows = db.q("SELECT * FROM projects WHERE team_id=? ORDER BY archived, id DESC", (tid,))
+    else:
+        raise HTTPException(400, "Unbekannter Bereich")
+    return [{**_project_public(p, u), **_library_fields(p)} for p in rows]
+
+
+def _team_scope(scope: str) -> int | None:
+    """team:<id> mit hoechstens 24 Zeichen und id < 2**63 (sonst kein gueltiger Bereich, 400 statt SQLite-Ueberlauf)."""
+    s = scope[5:] if scope.startswith("team:") and len(scope) <= 24 else ""
+    return int(s) if s.isascii() and s.isdigit() and int(s) < 2**63 else None
 
 
 class ProjectIn(BaseModel):
     name: str = Field(default="", max_length=120)
+    team_id: int | None = Field(default=None, ge=1, le=2**63 - 1)   # sonst 422 statt eines Ueberlaufs in SQLite
 
 
 @app.post("/api/projects")
 def project_new(body: ProjectIn, u: dict = Depends(auth.require_user)):
     name = body.name.strip() or f"Projekt {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-    pid = db.ex("INSERT INTO projects(user_id,name,created_at) VALUES (?,?,?)", (u["id"], name, db.now()))
-    return _project_public(db.q1("SELECT * FROM projects WHERE id=?", (pid,)), True)
+    with db.atomic():   # Rechte und Anlegen ohne Wettlauf mit einem gleichzeitigen Austritt (Lueckenfuellung 20)
+        if body.team_id is not None:
+            access.require_team(u, body.team_id, "mitglied")    # Spec Teams §4: nur Leiter/Mitglied (sonst 403/404)
+        pid = db.ex("INSERT INTO projects(user_id,team_id,name,created_at) VALUES (?,?,?,?)",
+                    (u["id"], body.team_id, name, db.now()))
+    return _project_public(db.q1("SELECT * FROM projects WHERE id=?", (pid,)), u, True)
 
 
 @app.get("/api/projects/current")
 def project_current(u: dict = Depends(auth.require_user)):
-    p = db.q1("SELECT * FROM projects WHERE user_id=? AND archived=0 ORDER BY id DESC LIMIT 1", (u["id"],))
+    """Bleibt privat (Spec Teams §4); legt bei leerem privatem Bereich ein privates Projekt an."""
+    p = db.q1("SELECT * FROM projects WHERE user_id=? AND team_id IS NULL AND archived=0 ORDER BY id DESC LIMIT 1",
+              (u["id"],))
     if not p:
         pid = db.ex("INSERT INTO projects(user_id,name,created_at) VALUES (?,?,?)",
                     (u["id"], f"Projekt {datetime.now().strftime('%d.%m.%Y')}", db.now()))
         p = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
-    return _project_public(p, True)
+    return _project_public(p, u, True)
 
 
 @app.get("/api/projects/{pid}")
 def project_get(pid: int, u: dict = Depends(auth.require_user)):
-    return _project_public(_own_project(pid, u), True)
+    return _project_public(_own_project(pid, u, "read"), u, True)
 
 
 LIGHT_COLORS = {"weiß", "weiss", "silber", "hellgrau", "beige", "natur"}
@@ -878,20 +925,89 @@ def project_patch(pid: int, body: ProjectPatch, u: dict = Depends(auth.require_u
         _refresh(p)
     if _hints(p) != before and db.q1("SELECT 1 FROM photos WHERE project_id=? AND view='bottom'", (pid,)):
         _realign_project(pid)   # rechnet die Umrisse mit den neuen Hinweisen nach (nie in db.atomic())
-    return _project_public(p, True)
-
-
-def _delete_project_files(pid: int):
-    for ph in db.q("SELECT id FROM photos WHERE project_id=?", (pid,)):
-        shutil.rmtree(_photo_dir(ph["id"]), ignore_errors=True)
+    return _project_public(p, u, True)
 
 
 @app.delete("/api/projects/{pid}")
 def project_delete(pid: int, u: dict = Depends(auth.require_user)):
-    _own_project(pid, u)
-    _delete_project_files(pid)
-    db.ex("DELETE FROM projects WHERE id=?", (pid,))
+    """Spec Teams §4: Fotos, Messungen, Teile, Werte weg; Aufträge bleiben beim Ersteller ohne Projekt, Aufträge
+    ohne Ersteller werden mitgelöscht. Das Recht wird in der Transaktion wiederholt (guard, Lückenfüllung 20)."""
+    _own_project(pid, u, "delete")
+    projects.delete_projects([pid], guard=lambda: _own_project(pid, u, "delete"))
     return {"ok": True}
+
+
+MOVE_FOREIGN = "Das Projekt enthält Aufträge anderer Mitglieder – bitte „In privat kopieren“ verwenden"
+SAME_AREA = "Das Projekt liegt bereits in diesem Bereich."
+TEAM_TO_TEAM = "Zwischen zwei Teams geht es nur über „In privat kopieren“ und „In Team kopieren“."
+
+
+class MoveIn(BaseModel):
+    team_id: int | None = Field(default=None, ge=1, le=2**63 - 1)
+
+
+def _area(team_id: int | None) -> str:
+    """Audit-Text eines Bereichs: „privat“ oder teams.team_text (Team 3 „Werkstatt“)."""
+    if team_id is None:
+        return "privat"
+    t = db.q1("SELECT id, name FROM teams WHERE id=?", (team_id,))
+    return teams.team_text(t) if t else f"Team {team_id}"
+
+
+def _check_move(pid: int, team_id: int | None, u: dict) -> dict:
+    """Recht move an der Quelle, Ziel-Bereich und Mitgliedschaft im Ziel-Team – vor der Transaktion als schnelle
+    Antwort und in der Transaktion erneut (Wettlauf mit Austritt oder Verschieben, Lückenfüllung 20)."""
+    p = _own_project(pid, u, "move")
+    if team_id == p["team_id"]:
+        raise HTTPException(400, SAME_AREA)
+    if team_id is not None and p["team_id"] is not None:
+        raise HTTPException(400, TEAM_TO_TEAM)
+    if team_id is not None:
+        access.require_team(u, team_id, "mitglied")
+    return p
+
+
+@app.post("/api/projects/{pid}/move")
+def project_move(pid: int, body: MoveIn, request: Request, u: dict = Depends(auth.require_user)):
+    """Spec Teams §4: privat ↔ Team samt Aufträgen. Nach privat gehört das Projekt dem Verschiebenden und geht nur
+    ohne Aufträge anderer (auch gelöschter) Ersteller (F-1)."""
+    _check_move(pid, body.team_id, u)
+    with db.atomic():
+        p = _check_move(pid, body.team_id, u)
+        if body.team_id is None:
+            n = db.q1("SELECT COUNT(*) n FROM jobs WHERE project_id=? AND (user_id IS NULL OR user_id<>?)",
+                      (pid, u["id"]))["n"]
+            if n:
+                raise HTTPException(409, MOVE_FOREIGN)
+            db.ex("UPDATE projects SET team_id=NULL, user_id=? WHERE id=?", (u["id"], pid))
+        else:
+            db.ex("UPDATE projects SET team_id=? WHERE id=?", (body.team_id, pid))
+        db.audit("project_move", f"Projekt {pid}: {_area(p['team_id'])} → {_area(body.team_id)}", user_id=u["id"],
+                 actor=u["username"], ip=auth.client_ip(request))
+    return _project_public(db.q1("SELECT * FROM projects WHERE id=?", (pid,)), u, True)
+
+
+class CopyIn(BaseModel):
+    team_id: int | None = Field(default=None, ge=1, le=2**63 - 1)
+    name: str = Field(default="", max_length=120)
+
+
+@app.post("/api/projects/{pid}/copy")
+def project_copy(pid: int, body: CopyIn, request: Request, u: dict = Depends(auth.require_user)):
+    """Spec Teams §4: Kopie mit allen Bestandteilen und der aktuellen gültigen Version jedes CAD-Auftrags; Recht
+    „Kopieren“ an der Quelle, Leiter/Mitglied im Ziel-Team bzw. eigener privater Bereich. Kein KI-Aufruf, kein Kontingent."""
+
+    def guard():   # vor dem Kopieren und erneut in der Transaktion (Wettlauf mit einem Austritt, Lückenfüllung 20)
+        p = _own_project(pid, u, "copy")
+        if body.team_id is not None and p["team_id"] is not None:
+            raise HTTPException(400, TEAM_TO_TEAM)
+        if body.team_id is not None:
+            access.require_team(u, body.team_id, "mitglied")
+    guard()
+    new = projcopy.copy_project(u, pid, body.team_id, body.name, guard)
+    db.audit("project_copy", f"Projekt {pid} → Projekt {new} ({_area(body.team_id)})", user_id=u["id"], actor=u["username"],
+             ip=auth.client_ip(request))
+    return _project_public(db.q1("SELECT * FROM projects WHERE id=?", (new,)), u, True)
 
 
 @app.delete("/api/projects/{pid}/model-dims/{mid}")
@@ -1131,7 +1247,7 @@ def photo_delete(phid: int, u: dict = Depends(auth.require_user)):
 
 @app.get("/api/photos/{phid}/align.jpg")
 def photo_align_jpg(phid: int, u: dict = Depends(auth.require_user)):
-    ph, p = _own_photo(phid, u)
+    ph, p = _own_photo(phid, u, "read")
     a = db.jload(ph["analysis"], {}) or {}
     tid = (a.get("bottom_align") or {}).get("top_photo_id")
     top = db.q1("SELECT * FROM photos WHERE id=?", (tid,)) if tid else parts.reference_top(p["id"])
@@ -1147,7 +1263,7 @@ def photo_align_jpg(phid: int, u: dict = Depends(auth.require_user)):
 
 @app.get("/api/photos/{phid}/{kind}.jpg")
 def photo_file(phid: int, kind: str, u: dict = Depends(auth.require_user)):
-    _own_photo(phid, u)
+    _own_photo(phid, u, "read")
     if kind not in ("orig", "overlay", "rect", "gauge", "thumb"):
         raise HTTPException(404, "Unbekannte Datei")
     p = _photo_dir(phid) / f"{kind}.jpg"
@@ -1224,7 +1340,7 @@ def photo_edges(phid: int, body: EdgesIn, request: Request, u: dict = Depends(au
 
 @app.get("/api/photos/{phid}/edges.json")
 def photo_edges_get(phid: int, u: dict = Depends(auth.require_user)):
-    _own_photo(phid, u)
+    _own_photo(phid, u, "read")
     f = _photo_dir(phid) / "edges.json"
     if not f.is_file():
         raise HTTPException(404, "Noch keine Kanten erkannt")
@@ -1297,7 +1413,7 @@ def meas_create(pid: int, body: MeasIn, u: dict = Depends(auth.require_user)):
         raise HTTPException(400, "Unbekannte Messart")
     photo = None
     if body.photo_id is not None:
-        photo, pp = _own_photo(body.photo_id, u)
+        photo, pp = _own_photo(body.photo_id, u, "read")
         if pp["id"] != pid:
             raise HTTPException(400, "Foto gehört zu einem anderen Projekt")
     pts = _points(body.points) or []
@@ -1478,7 +1594,7 @@ def _polygon(pts: list, photo: dict) -> list:
 @app.post("/api/projects/{pid}/parts")
 def part_create(pid: int, body: PartIn, u: dict = Depends(auth.require_user)):
     p = _own_project(pid, u)
-    ph, pp = _own_photo(body.photo_id, u)
+    ph, pp = _own_photo(body.photo_id, u, "read")
     if pp["id"] != pid:
         raise HTTPException(400, "Foto gehört zu einem anderen Projekt")
     poly = _polygon(body.polygon, ph)
@@ -1662,7 +1778,7 @@ def _csv(pid: int) -> str:
 
 @app.get("/api/projects/{pid}/measurements.csv")
 def meas_csv(pid: int, u: dict = Depends(auth.require_user)):
-    p = _own_project(pid, u)
+    p = _own_project(pid, u, "read")
     safe = _ascii_name(p["name"], "Projekt")
     return Response(_csv(pid), media_type="text/csv; charset=utf-8",
                     headers={"Content-Disposition": _disposition(f"{safe}_Masse.csv")})
@@ -1717,18 +1833,31 @@ def job_create(body: JobIn, u: dict = Depends(auth.require_user)):
 
 
 @app.get("/api/jobs")
-def job_list(all: int = 0, u: dict = Depends(auth.require_user)):
-    if all and u["role"] == "admin":
-        rows = db.q("SELECT j.*, u.username FROM jobs j JOIN users u ON u.id=j.user_id ORDER BY j.id DESC LIMIT 500")
-    else:
-        rows = db.q("SELECT j.*, ? AS username FROM jobs j WHERE user_id=? ORDER BY id DESC LIMIT 500",
-                    (u["username"], u["id"]))
+def job_list(all: int = 0, team: int | None = Query(None, ge=1, le=2**63 - 1), u: dict = Depends(auth.require_user)):
+    """Meine (selbst angelegt und noch lesbar: ohne Projekt, eigenes privates Projekt – beim Admin jedes private –,
+    Team mit Mitgliedschaft), team=<id> (Mitglied: Aufträge der Team-Projekte), all=1 (Admin: ohne Projekt, privat,
+    Teams mit Mitgliedschaft). Ersteller per LEFT JOIN users: leer = gelöschter Benutzer (Spec Teams §2, §5)."""
+    if team is not None:
+        access.require_team(u, team, "lesend")
+        rows = db.q("SELECT j.*, us.username FROM jobs j JOIN projects p ON p.id=j.project_id "
+                    "LEFT JOIN users us ON us.id=j.user_id WHERE p.team_id=? ORDER BY j.id DESC LIMIT 500", (team,))
+    elif all and u["role"] == "admin":
+        rows = db.q("SELECT j.*, us.username FROM jobs j LEFT JOIN users us ON us.id=j.user_id "
+                    "LEFT JOIN projects p ON p.id=j.project_id WHERE p.id IS NULL OR p.team_id IS NULL "
+                    "OR p.team_id IN (SELECT team_id FROM team_members WHERE user_id=?) ORDER BY j.id DESC LIMIT 500",
+                    (u["id"],))
+    else:   # nach einem Austritt verschwinden eigene Auftraege in Team-Projekten (Name, Status, Masse)
+        rows = db.q("SELECT j.*, ? AS username FROM jobs j LEFT JOIN projects p ON p.id=j.project_id WHERE j.user_id=? "
+                    "AND (p.id IS NULL OR (p.team_id IS NULL AND (p.user_id=? OR ?)) "
+                    "OR p.team_id IN (SELECT team_id FROM team_members WHERE user_id=?)) ORDER BY j.id DESC LIMIT 500",
+                    (u["username"], u["id"], u["id"], int(u["role"] == "admin"), u["id"]))
     return [{**jobs.job_public(r), "username": r["username"]} for r in rows]
 
 
 @app.get("/api/jobs/{jid}")
 def job_get(jid: int, u: dict = Depends(auth.require_user)):
-    return jobs.job_public(_own_job(jid, u), True)
+    j = _own_job(jid, u, "read")
+    return {**jobs.job_public(j, True), **access.job_fields(u, j)}   # my_role, team_id, team_name (Lesend-Modus)
 
 
 class IterIn(BaseModel):
@@ -1758,7 +1887,7 @@ class ParamIn(BaseModel):
 @app.post("/api/jobs/{jid}/param")
 def job_param(jid: int, body: ParamIn, u: dict = Depends(auth.require_user)):
     """Spec Stufe B §2: Messschieberwerte in die Konstanten einsetzen, neue Version ohne KI."""
-    j = _own_job(jid, u)                        # zuerst Besitz: ein fremder Auftrag ist 404, gleich welche Werte
+    j = _own_job(jid, u)   # zuerst Rechte (write): ein fremder Auftrag ist 404, gleich welche Werte
     for v in body.values:
         if not 0 < v.value <= 5000:            # faengt auch NaN und Unendlich ab
             raise HTTPException(422, f"Maß {v.id}: Der Wert muss größer als 0 und höchstens 5000 mm sein.")
@@ -1774,7 +1903,7 @@ def job_cancel(jid: int, u: dict = Depends(auth.require_user)):
 
 @app.delete("/api/jobs/{jid}")
 def job_delete(jid: int, u: dict = Depends(auth.require_user)):
-    jobs.delete(_own_job(jid, u))
+    jobs.delete(_own_job(jid, u, "delete"))   # Rechte vor jobs.delete (prueft selbst nicht)
     return {"ok": True}
 
 
@@ -1788,7 +1917,7 @@ def _file_base(j: dict) -> str:
 
 @app.get("/api/jobs/{jid}/v/{ver}/preview.png")
 def job_preview(jid: int, ver: int, u: dict = Depends(auth.require_user)):
-    _own_job(jid, u)
+    _own_job(jid, u, "read")
     v = db.q1("SELECT status FROM job_versions WHERE job_id=? AND version=?", (jid, ver))
     d = jobs.version_dir(jid, ver)
     stl = d / "model.stl"
@@ -1799,7 +1928,7 @@ def job_preview(jid: int, ver: int, u: dict = Depends(auth.require_user)):
 
 @app.get("/api/jobs/{jid}/v/{ver}/{name}")
 def job_file(jid: int, ver: int, name: str, download: int = 0, u: dict = Depends(auth.require_user)):
-    j = _own_job(jid, u)
+    j = _own_job(jid, u, "read")
     if name == "bundle.zip":
         return _bundle(j, ver)
     if name not in FILE_TYPES:

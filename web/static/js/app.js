@@ -1,6 +1,7 @@
 // Snap2CAD – Einstieg, Router, Kopfzeile, Anmeldung, Konto, Verwaltung
 import { api, h, clear, icon, LOGO, toast, fail, dialog, confirmDlg, dt, until, initials, num, debounce, strength,
-  STRENGTH_TEXT, parseNum, copyText } from "./lib.js";
+  STRENGTH_TEXT, parseNum, copyText, plural, menuLabel } from "./lib.js";
+import { groupProjects, isReadOnly, notFoundConcerns, readOnlyRedraw, readOnlyText, teamQuery } from "./rights.js";
 
 export const S = { me: null, project: null, leave: [] };
 const app = document.getElementById("app");
@@ -64,6 +65,33 @@ document.addEventListener("keydown", ev => {
 
 api.onUnauthorized = () => { S.me = null; if (!location.pathname.startsWith("/login")) go("/login", true); };
 api.onMustChange = () => { if (S.me) S.me.must_change_pw = 1; go("/passwort", true); };
+const openJobId = () => { const m = location.pathname.match(/^\/cad\/(\d+)$/); return m ? Number(m[1]) : null; };
+// Spec Teams §8: Zugriff auf das offene Projekt bzw. den offenen Auftrag verloren (z. B. aus dem Team entfernt) -> zur
+// Bibliothek, auf der Auftragsseite zu „Meine Aufträge“. Nur für den offenen Gegenstand (Pfad der Anfrage), nicht für ein
+// 404 beim Wechsel auf ein anderes Projekt. Zeigt die Meldung selbst und meldet true (dann kein zweiter Toast in fail).
+api.onNotFound = (msg, path) => {
+  if (location.pathname === "/" || (msg !== "Projekt nicht gefunden" && msg !== "Auftrag nicht gefunden")) return false;
+  const what = notFoundConcerns(path, S.project?.id ?? null, openJobId());
+  if (!what) return false;
+  if (what === "project") { S.project = null; forgetProject(); }   // das offene Projekt selbst ist weg
+  toast(msg, "err");
+  go(openJobId() != null ? "/auftraege" : "/");
+  return true;
+};
+// Rolle inzwischen Lesend (z. B. vom Leiter herabgestuft): Seite einmal neu zeichnen, damit der Lesend-Modus greift
+// (Projektseiten: Projekt neu laden; Auftragsseite: render() lädt das Auftrag-JSON mit my_role). Je Seite höchstens einmal
+// (roDone; render() setzt es zurück, außer das Neuzeichnen kommt von hier). Die Meldung zeigt der Aufrufer (fail).
+let roDone = false, roRedraw = false;
+api.onReadOnly = () => {
+  const job = openJobId() != null;
+  if (roDone || (!job && !S.project)) return;
+  roDone = true;
+  const redraw = () => { roRedraw = true; render(); };
+  if (job) { redraw(); return; }
+  const here = () => ({ path: location.pathname + location.search, projectId: S.project?.id ?? null });
+  const start = here();   // inzwischen Seite oder Projekt gewechselt: nicht die neue Seite neu zeichnen
+  reloadProject().then(p => { if (readOnlyRedraw(start, here(), p)) redraw(); }).catch(() => { roDone = false; });
+};
 
 export async function refreshMe() {
   const r = await api("/api/me");
@@ -75,6 +103,8 @@ export async function refreshMe() {
 let renderGen = 0;   // nur das juengste Rendern darf scrollen
 async function render() {
   const gen = ++renderGen;
+  if (!roRedraw) roDone = false;   // neue Seite: Lesend-Neuzeichnen wieder frei (Hook api.onReadOnly)
+  roRedraw = false;
   for (const fn of S.leave.splice(0)) { try { fn(); } catch (e) { console.error(e); } }
   const path = location.pathname;
   shownPath = path + location.search;
@@ -111,6 +141,12 @@ function statusPill() {
   return [pill, sb];
 }
 
+// Abzeichen offener Team-Einladungen am Benutzermenü (Spec Teams §7)
+function inviteBadge() {
+  const n = S.status?.team_invites || 0;
+  return n ? h("span", { class: "ibadge", "aria-hidden": "true" }, n > 9 ? "9+" : String(n)) : null;
+}
+
 function header(step) {
   const u = S.me;
   const locked = !!u.must_change_pw;
@@ -119,9 +155,9 @@ function header(step) {
       h("span", { class: "n" }, i + 1), h("span", { class: "lbl" }, lbl))));
   const menu = h("div", { class: "menu", hidden: true, role: "menu" });
   const btn = h("button", { class: "userbtn", "aria-haspopup": "menu", "aria-expanded": "false",
-    "aria-label": `Benutzermenü: ${u.username}${u.role === "admin" ? ", Administrator" : ""}` },
+    "aria-label": menuLabel(u, S.status?.team_invites || 0) },
     h("span", { class: "avatar" }, initials(u)), h("span", { class: "uname" }, u.username),
-    u.role === "admin" ? h("span", { class: "tag" }, "ADMIN") : null, icon("chevron", 14));
+    u.role === "admin" ? h("span", { class: "tag" }, "ADMIN") : null, inviteBadge(), icon("chevron", 14));
   const close = () => { menu.hidden = true; btn.setAttribute("aria-expanded", "false"); };
   btn.addEventListener("click", ev => {
     ev.stopPropagation();
@@ -133,12 +169,14 @@ function header(step) {
   document.addEventListener("click", close);
   onLeave(() => document.removeEventListener("click", close));
   function buildMenu() {
-    const us = S.status?.usage;
+    const us = S.status?.usage, inv = S.status?.team_invites || 0;
     clear(menu,
       h("div", { class: "info" }, h("strong", { style: { color: "var(--text)" } }, u.display_name || u.username),
         h("br"), us ? `CAD diesen Monat: ${us.used} / ${us.quota ?? "∞"}` : ""),
       h("div", { class: "sep" }),
       locked ? null : h("a", { href: "/auftraege", role: "menuitem" }, icon("list"), "Meine Aufträge"),
+      locked ? null : h("a", { href: "/teams", role: "menuitem" }, icon("users"), "Teams"),
+      !locked && inv ? h("a", { href: "/teams", role: "menuitem" }, icon("users"), `Team-Einladungen (${inv})`) : null,
       locked ? null : h("a", { href: "/anleitung", role: "menuitem" }, icon("help"), "Anleitung"),
       locked ? null : h("a", { href: "/konto", role: "menuitem" }, icon("key"), "Konto und Passwort"),
       !locked && u.role === "admin" ? h("a", { href: "/admin", role: "menuitem" }, icon("users"), "Benutzerverwaltung") : null,
@@ -165,7 +203,7 @@ export async function ensureProject(force = false) {
   if (S.project && !force) return S.project;
   const pid = rememberedProjectId();
   if (pid) {
-    try { S.project = await api(`/api/projects/${pid}`); return S.project; } catch { /* weiter */ }
+    try { S.project = await api(`/api/projects/${pid}`); return S.project; } catch (e) { if (e.handled) throw e; }  // offenes Projekt weg: Hook hat gemeldet und navigiert
   }
   S.project = await api("/api/projects/current");
   rememberProject();
@@ -174,9 +212,12 @@ export async function ensureProject(force = false) {
 let reloadSeq = 0;
 export async function reloadProject() {
   // nur die juengste Antwort uebernehmen: mehrere Aenderungen kurz hintereinander laden parallel neu
+  const lost = () => Object.assign(new Error("Projekt nicht gefunden"), { handled: true });   // Zugriff inzwischen verloren
+  if (!S.project) throw lost();
   const n = ++reloadSeq, id = S.project.id;
   const p = await api(`/api/projects/${id}`);
-  if (n === reloadSeq && S.project?.id === id) S.project = p;
+  if (!S.project) throw lost();   // waehrend des Ladens verloren (Hook api.onNotFound): Aufrufer zeichnen nicht weiter
+  if (n === reloadSeq && S.project.id === id) S.project = p;
   return S.project;
 }
 // zuletzt geoeffnetes Projekt je Benutzer im Browser
@@ -191,16 +232,77 @@ export function forgetProject() {
   try { localStorage.removeItem(projectKey()); } catch { /* */ }
 }
 
+// ------------------------------------------------------------------ Rolle „Lesend“ (Spec Teams §7)
+export function readOnlyNote(p) {
+  return h("div", { class: "note info ro-note", role: "status" }, icon("lock"), h("span", {}, readOnlyText(p)));
+}
+// Sperrt in root alle Knöpfe und Eingaben außer in [data-ro="ok"] (Ansicht, Zoom, Projektwahl), solange S.project die
+// Rolle Lesend hat, und zeigt den Hinweis in slot. Nachgezeichnete Elemente sperrt ein MutationObserver: nur Einträge mit
+// hinzugefügten Element-Knoten, gesperrt werden die Bedienelemente darin und das Bedienelement, in das sie eingefügt
+// wurden (z. B. ein Knopf, dessen Inhalt neu gesetzt wird). Rückgabe: nach einem Projektwechsel aufrufen.
+// Nur Komfort – der Server lehnt jede Änderung mit 403 ab.
+const RO_CTRL = "button, input, select, textarea";
+export function readOnlyMode(root, slot) {
+  let mo = null, shown;
+  const lock = x => {
+    if (!x.disabled && !x.closest('[data-ro="ok"]')) { x.disabled = true; x.dataset.roLocked = "1"; }
+  };
+  const lockAll = on => {
+    for (const x of root.querySelectorAll(RO_CTRL)) {
+      if (on) lock(x);
+      else if (x.dataset.roLocked) { x.disabled = false; delete x.dataset.roLocked; }
+    }
+  };
+  const lockAdded = records => {
+    if (!mo) return;
+    for (const r of records) {
+      const added = [...r.addedNodes].filter(n => n.nodeType === Node.ELEMENT_NODE && n.isConnected);
+      if (!added.length) continue;
+      const host = r.target.nodeType === Node.ELEMENT_NODE ? r.target.closest(RO_CTRL) : null;
+      if (host && root.contains(host)) lock(host);
+      for (const n of added) {
+        if (n.matches(RO_CTRL)) lock(n);
+        for (const x of n.querySelectorAll(RO_CTRL)) lock(x);
+      }
+    }
+  };
+  const run = () => {
+    const on = isReadOnly(S.project), key = on ? S.project.id : null;
+    if (key !== shown) { shown = key; clear(slot, on ? readOnlyNote(S.project) : null); }
+    lockAll(on);
+    if (on && !mo) {
+      mo = new MutationObserver(lockAdded);
+      mo.observe(root, { childList: true, subtree: true });
+    } else if (!on && mo) { mo.disconnect(); mo = null; }
+  };
+  onLeave(() => { mo?.disconnect(); mo = null; });
+  run();
+  return run;
+}
+
 export function projectPicker(onChange) {
   const sel = h("select", { class: "input", "aria-label": "Projekt", style: { minWidth: "220px", maxWidth: "320px" } });
+  // gruppiert nach „Privat“ und je Team (Spec Teams §7), Projekte aus scope=all
   const fill = list => {
-    clear(sel, list.map(p => h("option", { value: p.id, selected: p.id === S.project.id },
-      `${p.name}${p.archived ? " (archiviert)" : ""} · ${p.n_photos} Fotos · ${p.n_measurements} Maße`)),
-      h("option", { value: "new" }, "+ Neues Projekt …"), h("option", { value: "rename" }, "Projekt umbenennen …"));
+    if (!S.project) return;   // Zugriff auf das offene Projekt verloren: die Seite wird verlassen
+    const opt = p => h("option", { value: p.id, selected: p.id === S.project.id },
+      `${p.name}${p.archived ? " (archiviert)" : ""} · ${p.n_photos} Fotos · ${p.n_measurements} Maße`);
+    clear(sel, groupProjects(list).map(g => h("optgroup", { label: g.label }, g.items.map(opt))),
+      h("option", { value: "new" }, "+ Neues Projekt …"), h("option", { value: "rename", disabled: !S.project?.rights?.write }, "Projekt umbenennen …"));
   };
-  api("/api/projects").then(fill).catch(fail);
-  const wrap = h("label", { class: "field", style: { gap: "4px" } }, h("span", { class: "label" }, "Projekt"), sel);
-  wrap.refresh = () => api("/api/projects").then(fill).catch(() => {});
+  // nur die juengste Antwort fuellt die Liste; scheitert das Laden, zeigt die Auswahl wieder das offene Projekt
+  // (statt „Neues Projekt …“ oder eines Projekts, das nicht geoeffnet wurde)
+  let loadSeq = 0;
+  const reload = onErr => {
+    const n = ++loadSeq;
+    return api("/api/projects?scope=all")
+      .then(list => { if (n === loadSeq) fill(list); })
+      .catch(e => { if (n === loadSeq) sel.value = String(S.project?.id ?? ""); onErr(e); });
+  };
+  reload(fail);
+  // data-ro="ok": bleibt in der Rolle Lesend bedienbar (Projekt wechseln)
+  const wrap = h("label", { class: "field", style: { gap: "4px" }, "data-ro": "ok" }, h("span", { class: "label" }, "Projekt"), sel);
+  wrap.refresh = () => reload(() => {});
   sel.addEventListener("change", async () => {
     const v = sel.value;
     try {
@@ -220,7 +322,7 @@ export function projectPicker(onChange) {
       }
       onChange();
     } catch (e) { fail(e); }
-    fill(await api("/api/projects"));
+    reload(fail);
   });
   return wrap;
 }
@@ -543,20 +645,41 @@ export function jobBadge(st) { const [t, k] = JOB_STATUS[st] || [st, "off"]; ret
 
 route(/^\/auftraege$/, async main => {
   const isAdmin = S.me.role === "admin";
-  let all = new URLSearchParams(location.search).get("alle") === "1" && isAdmin;
+  const qs = new URLSearchParams(location.search);
+  const team = teamQuery(location.search);   // Spec Teams §7: Filter „Meine · <Team A> · …“
+  const all = !team && qs.get("alle") === "1" && isAdmin;
+  const jobsUrl = `/api/jobs${team ? `?team=${team}` : all ? "?all=1" : ""}`;
+  const settle = pr => pr.then(list => ({ list }), err => ({ err }));
+  // Teams und erste Auftragsliste parallel laden; die Antwort auf die Aufträge wertet load() aus (404 wie bisher)
+  const [tl, first] = await Promise.all([api("/api/teams").catch(() => ({ teams: [] })), settle(api(jobsUrl))]);
+  const tName = tl.teams.find(t => t.id === team)?.name || "";
   const box = h("div", { class: "card", style: { padding: "0", gap: "0" } });
-  main.append(h("div", { class: "head" }, h("div", { class: "t" }, h("h1", {}, all ? "Alle Aufträge" : "Meine Aufträge"),
+  const filter = tl.teams.length ? h("div", { class: "chips", role: "group", "aria-label": "Aufträge filtern" },
+    h("a", { class: "chip", href: "/auftraege", "aria-current": !team && !all ? "page" : null }, "Meine"),
+    tl.teams.map(t => h("a", { class: "chip", href: `/auftraege?team=${t.id}`, "aria-current": team === t.id ? "page" : null }, t.name))) : null;
+  const title = team ? (tName ? `Aufträge im Team ${tName}` : "Team-Aufträge") : all ? "Alle Aufträge" : "Meine Aufträge";
+  main.append(h("div", { class: "head" }, h("div", { class: "t" }, h("h1", {}, title),
     h("p", { class: "lead" }, "CAD-Aufträge laufen auf dem Server weiter, auch wenn du die Seite verlässt.")),
-  h("div", { class: "chips" }, isAdmin ? h("label", { class: "check" }, h("input", { type: "checkbox", checked: all, onchange: e => go(e.target.checked ? "/auftraege?alle=1" : "/auftraege") }), "Aufträge aller Benutzer") : null,
-    h("a", { class: "btn primary", href: "/cad" }, icon("plus"), "Neuer Auftrag"))), box);
-  const load = async () => {
-    const list = await api(`/api/jobs${all ? "?all=1" : ""}`);
-    if (!list.length) { clear(box, h("div", { class: "empty" }, icon("cube", 32), "Noch keine Aufträge.", h("a", { class: "btn", href: "/cad" }, "Ersten Auftrag anlegen"))); return list; }
+  h("div", { class: "chips" }, isAdmin && !team ? h("label", { class: "check" }, h("input", { type: "checkbox", checked: all, onchange: e => go(e.target.checked ? "/auftraege?alle=1" : "/auftraege") }), "Aufträge aller Benutzer") : null,
+    h("a", { class: "btn primary", href: "/cad" }, icon("plus"), "Neuer Auftrag"))), filter, box);
+  const showUser = all || !!team;
+  const load = async (pre = null) => {
+    let list;
+    try {
+      const r = pre ?? await settle(api(jobsUrl));
+      if (r.err) throw r.err;
+      list = r.list;
+    } catch (e) {
+      if (e.status !== 404) throw e;
+      clear(box, h("div", { class: "empty" }, "Dieses Team gibt es nicht mehr, oder du bist kein Mitglied.", h("a", { class: "btn", href: "/auftraege" }, "Meine Aufträge")));
+      return [];
+    }
+    if (!list.length) { clear(box, h("div", { class: "empty" }, icon("cube", 32), team ? "Im Team gibt es noch keine Aufträge." : "Noch keine Aufträge.", h("a", { class: "btn", href: "/cad" }, "Ersten Auftrag anlegen"))); return list; }
     clear(box, h("div", { class: "tablewrap" }, h("table", { class: "t" },
-      h("thead", {}, h("tr", {}, h("th", {}, "Auftrag"), all ? h("th", {}, "Benutzer") : null, h("th", {}, "Status"), h("th", {}, "Versionen"), h("th", {}, "Abmessungen"), h("th", {}, "Aktualisiert"), h("th", {}, h("span", { class: "sr" }, "Aktionen")))),
+      h("thead", {}, h("tr", {}, h("th", {}, "Auftrag"), showUser ? h("th", {}, team ? "Ersteller" : "Benutzer") : null, h("th", {}, "Status"), h("th", {}, "Versionen"), h("th", {}, "Abmessungen"), h("th", {}, "Aktualisiert"), h("th", {}, h("span", { class: "sr" }, "Aktionen")))),
       h("tbody", {}, list.map(j => h("tr", {},
         h("td", {}, h("a", { href: `/cad/${j.id}`, style: { fontWeight: 600 } }, j.name), h("div", { class: "xs muted" }, `#${j.id} · ${({ fdm: "FDM", sla: "SLA", cnc: "CNC" })[j.request?.process] || ""}`)),
-        all ? h("td", {}, j.username) : null,
+        showUser ? h("td", {}, j.username || "gelöschter Benutzer") : null,
         h("td", {}, jobBadge(j.status)),
         h("td", { class: "num" }, j.n_versions),
         h("td", { class: "num" }, j.bbox ? `${num(j.bbox[0], 1)} × ${num(j.bbox[1], 1)} × ${num(j.bbox[2], 1)}` : "–"),
@@ -567,7 +690,8 @@ route(/^\/auftraege$/, async main => {
         } }, icon("trash", 16)))))))));
     return list;
   };
-  const list = await load();
+  const list = await load(first);
+  if (!main.isConnected) return;   // währenddessen weitergeklickt: keinen Takt für eine abgehängte Seite starten
   if (list.some(j => j.status === "running" || j.status === "queued")) {
     const t = setInterval(() => load().then(l => { if (!l.some(j => j.status === "running" || j.status === "queued")) clearInterval(t); }).catch(() => {}), 3000);
     onLeave(() => clearInterval(t));
@@ -583,9 +707,16 @@ const ACTIONS = {
   admin_created: "Admin angelegt", cad_create: "CAD-Auftrag", suggest: "Maßvorschläge",
   setup: "Ersteinrichtung", setup_denied: "Einrichtung abgelehnt", settings_changed: "Einstellungen geändert",
   confirm_failed: "Passwortbestätigung falsch",
+  team_created: "Team gegründet", team_renamed: "Team umbenannt", team_invite: "Team-Einladung",
+  team_invite_failed: "Team-Einladung abgewiesen", team_invite_revoked: "Team-Einladung zurückgezogen",
+  team_invite_accepted: "Team-Einladung angenommen", team_invite_declined: "Team-Einladung abgelehnt",
+  team_role: "Team-Rolle geändert", team_member_removed: "Team-Mitglied entfernt",
+  team_member_added_admin: "Team-Mitglied aufgenommen (Administrator)", team_left: "Team verlassen",
+  team_deleted: "Team gelöscht", team_leader_auto: "Team-Leiter nachgerückt", project_move: "Projekt verschoben",
+  project_copy: "Projekt kopiert",
 };
 
-route(/^\/admin(?:\/(einladungen|protokoll|einstellungen))?$/, async (main, tab = "benutzer") => {
+route(/^\/admin(?:\/(einladungen|protokoll|einstellungen|teams))?$/, async (main, tab = "benutzer") => {
   const [users, invites, status] = await Promise.all([api("/api/admin/users"), api("/api/admin/invites"), api("/api/admin/status")]);
   const open = invites.filter(i => i.state === "offen");
   const openBox = h("div", { style: { display: "flex", flexDirection: "column", gap: "4px" } });
@@ -595,11 +726,12 @@ route(/^\/admin(?:\/(einladungen|protokoll|einstellungen))?$/, async (main, tab 
   h("div", { class: "pill" }, h("span", { class: `dot ${status.sandbox ? "" : "err"}` }), `Sandbox ${status.sandbox ? "läuft" : "offline"} · `,
     h("span", { class: "mono" }, `${num(status.tokens_month.input / 1000, 0)}k / ${num(status.tokens_month.output / 1000, 0)}k Token (${month})`))));
   const tabs = h("div", { class: "tabs", role: "tablist", "aria-label": "Bereiche" },
-    [["benutzer", "Benutzer", users.length], ["einladungen", "Einladungen", open.length], ["protokoll", "Protokoll", null], ["einstellungen", "Einstellungen", null]].map(([k, t, c]) =>
+    [["benutzer", "Benutzer", users.length], ["einladungen", "Einladungen", open.length], ["teams", "Teams", null], ["protokoll", "Protokoll", null], ["einstellungen", "Einstellungen", null]].map(([k, t, c]) =>
       h("button", { role: "tab", "data-tab": k, "aria-selected": String(tab === k), onclick: () => go(k === "benutzer" ? "/admin" : `/admin/${k}`, true) }, t, c != null ? h("span", { class: "cnt" }, c) : null)));
   main.append(tabs);
   if (tab === "protokoll") return auditTab(main);
   if (tab === "einstellungen") return settingsTab(main);
+  if (tab === "teams") return (await import("./teams.js")).adminTab(main);
   const left = h("section", { class: "card", style: { padding: "0", gap: "0" }, "aria-label": tab === "benutzer" ? "Benutzerliste" : "Einladungen" });
   main.append(h("div", { class: "admin-layout" }, left, inviteAside(open)));
   if (tab === "einladungen") {
@@ -657,7 +789,7 @@ route(/^\/admin(?:\/(einladungen|protokoll|einstellungen))?$/, async (main, tab 
       }),
       me ? null : h("div", { class: "sep" }),
       me ? null : act("Löschen …", async () => {
-        if (!await confirmDlg(`${u.username} löschen?`, "Das Konto wird mit allen Projekten, Fotos und CAD-Aufträgen endgültig gelöscht.", "Endgültig löschen", true)) return;
+        if (!await confirmDlg(`${u.username} löschen?`, `Das Konto wird mit allen privaten Projekten, Fotos und CAD-Aufträgen endgültig gelöscht.${u.team_projects ? ` ${plural(u.team_projects, "Team-Projekt bleibt", "Team-Projekte bleiben")} im Team, ohne Ersteller.` : ""}`, "Endgültig löschen", true)) return;
         await api(`/api/admin/users/${u.id}`, { method: "DELETE" }); go("/admin", true);
       }, "danger"));
     return h("tr", {},
@@ -817,6 +949,7 @@ async function showLink(title, link, text) {
 // ------------------------------------------------------------------ Arbeitsschritte (Module)
 route(/^\/$/, async main => (await import("./library.js")).default(main), { step: 1 });
 route(/^\/anleitung$/, async main => (await import("./guide.js")).default(main));
+route(/^\/teams$/, async main => (await import("./teams.js")).default(main));
 route(/^\/fotos$/, async main => (await import("./photos.js")).default(main), { step: 2 });
 route(/^\/messen$/, async (main) => (await import("./measure.js")).default(main), { step: 3, bare: false });
 route(/^\/cad$/, async main => (await import("./cad.js")).form(main), { step: 4 });
@@ -832,5 +965,12 @@ route(/.*/, async main => {
   setInterval(() => { if (S.me) refreshMe().then(() => {
     const top = document.querySelector(".top-right");
     if (top && S.status) { const pills = top.querySelectorAll(".pill"); pills.forEach(p => p.remove()); top.prepend(...statusPill().filter(Boolean)); }
+    const ub = document.querySelector(".userbtn");   // Abzeichen offener Team-Einladungen nachführen
+    if (ub) {
+      ub.querySelector(".ibadge")?.remove();
+      const b = inviteBadge();
+      if (b) ub.insertBefore(b, ub.lastElementChild);
+      ub.setAttribute("aria-label", menuLabel(S.me, S.status?.team_invites || 0));
+    }
   }).catch(() => {}); }, 60000);
 })();

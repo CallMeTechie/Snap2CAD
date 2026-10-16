@@ -1,6 +1,7 @@
 // Schritt 3: Messen auf der entzerrten Draufsicht bzw. Hoehenlehre
 import { api, h, clear, icon, num, parseNum, toast, fail, dialog, confirmDlg, drawTag, fmtValue } from "./lib.js";
-import { S, ensureProject, reloadProject, projectPicker, onLeave } from "./app.js";
+import { S, ensureProject, reloadProject, projectPicker, onLeave, readOnlyMode } from "./app.js";
+import { isReadOnly } from "./rights.js";
 import { VIEW_LABEL } from "./photos.js";
 import { createPartsLayer, partsPanel, partColor } from "./edges.js";
 import { groupText, r3, segDist } from "./geom.js";
@@ -52,11 +53,11 @@ export default async function (main) {
   const saveOpts = () => { try { localStorage.setItem("mu.measure", JSON.stringify({ snap: snapOn, loupe: loupeOn })); } catch { /* */ } };
 
   // ---------------------------------------------------------------- DOM
-  const photoSel = h("select", { "aria-label": "Foto" });
-  const toolBtns = Object.fromEntries(TOOLS.map(([k, t, key, ic]) => [k, h("button", { class: "iconbtn", "aria-label": `${t} (${key})`, title: `${t} (${key})`,
+  const photoSel = h("select", { "aria-label": "Foto", "data-ro": "ok" });
+  const toolBtns = Object.fromEntries(TOOLS.map(([k, t, key, ic]) => [k, h("button", { class: "iconbtn", "data-ro": k === "pan" ? "ok" : null, "aria-label": `${t} (${key})`, title: `${t} (${key})`,
     "aria-pressed": String(tool === k), onclick: () => setTool(k) }, icon(ic, 20))]));
-  const snapCb = h("input", { type: "checkbox", checked: snapOn, onchange: e => { snapOn = e.target.checked; saveOpts(); upStatus(); } });
-  const loupeCb = h("input", { type: "checkbox", checked: loupeOn, onchange: e => { loupeOn = e.target.checked; saveOpts(); } });
+  const snapCb = h("input", { type: "checkbox", checked: snapOn, "data-ro": "ok", onchange: e => { snapOn = e.target.checked; saveOpts(); upStatus(); } });
+  const loupeCb = h("input", { type: "checkbox", checked: loupeOn, "data-ro": "ok", onchange: e => { loupeOn = e.target.checked; saveOpts(); } });
   const zoomTxt = h("span", { class: "mono small", style: { minWidth: "52px", textAlign: "center" } }, "100 %");
   const canvas = h("canvas", { role: "img", "aria-label": "Entzerrte Ansicht mit Messungen" });
   const hint = h("div", { class: "hintbar" });
@@ -78,7 +79,8 @@ export default async function (main) {
   const partsBox = h("div");
   let edgeDrag = false, rDrag = false;  // Eckpunkt ziehen (links) bzw. Rechtsklick-Ziehen der Teile-Ebene
 
-  const picker = projectPicker(() => { selId = null; init(); });
+  const roSlot = h("div");   // Hinweis „Nur ansehen“ (Rolle Lesend)
+  const picker = projectPicker(() => { selId = null; init().catch(fail); roRefresh(); });
   let pickerT = 0;
   const refreshPicker = () => { if (!main.isConnected) return; clearTimeout(pickerT); pickerT = setTimeout(() => picker.refresh(), 800); };
   clear(main,
@@ -89,14 +91,14 @@ export default async function (main) {
         edgeBtn, staleEl,
         h("label", { class: "check small" }, snapCb, "Kantenfang"),
         h("label", { class: "check small" }, loupeCb, "Lupe"),
-        h("div", { class: "grp" },
+        h("div", { class: "grp", "data-ro": "ok" },
           h("button", { class: "iconbtn", "aria-label": "Verkleinern", onclick: () => zoomAt(1 / 1.25) }, icon("minus")), zoomTxt,
           h("button", { class: "iconbtn", "aria-label": "Vergrößern", onclick: () => zoomAt(1.25) }, icon("plus")),
           h("button", { class: "btn sm", onclick: fit }, "Einpassen"))),
       stage, status),
     h("aside", { class: "mside", "aria-labelledby": "m-h" },
       h("div", { class: "scroll" },
-        h("div", { style: { display: "flex", flexDirection: "column", gap: "10px" } }, picker),
+        h("div", { style: { display: "flex", flexDirection: "column", gap: "10px" } }, picker, roSlot),
         partsBox,
         h("div", { class: "card-head" }, h("h2", { id: "m-h" }, "Messungen ", countEl),
           h("div", { class: "chips" }, h("button", { class: "btn sm", onclick: manual }, icon("plus", 16), "Manuell"), suggBtn)),
@@ -107,6 +109,7 @@ export default async function (main) {
         h("a", { class: "btn", href: `/api/projects/${S.project.id}/measurements.csv`, download: "", id: "csv" }, icon("download", 16), "CSV exportieren"),
         h("a", { class: "btn primary", href: "/cad", style: { marginLeft: "auto" } }, "An CAD übergeben", icon("right")))));
   const ctx = canvas.getContext("2d");
+  const roRefresh = readOnlyMode(main, roSlot);   // Rolle Lesend (Spec Teams §7)
   const layer = createPartsLayer({
     ctx: () => ctx, scr: (ix, iy) => scr(ix, iy), toPX: (X, Y) => src.toPX(X, Y), cursorMM: () => cursor?.mm || null,
     photoId: () => (src && planar(src.view) ? src.photo.id : null), active: () => tool === "edges",
@@ -326,6 +329,7 @@ export default async function (main) {
     angle: "Winkel: Punkt auf Schenkel 1, Scheitel, Punkt auf Schenkel 2" + EDIT,
   };
   function setTool(k) {
+    if (isReadOnly(S.project) && k !== "pan") k = "pan";   // Lesend: nur ansehen und Bild ziehen
     if (k !== "edges") layer.cancel();
     tool = k; pts = []; hint.hidden = false;
     for (const [t, b] of Object.entries(toolBtns)) b.setAttribute("aria-pressed", String(t === k));
@@ -374,8 +378,8 @@ export default async function (main) {
       dragStart = null; return;
     }
     // Eckpunkte der Teile in jedem Werkzeug ziehbar (Vorrang vor dem Werkzeug), Rechtsklick fuegt Punkte und Linien ein
-    if (img && e.button === 0) { updateCursor(e); if (layer.downVertexAny(...evPos(e))) { edgeDrag = true; return; } }
-    if (img && e.button === 2) { updateCursor(e, true); if (layer.downRight(...evPos(e))) { rDrag = true; return; } }
+    if (img && e.button === 0 && !isReadOnly(S.project)) { updateCursor(e); if (layer.downVertexAny(...evPos(e))) { edgeDrag = true; return; } }
+    if (img && e.button === 2 && !isReadOnly(S.project)) { updateCursor(e, true); if (layer.downRight(...evPos(e))) { rDrag = true; return; } }
     if (tool === "edges" && e.button === 0) { updateCursor(e); if (layer.down(...evPos(e))) { edgeDrag = true; return; } }
     dragStart = { x: e.clientX, y: e.clientY, tx, ty, moved: false, btn: e.button };
     if (tool === "pan" || e.button !== 0) stage.style.cursor = "grabbing";
@@ -439,6 +443,7 @@ export default async function (main) {
   }
   async function click(e) {
     if (!img || !cursor) return;
+    if (isReadOnly(S.project) && tool !== "pan") return;   // Lesend: nur auswählen (Werkzeug-Wechsel noch nicht erfolgt)
     if (tool === "edges") { layer.click(...evPos(e)); return; }
     if (tool === "pan") { const m = hit(...evPos(e)); select(m ? m.id : null); return; }
     pts.push(cursor.mm);
@@ -471,7 +476,7 @@ export default async function (main) {
     else if (k === "+" || k === "=") zoomAt(1.25);
     else if (k === "-") zoomAt(0.8);
     else if (k === "0") fit();
-    else if ((k === "delete" || k === "backspace") && selId) { const m = S.project.measurements.find(x => x.id === selId); if (m) del(m); }
+    else if ((k === "delete" || k === "backspace") && selId && !isReadOnly(S.project)) { const m = S.project.measurements.find(x => x.id === selId); if (m) del(m); }
   };
   document.addEventListener("keydown", onKey);
   const ro = new ResizeObserver(() => { const first = canvas.width <= 1; resize(); if (first) fit(); draw(); dirty = false; });  // sonst ein leerer Frame

@@ -24,9 +24,17 @@ export async function api(path, { method = "GET", body, form, signal } = {}) {
     const err = new ApiError(r.status, detailText(data && data.detail !== undefined ? data.detail : data));
     if (r.status === 401 && !path.startsWith("/api/auth/") && api.onUnauthorized) api.onUnauthorized();
     if (r.status === 403 && err.message.startsWith("Passwort muss") && api.onMustChange) api.onMustChange();
+    accessHooks(r.status, err, path);
     throw err;
   }
   return data;
+}
+
+// Spec Teams §8 / §7: 404 (Zugriff verloren) und 403 „Nur lesender Zugriff“ (Rolle inzwischen Lesend) meldet api()
+// und upload() an die Hooks von app.js. Liefert onNotFound true, hat es die Meldung selbst gezeigt (err.handled).
+function accessHooks(status, err, path) {
+  if (status === 404 && api.onNotFound && api.onNotFound(err.message, path)) err.handled = true;
+  if (status === 403 && err.message === "Nur lesender Zugriff" && api.onReadOnly) api.onReadOnly();
 }
 
 export function upload(path, form, onProgress) {
@@ -38,7 +46,11 @@ export function upload(path, form, onProgress) {
     x.onload = () => {
       let d = null; try { d = JSON.parse(x.responseText); } catch { /* */ }
       if (x.status >= 200 && x.status < 300) resolve(d);
-      else reject(new ApiError(x.status, detailText(d && d.detail !== undefined ? d.detail : x.statusText)));
+      else {
+        const err = new ApiError(x.status, detailText(d && d.detail !== undefined ? d.detail : x.statusText));
+        accessHooks(x.status, err, path);
+        reject(err);
+      }
     };
     x.onerror = () => reject(new ApiError(0, "Upload fehlgeschlagen"));
     x.send(form);
@@ -140,6 +152,11 @@ export function parseNum(s) {
   const v = Number(t);
   return Number.isFinite(v) ? v : NaN;
 }
+// „1 Foto“ / „3 Fotos“ – eine Stelle für Bibliothek, Teams und Verwaltung
+export const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+// Beschriftung des Benutzermenü-Knopfes (Kopfzeile); mit offenen Team-Einladungen
+export const menuLabel = (u, invites = 0) => `Benutzermenü: ${u.username}${u.role === "admin" ? ", Administrator" : ""}${
+  invites ? `, ${plural(invites, "Team-Einladung", "Team-Einladungen")}` : ""}`;
 export function dt(iso, withTime = true) {
   if (!iso) return "–";
   const d = new Date(iso), now = new Date();
@@ -193,6 +210,7 @@ export function toast(msg, kind = "") {
 }
 export function fail(e) {
   if (e && e.name === "AbortError") return;
+  if (e?.handled) return;   // der Hook (api.onNotFound) hat die Meldung schon gezeigt
   console.error(e);
   toast(e?.message || String(e), "err");
 }

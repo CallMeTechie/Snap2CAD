@@ -15,7 +15,7 @@ from pathlib import Path
 import cv2
 from fastapi import HTTPException
 
-from . import ai, auth, config, db, sandbox, settings
+from . import access, ai, auth, config, db, sandbox, settings
 from .parts import cad_text, reference_top, to_top
 
 _pool = ThreadPoolExecutor(max_workers=max(1, config.MAX_CONCURRENT_JOBS), thread_name_prefix="job")
@@ -494,16 +494,22 @@ def create(user: dict, project: dict | None, name: str, request_text: str, optio
     _check_ready()
     _check_quota(user)
     with _lock:
-        running = db.q1("SELECT COUNT(*) n FROM jobs WHERE user_id=? AND status IN ('queued','running')", (user["id"],))
+        # laufende Auftraege zaehlen beim Ausloeser (jobs.run_by), nicht beim Ersteller (Spec Teams §6)
+        running = db.q1("SELECT COUNT(*) n FROM jobs WHERE run_by=? AND status IN ('queued','running')", (user["id"],))
         if running["n"] >= 3:
             raise HTTPException(429, "Es laufen bereits drei Aufträge. Bitte warten.")
         options = {**options, "name": name}
         msgs = build_initial_message(project, request_text, options) if project else \
             [{"role": "user", "content": [{"type": "text", "text": request_text}]}]
-        jid = db.ex("""INSERT INTO jobs(user_id,project_id,name,request,status,messages,created_at,updated_at)
-                       VALUES (?,?,?,?, 'queued', ?, ?, ?)""",
-                    (user["id"], project["id"] if project else None, name[:120], db.jdump(options | {"text": request_text}),
-                     db.jdump(msgs), db.now(), db.now()))
+        # Recht und INSERT in einer Transaktion (Sperrreihenfolge _lock -> db._lock): ein gleichzeitiges Verschieben
+        # nach privat oder ein Austritt nach der ersten Pruefung in job_create laesst keinen fremden Auftrag zurueck (F-1)
+        with db.atomic():
+            if project:
+                access.require_project(user, project["id"], "write")
+            jid = db.ex("""INSERT INTO jobs(user_id,project_id,name,request,status,messages,created_at,updated_at,run_by)
+                           VALUES (?,?,?,?, 'queued', ?, ?, ?, ?)""",
+                        (user["id"], project["id"] if project else None, name[:120],
+                         db.jdump(options | {"text": request_text}), db.jdump(msgs), db.now(), db.now(), user["id"]))
     log(jid, "Auftrag angelegt")
     db.audit("cad_create", f"Auftrag {jid} „{name[:60]}“", user_id=user["id"], actor=user["username"])
     _submit(jid, "create", request_text)
@@ -532,7 +538,8 @@ def _iterate_locked(user: dict, job: dict, text: str):
                  f"Änderungswunsch zu Version {base}:\n{text.strip()}\n\n" + (f"{sec}\n\n" if sec else "") +
                  "Ausgangspunkt ist dieser Code:\n```python\n" + (cur["code"] if cur else "") + "```\n"
                  "Antworte wieder im gleichen Format (JSON-Block + vollständiger Python-Block)."}]})
-    _set(job["id"], messages=db.jdump(msgs), status="queued", error=None)
+    # Ausloeser zusammen mit status=queued unter _lock (Spec Teams §6); _new_version uebernimmt ihn in die Versionen
+    _set(job["id"], messages=db.jdump(msgs), status="queued", error=None, run_by=user["id"])
     log(job["id"], f"Änderungswunsch: {text.strip()[:200]}")
     _submit(job["id"], "iterate", text)
 
@@ -551,13 +558,14 @@ def set_const(code: str, var: str, value: float) -> tuple[str, int]:
 
 
 def _param_limits(user: dict):
-    """Unter _lock: hoechstens ein laufender Neuaufbau je Nutzer und PARAM_PER_HOUR je Stunde (Pool ist geteilt)."""
-    busy = db.q1("SELECT COUNT(*) n FROM job_versions v JOIN jobs j ON j.id=v.job_id WHERE j.user_id=? "
+    """Unter _lock: hoechstens ein laufender Neuaufbau je Ausloeser und PARAM_PER_HOUR je Stunde (Pool ist geteilt).
+    Versionen ohne Ausloeser (geloeschter Benutzer, direkt angelegte Altzeilen) zaehlen beim Ersteller."""
+    busy = db.q1("SELECT COUNT(*) n FROM job_versions v JOIN jobs j ON j.id=v.job_id WHERE COALESCE(v.user_id, j.user_id)=? "
                  "AND v.trigger='param' AND v.status='running' AND j.status IN ('queued','running')", (user["id"],))
     if busy["n"]:
         raise HTTPException(429, "Es läuft bereits ein Neuaufbau. Bitte warten.")
     since = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
-    hour = db.q1("SELECT COUNT(*) n FROM job_versions v JOIN jobs j ON j.id=v.job_id WHERE j.user_id=? "
+    hour = db.q1("SELECT COUNT(*) n FROM job_versions v JOIN jobs j ON j.id=v.job_id WHERE COALESCE(v.user_id, j.user_id)=? "
                  "AND v.trigger='param' AND v.created_at>=?", (user["id"], since))
     if hour["n"] >= config.PARAM_PER_HOUR:
         raise HTTPException(429, f"Höchstens {config.PARAM_PER_HOUR} Neuaufbauten je Stunde – "
@@ -566,7 +574,8 @@ def _param_limits(user: dict):
 
 def param(user: dict, job: dict, values: list[dict], base: int | None = None) -> dict:
     """Konstanten der aktuellen Version ersetzen und ohne KI neu bauen. Pruefen, Lernen, Version anlegen und
-    status=queued in einem Block unter _lock; die Sandbox laeuft danach im Pool (Abbrechen wie bisher)."""
+    status=queued in einem Block unter _lock; die Sandbox laeuft danach im Pool (Abbrechen wie bisher).
+    Der Ausloeser (run_by) steht vor der Versionsanlage, damit _new_version ihn uebernimmt (Spec Teams §6)."""
     if auth.quota_of(user) == 0:
         raise HTTPException(403, "CAD ist für dieses Konto gesperrt.")
     _check_sandbox()
@@ -603,7 +612,8 @@ def param(user: dict, job: dict, values: list[dict], base: int | None = None) ->
             learn_dims(job["project_id"], job["id"],
                        [{**dims[k], "label": f"{dims[k].get('label')} ({k})"} if cnt[_norm_of(dims[k])] > 1 else dims[k]
                         for k in changed])
-        version = _new_version(job["id"], "param", req, "", {})
+        _set(job["id"], run_by=user["id"])
+        version = _new_version(job["id"], "param", req, "", {}, by=user["id"])
         db.ex("UPDATE job_versions SET code=?, meta=? WHERE job_id=? AND version=?",
               (code, db.jdump(meta), job["id"], version))
         _set(job["id"], status="queued", error=None)
@@ -762,12 +772,16 @@ def _run_safe(job_id, trigger, request_text, ev):
                 _cancel.pop(job_id, None)
 
 
-def _new_version(job_id: int, trigger: str, request_text: str, text: str, usage: dict) -> int:
-    """Versionsnummer vergeben und Zeile sofort anlegen (unter Sperre, ohne Doppelvergabe)."""
+def _new_version(job_id: int, trigger: str, request_text: str, text: str, usage: dict, by: int | None = None) -> int:
+    """Versionsnummer vergeben und Zeile sofort anlegen (unter Sperre, ohne Doppelvergabe). Ausloeser = by (vom Lauf
+    beim Start gemerkt, auch fuer Autofix-Versionen desselben Laufs), ohne by jobs.run_by (Spec Teams §6). Ein inzwischen
+    geloeschter Ausloeser wird NULL (zaehlt bei niemandem) statt den Lauf am Fremdschluessel scheitern zu lassen."""
     with _lock:
         v = db.q1("SELECT COALESCE(MAX(version),0)+1 v FROM job_versions WHERE job_id=?", (job_id,))["v"]
-        db.ex("""INSERT INTO job_versions(job_id,version,trigger,request_text,claude_text,status,usage,created_at)
-                 VALUES (?,?,?,?,?, 'running', ?, ?)""", (job_id, v, trigger, request_text, text, db.jdump(usage), db.now()))
+        db.ex("""INSERT INTO job_versions(job_id,version,trigger,request_text,claude_text,status,usage,created_at,user_id)
+                 VALUES (?,?,?,?,?, 'running', ?, ?,
+                         (SELECT id FROM users WHERE id=COALESCE(?, (SELECT run_by FROM jobs WHERE id=?))))""",
+              (job_id, v, trigger, request_text, text, db.jdump(usage), db.now(), by, job_id))
     return v
 
 
@@ -780,6 +794,7 @@ def _run(job_id: int, trigger: str, request_text: str, ev: threading.Event):
         if not job or job["status"] == "cancelled" or ev.is_set():
             return
         _set(job_id, status="running")
+        by = job["run_by"]   # Ausloeser dieses Laufs, auch fuer seine Autofix-Versionen (Spec Teams §6)
     msgs = db.jload(job["messages"], [])
     fixes = 0
     while True:
@@ -794,7 +809,7 @@ def _run(job_id: int, trigger: str, request_text: str, ev: threading.Event):
         _set(job_id, messages=db.jdump(msgs))
         if ev.is_set():
             raise ai.Cancelled()
-        version = _new_version(job_id, trigger, request_text, text, usage)
+        version = _new_version(job_id, trigger, request_text, text, usage, by=by)
         vdir = version_dir(job_id, version)
         vdir.mkdir(parents=True, exist_ok=True)
         (vdir / "claude.txt").write_text(text, encoding="utf-8")

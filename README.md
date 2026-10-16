@@ -35,6 +35,8 @@ In der Web-App gibt es dazu drei Ergänzungen. Beim Hochladen lässt sich die Fo
 
 Im 3D-Viewer eines Auftrags stehen die Maße des Modells als Bemaßungslinien, gruppenweise ein- und ausschaltbar (Außenmaße, Bohrungen, Tiefen, Fasen, Platten, Sonstige, Annahmen). Ein Klick auf ein Maß nimmt einen Messschieberwert an: Das Modell wird sofort ohne KI neu gebaut, der Wert gilt als „Messschieber am Modell“ für das ganze Projekt, und „Schlüsse ziehen“ lässt die KI die abhängigen Maße daraus ableiten. Die Liste der gemerkten Werte steht auf der Messseite und lässt sich dort löschen.
 
+Jedes Konto hat eine private Projektbibliothek; Teams teilen zusätzlich eine gemeinsame. Wer ein Team gründet, wird Leiter und lädt andere über ihren Benutzernamen ein (Rollen Leiter, Mitglied, Lesend; die Eingeladenen nehmen unter „Teams“ an). Projekte kommen durch Anlegen im Team, Verschieben oder Kopieren hinein; eine Kopie nimmt Fotos, Maße, Teile, gemerkte Werte und von jedem CAD-Auftrag die aktuelle gültige Version mit. CAD-Läufe zählen beim Benutzer, der sie auslöst. Der Administrator verwaltet Teams im Reiter „Teams“ der Benutzerverwaltung, sieht deren Inhalte aber nur als Mitglied.
+
 ## Schnellstart
 
 1. **Drucken** mit *100 % / Tatsächliche Größe*. Nicht „An Seite anpassen“.

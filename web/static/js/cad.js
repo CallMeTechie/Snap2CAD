@@ -1,6 +1,7 @@
 // Schritt 4: CAD-Modell – Auftrag, Fortschritt, Ergebnis
 import { api, h, clear, icon, num, bytes, toast, fail, mmss, dt, confirmDlg, copyText, fmtValue } from "./lib.js";
-import { S, ensureProject, reloadProject, go, onLeave, refreshMe, jobBadge } from "./app.js";
+import { S, ensureProject, reloadProject, go, onLeave, refreshMe, jobBadge, readOnlyNote } from "./app.js";
+import { isReadOnly, readOnlyText } from "./rights.js";
 import { VIEW_LABEL } from "./photos.js";
 import { DEFAULT_SEL, DIM_GROUP_KEYS, DIM_GROUP_LABEL, conclusionText, de, dimSel, dimState, groupText, hasAnchors, paramBanner, parseDimInput,
   r3 } from "./geom.js";
@@ -17,7 +18,7 @@ const CHIPS = { fdm: ["Bohrungen +0,2 mm für Schrauben", "Wandstärke 2 mm", "O
 // Gruppen der Bemaßung: Schlüssel und Schalter über dem Viewer (Spec Stufe B §3); Spalte „Gruppe“ über groupText
 const DIM_GROUPS = DIM_GROUP_KEYS.map(k => [k, DIM_GROUP_LABEL[k]]);
 const MAX_PARAM = 20;   // Werte je Neuaufbau (jobs.PARAM_MAX)
-const LOCK_VER = "Werte sind nur in der aktuellen Version änderbar.", LOCK_RUN = "Der Auftrag läuft – bitte warten.";
+const LOCK_VER = "Werte sind nur in der aktuellen Version änderbar.", LOCK_RUN = "Der Auftrag läuft – bitte warten.", LOCK_RO = "Nur ansehen – Rolle Lesend";
 
 function flow(stage) {
   const it = (n, t, st) => h("li", { class: st }, h("span", { class: "n" }, st === "dn" ? "✓" : n), t);
@@ -29,7 +30,7 @@ function procOf(job) { return job?.request?.process || "fdm"; }
 // ================================================================== Auftrag
 export async function form(main) {
   await ensureProject(true);
-  const P = S.project, st = S.status || {};
+  const P = S.project, st = S.status || {}, readOnly = isReadOnly(P);   // Rolle Lesend (Spec Teams §7)
   const meas = P.measurements.filter(m => m.accepted);
   const crit = meas.filter(m => m.critical);
   const partsList = P.parts || [];
@@ -96,7 +97,7 @@ export async function form(main) {
   drawPhotos();
   const rules = h("dd", {}, RULES[proc]);
   const us = st.usage || {};
-  const blocked = !st.ai ? "KI ist nicht eingerichtet (Verwaltung → Einstellungen)." : !st.sandbox ? "Die CAD-Sandbox läuft nicht." :
+  const blocked = readOnly ? `${readOnlyText(P)}: keine CAD-Aufträge.` : !st.ai ? "KI ist nicht eingerichtet (Verwaltung → Einstellungen)." : !st.sandbox ? "Die CAD-Sandbox läuft nicht." :
     (us.quota != null && us.used >= us.quota) ? `Monatskontingent erreicht (${us.used} / ${us.quota}).` : "";
   const submit = h("button", { class: "btn primary big wide", type: "submit", form: "cadform", disabled: !!blocked }, icon("cube"), "CAD-Modell erzeugen");
 
@@ -109,7 +110,7 @@ export async function form(main) {
   // Auswahl geaendert: laeuft gerade eine Pruefung, danach in jedem Fall neu vergleichen (needCheck prueft dort gegen das neue Ergebnis)
   // Mehrfachklicks (Fotos abhaken) zu einer Pruefung zusammenfassen
   function onSel() {
-    if (!st.ai) return;
+    if (!st.ai || readOnly) return;
     clearTimeout(selTimer);
     selTimer = setTimeout(() => { if (!main.isConnected) return; if (checking) again = true; else if (needCheck()) runCheck(); }, 700);
   }
@@ -140,7 +141,7 @@ export async function form(main) {
     const byHand = !!P.material_user;
     const mat = (byHand ? [P.color, P.material, P.finish] : chk?.material ? [chk.material.color, chk.material.material, chk.material.finish] : []).filter(Boolean).join(", ");
     clear(checkBox, h("div", { class: "card-head" }, h("h2", {}, "Vor dem Modellieren"),
-        h("button", { class: "btn sm", type: "button", disabled: checking, onclick: () => runCheck(true) }, checking ? h("span", { class: "spin" }) : icon("refresh", 14), "Erneut prüfen")),
+        h("button", { class: "btn sm", type: "button", disabled: checking || readOnly, onclick: () => runCheck(true) }, checking ? h("span", { class: "spin" }) : icon("refresh", 14), "Erneut prüfen")),
       chk?.error ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, `Prüfung nicht möglich: ${chk.error}`)) : null,
       chk && !chk.error ? (chk.items.length ? h("ul", { class: "checks" }, chk.items.map(i => h("li", {}, stateIcon(i.severity === "block" ? "fail" : "warn"), h("span", {}, i.text))))
         : h("div", { class: "note ok" }, icon("check"), h("span", {}, "Die Unterlagen reichen für ein vollständiges Modell."))) : null,
@@ -156,6 +157,7 @@ export async function form(main) {
     h("div", { class: "head" }, h("div", { class: "t" }, h("h1", {}, "CAD-Modell erzeugen"),
       h("p", { class: "lead" }, "Aus Maßen und Fotos entsteht ein parametrisches build123d-Modell. Der Code läuft abgeschottet auf dem Server und liefert STEP und STL.")),
     flow(0)),
+    readOnly ? readOnlyNote(P) : null,
     h("div", { class: "cad-layout" },
       h("form", { id: "cadform", class: "card", "aria-labelledby": "f-h", onsubmit: async ev => {
         ev.preventDefault();
@@ -206,7 +208,7 @@ export async function form(main) {
   drawMeas();
   setProc(proc);
   drawCheck();
-  if (st.ai && needCheck()) runCheck();
+  if (st.ai && !readOnly && needCheck()) runCheck();
   zweck.focus();
 }
 
@@ -214,6 +216,7 @@ export async function form(main) {
 export async function job(main, id) {
   let J = await api(`/api/jobs/${id}`);
   if (!main.isConnected) return;  // waehrend des Ladens weg navigiert: keine Uhr und keine Abfrage starten
+  const readOnly = isReadOnly(J);   // Rolle Lesend: alles sehen, nichts ändern (Spec Teams §7)
   let ver = null, tab = "3d", viewer = null, timer = null, inflight = false, gone = false, fails = 0, jv = 0, liveCode = false, lastSig = "",
     followLatest = false,   // nach einem Neuaufbau: am Ende die neue aktuelle Version zeigen
     view3 = null, view3Used = false;   // 3D-Ansicht { version, box, views3 }: bleibt bei gleicher Version stehen (kein neuer Viewer)
@@ -226,8 +229,8 @@ export async function job(main, id) {
   // Version erst nach der Antwort an und zeigt bis dahin den Fortschritt (drawRun).
   const paramRunning = () => { const L = J.versions[J.versions.length - 1]; return running() && L?.trigger === "param" && L.status === "running"; };
   const sig = () => (paramRunning() ? `p|${J.versions.length}` : `${J.status}|${(J.log || []).length}|${J.versions.length}`);
-  const canEdit = V => !!V && V.status === "ok" && V.version === J.current_version && !running();
-  const lockText = () => (running() ? LOCK_RUN : LOCK_VER);
+  const canEdit = V => !readOnly && !!V && V.status === "ok" && V.version === J.current_version && !running();
+  const lockText = () => (readOnly ? LOCK_RO : running() ? LOCK_RUN : LOCK_VER);
   function dropViewer() { viewer?.dispose(); viewer = null; view3 = null; }
 
   function runStart() {
@@ -246,7 +249,7 @@ export async function job(main, id) {
     let j = null, err = null;
     try { j = await api(`/api/jobs/${id}`); } catch (e) { err = e; } finally { inflight = false; }
     if (gone) return;
-    if (err?.status === 404) { go("/auftraege"); return; }
+    if (err?.status === 404) { if (!err.handled) go("/auftraege"); return; }   // der Hook zeigt die Meldung und navigiert
     if (err) { if (++fails === 3) fail(err); }  // Netz oder Server: weiter versuchen, nach dem dritten Fehlschlag einmal melden
     else {
       fails = 0;
@@ -297,6 +300,7 @@ export async function job(main, id) {
     clear(root,
       h("div", { class: "head" }, h("div", { class: "t" }, h("h1", {}, `${J.name} wird erzeugt`),
         h("p", { class: "lead" }, "Laufzeit ", clockEl, " · üblich 30 s bis 2 min")), flow(1)),
+      readOnly ? readOnlyNote({ team_name: J.team_name }) : null,
       h("div", { class: "row" },
         h("section", { class: "card", style: { flex: "1 1 420px" }, "aria-labelledby": "t-h" }, h("h2", { id: "t-h" }, "Fortschritt"),
           h("ol", { class: "timeline" }, items, pending)),
@@ -306,7 +310,7 @@ export async function job(main, id) {
           logPre, codeBox,
           h("div", { class: "chips", style: { justifyContent: "space-between" } },
             h("span", { class: "small muted" }, "Du kannst die Seite verlassen. Der Auftrag läuft weiter und erscheint unter „Meine Aufträge“."),
-            h("button", { class: "btn danger", onclick: cancelJob }, "Abbrechen")))));
+            readOnly ? null : h("button", { class: "btn danger", onclick: cancelJob }, "Abbrechen")))));
     logPre.scrollTop = logPre.scrollHeight;
     startPoll();
   }
@@ -332,7 +336,7 @@ export async function job(main, id) {
       h("div", { class: "chips" }, vers.length ? h("label", { class: "chips small" }, "Version", verSel) : null, summary, jobBadge(J.status),
         paramRunning() ? h("span", { class: "badge info", role: "status" }, h("span", { class: "spin", style: { width: "12px", height: "12px" } }),
           `Neuaufbau mit ${vers[vers.length - 1].request_text} …`) : null,
-        paramRunning() ? h("button", { class: "btn sm danger", onclick: cancelJob }, "Abbrechen") : null,
+        paramRunning() && !readOnly ? h("button", { class: "btn sm danger", onclick: cancelJob }, "Abbrechen") : null,
         S.me.role === "admin" && J.user_id !== S.me.id ? h("span", { class: "badge info" }, "Auftrag eines anderen Benutzers") : null)),
     flow(ok ? 3 : 2));
 
@@ -352,7 +356,7 @@ export async function job(main, id) {
     const left = h("section", { class: "card", style: { gap: "16px" }, "aria-label": "Modellansicht" }, tabBar, panel);
     const right = h("div", { style: { display: "flex", flexDirection: "column", gap: "24px" } });
 
-    clear(root, head, errNote, h("div", { class: "cad-layout" }, left, right), iterateBox());
+    clear(root, head, readOnly ? readOnlyNote({ team_name: J.team_name }) : null, errNote, h("div", { class: "cad-layout" }, left, right), iterateBox());
 
     if (tab === "3d" && ok) draw3d(panel, V);
     else if (tab === "code" && V) clear(panel, V.error ? errorBox(V.error) : null, codeView(V.code, V.error?.line),
@@ -434,7 +438,7 @@ export async function job(main, id) {
   }
   // „Schlüsse ziehen“: bis zur Antwort gesperrt (Doppelklick), Knöpfe der aktuellen Ansicht in conclBtns
   let concluding = false, conclBtns = [];
-  const conclOff = () => concluding || !(J.pending_param || []).length || running() || !S.status?.ai;
+  const conclOff = () => readOnly || concluding || !(J.pending_param || []).length || running() || !S.status?.ai;
   async function conclude() {
     const text = conclusionText(J.pending_param || []);
     if (concluding || !text || running() || !S.status?.ai) return;
@@ -619,10 +623,10 @@ export async function job(main, id) {
       return h("section", { class: "card" }, h("h2", {}, "Noch keine Version"), h("p", {}, J.error || ""), h("pre", { class: "log" }, (J.log || []).map(l => `${dt(l.ts)}  ${l.msg}\n`)),
         h("div", {}, h("a", { class: "btn primary", href: "/cad" }, "Neuen Auftrag anlegen")));
     }
-    const ta = h("textarea", { id: "chg", class: "input", rows: 3, maxlength: 4000, placeholder: "z. B. Lagersitz als Sackloch 7 mm tief, Rest 1 mm Boden" });
+    const ta = h("textarea", { id: "chg", class: "input", rows: 3, maxlength: 4000, disabled: readOnly, placeholder: "z. B. Lagersitz als Sackloch 7 mm tief, Rest 1 mm Boden" });
     const next = Math.max(...J.versions.map(v => v.version)) + 1;
     const us = S.status?.usage || {};
-    const btn = h("button", { class: "btn primary", disabled: running(), onclick: async () => {
+    const btn = h("button", { class: "btn primary", disabled: readOnly || running(), onclick: async () => {
       if (!ta.value.trim()) { ta.focus(); toast("Bitte die Änderung beschreiben", "err"); return; }
       btn.disabled = true;
       if (!await submitIterate(ta.value)) btn.disabled = false;
@@ -642,7 +646,7 @@ export async function job(main, id) {
         h("div", { style: { flex: "2 1 420px", display: "flex", flexDirection: "column", gap: "10px" } },
           h("label", { for: "chg", style: { fontWeight: 600 } }, "Änderung anfordern"), ta,
           h("div", { class: "chips" }, h("span", { class: "xs muted" }, "Vorschläge"),
-            (CHIPS[procOf(J)] || []).map(t => h("button", { class: "chip", type: "button", onclick: () => { ta.value = ta.value ? `${ta.value.trim()}\n${t}` : t; ta.focus(); } }, t)),
+            (CHIPS[procOf(J)] || []).map(t => h("button", { class: "chip", type: "button", disabled: readOnly, onclick: () => { ta.value = ta.value ? `${ta.value.trim()}\n${t}` : t; ta.focus(); } }, t)),
             h("span", { style: { flex: 1 } }), btn),
           h("span", { class: "xs muted" }, `Jede Änderung zählt als CAD-Lauf · ${us.quota == null ? `${us.used ?? 0} diesen Monat` : `${us.used} von ${us.quota} diesen Monat`}`))));
   }
