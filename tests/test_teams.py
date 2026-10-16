@@ -1449,6 +1449,29 @@ def test_benutzer_loeschen_private_weg_team_bleibt(app, admin):
     assert "1 Team-Projekt bleibt" in _last_audit("user_deleted")["detail"]
 
 
+def test_benutzer_loeschen_neues_privates_projekt_dazwischen(app, admin, monkeypatch):
+    """Gesamtreview S-2: legt der Benutzer zwischen dem Lesen der Projektliste und der Transaktion noch ein privates
+    Projekt an, wird es mitgeloescht (samt Fotoordner und Auftrag) – kein Projekt ohne Besitzer und ohne Team."""
+    from app import config, db, projects
+    (M,) = _mk(app, admin, "bnmitgl")
+    alt = _project(M.uid)
+    real, neu = projects.delete_projects, {}
+
+    def dazwischen(pids, then=None, guard=None):
+        assert alt in pids
+        neu["pid"] = _project(M.uid, name="dazwischen")
+        neu["ph"], neu["job"] = _photo(neu["pid"]), _job(M.uid, neu["pid"])
+        return real(pids, then=then, guard=guard)
+    monkeypatch.setattr(projects, "delete_projects", dazwischen)
+    r = admin.delete(f"/api/admin/users/{M.uid}", headers=H)
+    assert r.json()["ok"] is True, r.text
+    assert db.q("SELECT id FROM projects WHERE id IN (?,?)", (alt, neu["pid"])) == []
+    assert db.q1("SELECT COUNT(*) n FROM projects WHERE user_id IS NULL AND team_id IS NULL")["n"] == 0
+    assert not (config.DATA_DIR / "photos" / str(neu["ph"])).exists()
+    assert db.q1("SELECT id FROM jobs WHERE id=?", (neu["job"],)) is None
+    assert not (config.DATA_DIR / "jobs" / str(neu["job"])).exists()
+
+
 def test_benutzer_leiter_nachfolge(app, admin):
     from app import db
     L, A1, A2, B, N = _mk(app, admin, "blleiter", "blaelt", "bljung", "blzweit", "blneu")

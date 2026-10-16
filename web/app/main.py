@@ -561,10 +561,28 @@ def admin_user_delete(uid: int, request: Request, a: dict = Depends(auth.require
     private = [r["id"] for r in db.q("SELECT id FROM projects WHERE user_id=? AND team_id IS NULL", (uid,))]
     kept = db.q1("SELECT COUNT(*) n FROM projects WHERE user_id=? AND team_id IS NOT NULL", (uid,))["n"]
 
+    late: dict[str, list[int]] = {"jobs": [], "photos": []}
+
     def drop_user():
+        # Gesamtreview S-2: private Projekte, die nach dem Lesen der Liste noch angelegt wurden, ebenfalls loeschen,
+        # sonst bliebe ein Projekt ohne Besitzer und ohne Team; ihre Auftraege und Fotoordner nach dem COMMIT
+        extra = [r["id"] for r in db.q("SELECT id FROM projects WHERE user_id=? AND team_id IS NULL", (uid,))]
+        marks = ",".join("?" * len(extra)) or "NULL"
+        late["jobs"] = [r["id"] for r in db.q(
+            f"SELECT id FROM jobs WHERE (user_id=? AND (project_id IS NULL OR project_id IN ({marks}))) "
+            f"OR (user_id IS NULL AND project_id IN ({marks}))", (uid, *extra, *extra))]
+        if extra:
+            late["photos"] = [r["id"] for r in db.q(f"SELECT id FROM photos WHERE project_id IN ({marks})", tuple(extra))]
+            db.ex(f"DELETE FROM projects WHERE id IN ({marks})", tuple(extra))
         teams.succeed_leaders(uid, a)
         db.ex("DELETE FROM users WHERE id=?", (uid,))
     projects.delete_projects(private, then=drop_user)
+    for jid in late["jobs"]:   # nach dem COMMIT, nie in db.atomic()
+        j = db.q1("SELECT * FROM jobs WHERE id=?", (jid,))
+        if j:
+            jobs.delete(j)
+    for phid in late["photos"]:
+        shutil.rmtree(projects.photo_dir(phid), ignore_errors=True)
     db.audit("user_deleted", f"„{u['username']}“ mit allen privaten Daten gelöscht, "
                              f"{teams.plural(kept, 'Team-Projekt bleibt', 'Team-Projekte bleiben')}",
              user_id=a["id"], actor=a["username"], ip=auth.client_ip(request))
