@@ -237,15 +237,33 @@ export function readOnlyNote(p) {
   return h("div", { class: "note info ro-note", role: "status" }, icon("lock"), h("span", {}, readOnlyText(p)));
 }
 // Sperrt in root alle Knöpfe und Eingaben außer in [data-ro="ok"] (Ansicht, Zoom, Projektwahl), solange S.project die
-// Rolle Lesend hat, und zeigt den Hinweis in slot. Nachgezeichnete Elemente sperrt ein MutationObserver (einmal je Frame).
-// Rückgabe: nach einem Projektwechsel aufrufen. Nur Komfort – der Server lehnt jede Änderung mit 403 ab.
+// Rolle Lesend hat, und zeigt den Hinweis in slot. Nachgezeichnete Elemente sperrt ein MutationObserver: nur Einträge mit
+// hinzugefügten Element-Knoten, gesperrt werden die Bedienelemente darin und das Bedienelement, in das sie eingefügt
+// wurden (z. B. ein Knopf, dessen Inhalt neu gesetzt wird). Rückgabe: nach einem Projektwechsel aufrufen.
+// Nur Komfort – der Server lehnt jede Änderung mit 403 ab.
+const RO_CTRL = "button, input, select, textarea";
 export function readOnlyMode(root, slot) {
   let mo = null, shown;
+  const lock = x => {
+    if (!x.disabled && !x.closest('[data-ro="ok"]')) { x.disabled = true; x.dataset.roLocked = "1"; }
+  };
   const lockAll = on => {
-    for (const x of root.querySelectorAll("button, input, select, textarea")) {
-      if (x.closest('[data-ro="ok"]')) continue;
-      if (on && !x.disabled) { x.disabled = true; x.dataset.roLocked = "1"; }
-      else if (!on && x.dataset.roLocked) { x.disabled = false; delete x.dataset.roLocked; }
+    for (const x of root.querySelectorAll(RO_CTRL)) {
+      if (on) lock(x);
+      else if (x.dataset.roLocked) { x.disabled = false; delete x.dataset.roLocked; }
+    }
+  };
+  const lockAdded = records => {
+    if (!mo) return;
+    for (const r of records) {
+      const added = [...r.addedNodes].filter(n => n.nodeType === Node.ELEMENT_NODE && n.isConnected);
+      if (!added.length) continue;
+      const host = r.target.nodeType === Node.ELEMENT_NODE ? r.target.closest(RO_CTRL) : null;
+      if (host && root.contains(host)) lock(host);
+      for (const n of added) {
+        if (n.matches(RO_CTRL)) lock(n);
+        for (const x of n.querySelectorAll(RO_CTRL)) lock(x);
+      }
     }
   };
   const run = () => {
@@ -253,12 +271,7 @@ export function readOnlyMode(root, slot) {
     if (key !== shown) { shown = key; clear(slot, on ? readOnlyNote(S.project) : null); }
     lockAll(on);
     if (on && !mo) {
-      let queued = false;
-      mo = new MutationObserver(() => {
-        if (queued) return;
-        queued = true;
-        requestAnimationFrame(() => { queued = false; if (mo) lockAll(true); });
-      });
+      mo = new MutationObserver(lockAdded);
       mo.observe(root, { childList: true, subtree: true });
     } else if (!on && mo) { mo.disconnect(); mo = null; }
   };
