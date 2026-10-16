@@ -4,10 +4,51 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from . import config
+
+# Teams (Spec Teams §1): neue Tabellen; auf Bestandsdatenbanken legt sie die Umbau-Transaktion an
+TEAMS_DDL = """
+CREATE TABLE IF NOT EXISTS teams (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS team_members (
+  team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK (role IN ('leiter','mitglied','lesend')), joined_at TEXT NOT NULL,
+  PRIMARY KEY (team_id, user_id));
+CREATE TABLE IF NOT EXISTS team_invites (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK (role IN ('leiter','mitglied','lesend')),
+  invited_by INTEGER REFERENCES users(id) ON DELETE SET NULL, created_at TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'offen' CHECK (status IN ('offen','angenommen','abgelehnt','zurueckgezogen')),
+  decided_at TEXT);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_team_invite_open ON team_invites(team_id, user_id) WHERE status='offen';
+CREATE INDEX IF NOT EXISTS ix_team_members_user ON team_members(user_id);
+"""
+# Feste neue Definitionen: dieselben Konstanten in SCHEMA und im Neuaufbau (_rebuild_table)
+PROJECTS_DDL = """CREATE TABLE IF NOT EXISTS projects (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  name TEXT NOT NULL, created_at TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0,
+  ctrl_x REAL, ctrl_y REAL,
+  color TEXT, material TEXT, transparent INTEGER, finish TEXT, material_user INTEGER NOT NULL DEFAULT 0, cad_check TEXT,
+  team_id INTEGER REFERENCES teams(id)
+)"""
+JOBS_DDL = """CREATE TABLE IF NOT EXISTS jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+  name TEXT NOT NULL, request TEXT NOT NULL, status TEXT NOT NULL,
+  messages TEXT NOT NULL DEFAULT '[]', current_version INTEGER, error TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  run_by INTEGER REFERENCES users(id) ON DELETE SET NULL
+)"""
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -47,13 +88,7 @@ CREATE TABLE IF NOT EXISTS audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, user_id INTEGER, actor TEXT, action TEXT NOT NULL,
   detail TEXT, ip TEXT
 );
-CREATE TABLE IF NOT EXISTS projects (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  name TEXT NOT NULL, created_at TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0,
-  ctrl_x REAL, ctrl_y REAL,
-  color TEXT, material TEXT, transparent INTEGER, finish TEXT, material_user INTEGER NOT NULL DEFAULT 0, cad_check TEXT
-);
+""" + TEAMS_DDL + PROJECTS_DDL + """;
 CREATE TABLE IF NOT EXISTS photos (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -70,20 +105,14 @@ CREATE TABLE IF NOT EXISTS measurements (
   source TEXT NOT NULL DEFAULT 'user', accepted INTEGER NOT NULL DEFAULT 1, reason TEXT,
   created_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS jobs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
-  name TEXT NOT NULL, request TEXT NOT NULL, status TEXT NOT NULL,
-  messages TEXT NOT NULL DEFAULT '[]', current_version INTEGER, error TEXT,
-  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-);
+""" + JOBS_DDL + """;
 CREATE TABLE IF NOT EXISTS job_versions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
   version INTEGER NOT NULL, trigger TEXT NOT NULL, request_text TEXT,
   code TEXT, claude_text TEXT, meta TEXT, status TEXT NOT NULL,
   error TEXT, result TEXT, checks TEXT, usage TEXT, seconds REAL, created_at TEXT NOT NULL,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
   UNIQUE(job_id, version)
 );
 CREATE TABLE IF NOT EXISTS job_log (
@@ -116,6 +145,7 @@ CREATE INDEX IF NOT EXISTS ix_jobs_project ON jobs(project_id);
 CREATE INDEX IF NOT EXISTS ix_log_job ON job_log(job_id);
 CREATE INDEX IF NOT EXISTS ix_parts_photo ON parts(photo_id);
 """
+REBUILD = (("projects", PROJECTS_DDL), ("jobs", JOBS_DDL))
 
 _lock = threading.RLock()
 _conn: sqlite3.Connection | None = None
@@ -129,19 +159,38 @@ def conn() -> sqlite3.Connection:
     global _conn
     if _conn is None:
         config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-        c = sqlite3.connect(config.DB_PATH, check_same_thread=False, isolation_level=None)
+        _conn = _open(config.DB_PATH)
+    return _conn
+
+
+def _open(path, factory=sqlite3.Connection) -> sqlite3.Connection:
+    """Verbindung mit Schema und Migration; bei einer Ausnahme geschlossen und weitergegeben (der Start bricht ab)."""
+    c = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None, factory=factory)
+    try:
         c.row_factory = sqlite3.Row
         c.execute("PRAGMA journal_mode=WAL")
         c.execute("PRAGMA foreign_keys=ON")
         c.execute("PRAGMA busy_timeout=5000")
-        c.executescript(SCHEMA)
+        if not _legacy(c):   # neue oder umgebaute Datenbank; im Bestand laeuft SCHEMA in der Umbau-Transaktion
+            c.executescript(SCHEMA)
         _migrate(c)
-        _conn = c
-    return _conn
+    except BaseException:
+        c.close()
+        raise
+    return c
+
+
+def _legacy(c: sqlite3.Connection) -> bool:
+    cols = {r[1] for r in c.execute("PRAGMA table_info(projects)").fetchall()}
+    return bool(cols) and "team_id" not in cols
+
+
+def _statements(script: str) -> list[str]:
+    return [s.strip() for s in script.split(";") if s.strip()]
 
 
 def _migrate(c: sqlite3.Connection):
-    """Spalten nachruesten, die CREATE TABLE IF NOT EXISTS bei bestehenden Datenbanken nicht anlegt."""
+    """(a) Spalten nachruesten, (b) einmaliger Neuaufbau fuer Teams, (d) Indizes bei jedem Start (Spec Teams §1)."""
     cols = {r[1] for r in c.execute("PRAGMA table_info(measurements)").fetchall()}
     if "part_id" not in cols:
         c.execute("ALTER TABLE measurements ADD COLUMN part_id INTEGER REFERENCES parts(id) ON DELETE SET NULL")
@@ -151,6 +200,69 @@ def _migrate(c: sqlite3.Connection):
                      ("material_user", "INTEGER NOT NULL DEFAULT 0"), ("cad_check", "TEXT")):
         if col not in pcols:
             c.execute(f"ALTER TABLE projects ADD COLUMN {col} {typ}")
+    if "team_id" not in pcols:
+        _rebuild_for_teams(c)
+    c.execute("CREATE INDEX IF NOT EXISTS ix_projects_team ON projects(team_id)")   # nicht in SCHEMA: Bestand
+    c.execute("CREATE INDEX IF NOT EXISTS ix_projects_user ON projects(user_id)")
+
+
+def _fk_issues(c: sqlite3.Connection) -> Counter:
+    """Verstoesse als (table, rowid, parent) – nicht fkid, das sich durch den neuen Fremdschluessel verschiebt."""
+    return Counter((r[0], r[1], r[2]) for r in c.execute("PRAGMA foreign_key_check").fetchall())
+
+
+def _rebuild_table(c: sqlite3.Connection, name: str, ddl: str):
+    old = [r[1] for r in c.execute(f"PRAGMA table_info({name})").fetchall()]
+    new_ddl = ddl.replace(f"CREATE TABLE IF NOT EXISTS {name} (", f"CREATE TABLE {name}_new (", 1)
+    if f"CREATE TABLE {name}_new (" not in new_ddl:
+        raise RuntimeError(f"Migration abgebrochen: keine feste Definition für {name}")
+    c.execute(new_ddl)
+    new = {r[1] for r in c.execute(f"PRAGMA table_info({name}_new)").fetchall()}
+    unknown = [x for x in old if x not in new]
+    if unknown:
+        raise RuntimeError(f"Migration abgebrochen: {name}_new kennt die Spalte(n) {', '.join(unknown)} nicht")
+    cols = ", ".join(f'"{x}"' for x in old)
+    c.execute(f"INSERT INTO {name}_new ({cols}) SELECT {cols} FROM {name}")
+    c.execute(f"DROP TABLE {name}")
+    c.execute(f"ALTER TABLE {name}_new RENAME TO {name}")
+
+
+def _rebuild_for_teams(c: sqlite3.Connection):
+    """Spec Teams §1 (b)/(c): Neuaufbau von projects und jobs in einer Transaktion; Abbruch rollt alles zurueck."""
+    c.execute("PRAGMA foreign_keys=OFF")          # ausserhalb einer Transaktion, sonst wirkungslos
+    try:
+        before = _fk_issues(c)
+        seq = {r[0]: r[1] for r in c.execute("SELECT name, seq FROM sqlite_sequence WHERE name IN ('projects','jobs')")}
+        c.execute("BEGIN")
+        try:
+            for stmt in _statements(SCHEMA):        # Team-Tabellen in derselben Transaktion (ROLLBACK entfernt sie)
+                c.execute(stmt)
+            for name, ddl in REBUILD:
+                _rebuild_table(c, name, ddl)
+            for name in ("projects", "jobs"):       # sonst MAX(id) bzw. 0: geloeschte ids wuerden wieder vergeben
+                c.execute("DELETE FROM sqlite_sequence WHERE name=?", (name,))
+                if name in seq:
+                    c.execute("INSERT INTO sqlite_sequence(name,seq) VALUES (?,?)", (name, seq[name]))
+            vcols = {r[1] for r in c.execute("PRAGMA table_info(job_versions)").fetchall()}
+            if "user_id" not in vcols:          # fehlte job_versions ganz, hat SCHEMA sie eben in neuer Form angelegt
+                c.execute("ALTER TABLE job_versions ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE SET NULL")
+            c.execute("UPDATE job_versions SET user_id=(SELECT user_id FROM jobs WHERE jobs.id=job_versions.job_id) "
+                      "WHERE user_id IS NULL")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_jobs_user ON jobs(user_id)")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_jobs_project ON jobs(project_id)")
+            added = _fk_issues(c) - before
+            if added:
+                raise RuntimeError(f"Migration abgebrochen: {sum(added.values())} neue Fremdschlüssel-Verstöße, "
+                                   f"z. B. {next(iter(added))}")
+            c.execute("COMMIT")
+        except BaseException as e:
+            if c.in_transaction:
+                c.execute("ROLLBACK")
+            if isinstance(e, Exception) and not str(e).startswith("Migration abgebrochen"):
+                raise RuntimeError(f"Migration abgebrochen: {e}") from e
+            raise
+    finally:
+        c.execute("PRAGMA foreign_keys=ON")      # (c) erst nach COMMIT/ROLLBACK
 
 
 def q(sql: str, args=()) -> list[dict]:
