@@ -202,3 +202,55 @@ def test_migration_abbruch_rollt_zurueck(tmp_path, factory):
         assert "team_id" in {r[1] for r in c.execute("PRAGMA table_info(projects)")}
     finally:
         c.close()
+
+
+def test_migration_verwaister_ersteller(tmp_path):
+    """Auftrag 2 verweist auf den fehlenden Benutzer 77 (Altverstoss, F-2): seine Versionen bleiben ohne user_id."""
+    from app import db
+    p = tmp_path / "verwaist.db"
+    c = _plain(p)                                                               # foreign_keys ist hier aus
+    c.executescript(FIXTURE.read_text(encoding="utf-8"))
+    c.executescript(f"""
+INSERT INTO users(id,username,pw_hash,created_at) VALUES (1,'dora','x','{TS}');
+INSERT INTO jobs(id,user_id,name,request,status,created_at,updated_at) VALUES
+  (1,1,'J1','{{}}','done','{TS}','{TS}'), (2,77,'J2','{{}}','done','{TS}','{TS}');
+INSERT INTO job_versions(id,job_id,version,trigger,status,created_at) VALUES
+  (1,1,1,'create','ok','{TS}'), (2,2,1,'create','ok','{TS}'), (3,2,2,'iterate','ok','{TS}');
+""")
+    c.commit()
+    c.close()
+    vor = _snapshot(p)["fk"]
+    assert vor == Counter({("jobs", 2, "users"): 1})
+    db._open(p).close()
+    nach = _snapshot(p)["fk"]
+    assert not (nach - vor) and sum(nach.values()) <= sum(vor.values())
+    q = _plain(p)
+    try:
+        assert q.execute("SELECT id, user_id FROM job_versions ORDER BY id").fetchall() == [(1, 1), (2, None), (3, None)]
+        assert "team_id" in {r[1] for r in q.execute("PRAGMA table_info(projects)")}
+    finally:
+        q.close()
+
+
+class _BoomCleanup(sqlite3.Connection):
+    """Wie _BoomRename; danach scheitern auch ROLLBACK und das Wiedereinschalten der Fremdschluessel."""
+
+    boom = False
+
+    def execute(self, sql, *args):
+        if sql.startswith("ALTER TABLE jobs_new RENAME"):
+            self.boom = True
+            raise sqlite3.OperationalError("Testfehler beim Umbenennen")
+        if self.boom and sql in ("ROLLBACK", "PRAGMA foreign_keys=ON"):
+            raise sqlite3.OperationalError(f"Testfehler bei {sql}")
+        return super().execute(sql, *args)
+
+
+def test_migration_abbruch_behaelt_ursache(tmp_path):
+    from app import db
+    p = tmp_path / "ursache.db"
+    _legacy_db(p)
+    vor = _dump(p)
+    with pytest.raises(RuntimeError, match="Migration abgebrochen: Testfehler beim Umbenennen"):
+        db._open(p, factory=_BoomCleanup)
+    assert _dump(p) == vor                                                      # Schliessen verwirft die Transaktion

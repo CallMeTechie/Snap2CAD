@@ -230,6 +230,7 @@ def _rebuild_table(c: sqlite3.Connection, name: str, ddl: str):
 def _rebuild_for_teams(c: sqlite3.Connection):
     """Spec Teams §1 (b)/(c): Neuaufbau von projects und jobs in einer Transaktion; Abbruch rollt alles zurueck."""
     c.execute("PRAGMA foreign_keys=OFF")          # ausserhalb einer Transaktion, sonst wirkungslos
+    done = False
     try:
         before = _fk_issues(c)
         seq = {r[0]: r[1] for r in c.execute("SELECT name, seq FROM sqlite_sequence WHERE name IN ('projects','jobs')")}
@@ -246,8 +247,9 @@ def _rebuild_for_teams(c: sqlite3.Connection):
             vcols = {r[1] for r in c.execute("PRAGMA table_info(job_versions)").fetchall()}
             if "user_id" not in vcols:          # fehlte job_versions ganz, hat SCHEMA sie eben in neuer Form angelegt
                 c.execute("ALTER TABLE job_versions ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE SET NULL")
-            c.execute("UPDATE job_versions SET user_id=(SELECT user_id FROM jobs WHERE jobs.id=job_versions.job_id) "
-                      "WHERE user_id IS NULL")
+            # nur vorhandene Ersteller: ein verwaister jobs.user_id (Altverstoss, F-2) bliebe sonst als neuer Verstoss
+            c.execute("UPDATE job_versions SET user_id=(SELECT j.user_id FROM jobs j JOIN users u ON u.id=j.user_id "
+                      "WHERE j.id=job_versions.job_id) WHERE user_id IS NULL")
             c.execute("CREATE INDEX IF NOT EXISTS ix_jobs_user ON jobs(user_id)")
             c.execute("CREATE INDEX IF NOT EXISTS ix_jobs_project ON jobs(project_id)")
             added = _fk_issues(c) - before
@@ -257,12 +259,24 @@ def _rebuild_for_teams(c: sqlite3.Connection):
             c.execute("COMMIT")
         except BaseException as e:
             if c.in_transaction:
-                c.execute("ROLLBACK")
+                _quiet(c, "ROLLBACK")
             if isinstance(e, Exception) and not str(e).startswith("Migration abgebrochen"):
                 raise RuntimeError(f"Migration abgebrochen: {e}") from e
             raise
-    finally:
-        c.execute("PRAGMA foreign_keys=ON")      # (c) erst nach COMMIT/ROLLBACK
+        done = True
+    finally:                                     # (c) erst nach COMMIT/ROLLBACK
+        if done:
+            c.execute("PRAGMA foreign_keys=ON")
+        else:                                    # die urspruengliche Ausnahme bleibt
+            _quiet(c, "PRAGMA foreign_keys=ON")
+
+
+def _quiet(c: sqlite3.Connection, sql: str):
+    """Aufraeumen waehrend einer Ausnahme: ein Fehler hier darf die eigentliche Ausnahme nicht ersetzen."""
+    try:
+        c.execute(sql)
+    except sqlite3.Error:
+        pass
 
 
 def q(sql: str, args=()) -> list[dict]:
