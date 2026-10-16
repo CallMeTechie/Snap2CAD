@@ -122,3 +122,30 @@ def require_team(user: dict, team_id: int, need: str) -> dict:
     if ROLE_RANK[role] < ROLE_RANK[need]:
         raise HTTPException(403, DENY_LEADER if need == "leiter" else DENY_WRITE)
     return {**t, "my_role": role}
+
+
+def project_fields(user: dict, project: dict) -> dict:
+    """Spec Teams §4: team_id, team_name, my_role, creator ({id, name} oder None = geloeschter Benutzer) und
+    creator_is_member (nur bei Team-Projekten, sonst None); rights = was die Oberflaeche anbietet, aus allowed –
+    dieselbe Regel wie die Routen (Plan, Lueckenfuellung 19)."""
+    role = project_role(user, project)
+    out = {"team_id": project.get("team_id"), "team_name": None, "my_role": role,
+           "creator": None, "creator_is_member": None,
+           "rights": {n: allowed(user, project, n, role) for n in ("write", "delete", "move", "copy")}}
+    if project.get("user_id") is not None:
+        c = db.q1("SELECT id, username, display_name FROM users WHERE id=?", (project["user_id"],))
+        if c:
+            out["creator"] = {"id": c["id"], "name": c["display_name"] or c["username"]}
+    if project.get("team_id") is not None:
+        t = db.q1("SELECT name FROM teams WHERE id=?", (project["team_id"],))
+        out["team_name"] = t["name"] if t else None
+        out["creator_is_member"] = team_role(project.get("user_id"), project["team_id"]) is not None
+    return out
+
+
+def job_fields(user: dict, job: dict) -> dict:
+    """GET /api/jobs/{jid}: Rolle und Team des Projekts (Lesend-Modus der Auftragsseite)."""
+    p = db.q1("SELECT team_id FROM projects WHERE id=?", (job["project_id"],)) if job.get("project_id") else None
+    tid = p["team_id"] if p else None
+    t = db.q1("SELECT name FROM teams WHERE id=?", (tid,)) if tid is not None else None
+    return {"my_role": job_role(user, job), "team_id": tid, "team_name": t["name"] if t else None}

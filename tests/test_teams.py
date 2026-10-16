@@ -363,6 +363,7 @@ MATRIX = {
     ("GET", "/api/projects/{pid}"): ("read", None, 200, None),
     ("PATCH", "/api/projects/{pid}"): ("write", {"name": "neu"}, 200, None),
     ("DELETE", "/api/projects/{pid}"): ("delete", None, 200, None),
+    ("POST", "/api/projects/{pid}/move"): ("move", lambda o: {"team_id": o["target"]}, 200, None),
     ("DELETE", "/api/projects/{pid}/model-dims/{mid}"): ("write", None, 200, None),
     ("POST", "/api/projects/{pid}/photos"): ("write", "UPLOAD", 400, "Bild konnte nicht gelesen werden"),
     ("POST", "/api/projects/{pid}/measurements"): ("write", {"kind": "length", "value": 5, "label": "x"}, 200, None),
@@ -951,3 +952,239 @@ def test_verwaltung_annehmen_bei_bestehender_mitgliedschaft(app, admin):
     a = _last_audit("team_invite_accepted")
     assert a["detail"] == f"Team {tid} „Schon“: {M.username} hat angenommen, war bereits Mitglied (Lesend)", a["detail"]
     assert "beigetreten" not in a["detail"]
+
+
+# ------------------------------------------------------------------ T4: Bereiche, Anlegen, Verschieben
+
+def _ids(c, scope=None):
+    r = c.get("/api/projects" + (f"?scope={scope}" if scope is not None else ""))
+    assert r.status_code == 200, r.text
+    return [p["id"] for p in r.json()]
+
+
+def test_rechte_bereiche_liste(app, admin):
+    from app import db
+    L, M, F = _mk(app, admin, "bleiter", "bmitgl", "baussen")
+    tid = _team("Bereich", {L.uid: "leiter", M.uid: "mitglied"})
+    priv = L.post("/api/projects", json={"name": "Privat"}, headers=H).json()
+    tp = L.post("/api/projects", json={"name": "Team", "team_id": tid}, headers=H).json()
+    assert (tp["team_id"], tp["team_name"], tp["my_role"], tp["creator_is_member"]) == (tid, "Bereich", "leiter", True)
+    assert tp["creator"] == {"id": L.uid, "name": L.display}
+    assert (priv["team_id"], priv["team_name"], priv["my_role"], priv["creator_is_member"]) == (None, None, "besitzer", None)
+    alle = {"write": True, "delete": True, "move": True, "copy": True}
+    assert tp["rights"] == priv["rights"] == alle
+    assert _ids(L) == _ids(L, "private") == [priv["id"]]
+    assert _ids(L, f"team:{tid}") == [tp["id"]]
+    assert set(_ids(L, "all")) == {priv["id"], tp["id"]}
+    assert _ids(M, "all") == [tp["id"]] and _ids(M, "private") == []
+    entry = M.get(f"/api/projects?scope=team:{tid}").json()[0]
+    assert entry["my_role"] == "mitglied" and {"thumb", "last_job", "updated_at"} <= set(entry)
+    assert entry["rights"] == {"write": True, "delete": False, "move": False, "copy": True}         # fremd angelegt
+    assert F.get(f"/api/projects?scope=team:{tid}").status_code == 404
+    assert L.get("/api/projects?scope=quatsch").status_code == 400
+    assert L.get("/api/projects?scope=team:²").status_code == 400
+    for big in ("9" * 19, "9" * 20):                                                   # Ueberlauf und Laenge > 24
+        assert L.get(f"/api/projects?scope=team:{big}").status_code == 400
+    mp = M.post("/api/projects", json={"name": "von M", "team_id": tid}, headers=H).json()["id"]
+    db.ex("DELETE FROM team_members WHERE team_id=? AND user_id=?", (tid, M.uid))       # M ist ehemaliges Mitglied
+    e = next(p for p in L.get(f"/api/projects?scope=team:{tid}").json() if p["id"] == mp)
+    assert e["creator"] == {"id": M.uid, "name": M.display} and e["creator_is_member"] is False
+    db.ex("UPDATE projects SET user_id=NULL WHERE id=?", (mp,))                          # geloeschter Ersteller
+    e = next(p for p in L.get(f"/api/projects?scope=team:{tid}").json() if p["id"] == mp)
+    assert e["creator"] is None and e["creator_is_member"] is False
+
+
+def test_rechte_anlegen_im_team(app, admin):
+    from app import access
+    L, M, R, F = _mk(app, admin, "aleiter", "amitgl", "alesend", "aaussen")
+    tid = _team("Anlegen", {L.uid: "leiter", M.uid: "mitglied", R.uid: "lesend"})
+    assert M.post("/api/projects", json={"name": "x", "team_id": tid}, headers=H).status_code == 200
+    r = R.post("/api/projects", json={"name": "x", "team_id": tid}, headers=H)
+    assert r.status_code == 403 and r.json()["detail"] == access.DENY_WRITE
+    assert F.post("/api/projects", json={"name": "x", "team_id": tid}, headers=H).status_code == 404
+    assert L.post("/api/projects", json={"name": "y", "team_id": 999999}, headers=H).status_code == 404
+    for bad in (10**20, 0, -1):                                                        # Ueberlauf und Unsinn: 422
+        assert L.post("/api/projects", json={"name": "z", "team_id": bad}, headers=H).status_code == 422
+
+
+@pytest.mark.parametrize("case", [c for c in CASES if c not in NO_READ])
+def test_rechte_feld_rights_wie_matrix(welt, case):
+    """Lueckenfuellung 19: das Feld rights je Projekt (Menue der Bibliothek) folgt derselben Regel wie die Routen."""
+    actor, creator, in_team = CASES[case]
+    pid = _project(getattr(welt, creator).uid, welt.tid if in_team else None)
+    r = getattr(welt, actor).get(f"/api/projects/{pid}")
+    assert r.status_code == 200, r.text
+    assert r.json()["rights"] == {n: case in EXPECT[n] for n in ("write", "delete", "move", "copy")}
+
+
+def test_rechte_current_bleibt_privat(app, admin):
+    (L,) = _mk(app, admin, "cleiter")
+    tid = _team("Current", {L.uid: "leiter"})
+    tp = L.post("/api/projects", json={"name": "Team", "team_id": tid}, headers=H).json()["id"]
+    cur = L.get("/api/projects/current").json()
+    assert cur["team_id"] is None and cur["id"] != tp and cur["user_id"] == L.uid
+    assert L.get("/api/projects/current").json()["id"] == cur["id"]
+
+
+def test_rechte_nach_austritt_404_und_current(app, admin):
+    """Review Focus 4: Mitgliedschaft weg, Seite noch offen -> naechste Anfrage 404, current liefert privat."""
+    L, M = _mk(app, admin, "nleiter", "nmitgl")
+    tid = _team("Austritt", {L.uid: "leiter", M.uid: "mitglied"})
+    tp = M.post("/api/projects", json={"name": "Meins", "team_id": tid}, headers=H).json()["id"]
+    jid = _job(M.uid, tp)
+    assert M.get(f"/api/projects/{tp}").status_code == 200
+    assert L.delete(f"/api/teams/{tid}/members/{M.uid}", headers=H).status_code == 200
+    r = M.get(f"/api/projects/{tp}")
+    assert r.status_code == 404 and r.json()["detail"] == "Projekt nicht gefunden"
+    assert M.get(f"/api/jobs/{jid}").status_code == 404
+    assert M.get("/api/projects/current").json()["team_id"] is None
+    assert L.get(f"/api/projects/{tp}").json()["creator_is_member"] is False        # Projekt bleibt im Team
+
+
+def test_rechte_auftrag_felder(app, admin):
+    L, R = _mk(app, admin, "fleiter", "flesend")
+    tid = _team("Felder", {L.uid: "leiter", R.uid: "lesend"})
+    jid = _job(L.uid, _project(L.uid, tid))
+    j = R.get(f"/api/jobs/{jid}").json()
+    assert (j["my_role"], j["team_id"], j["team_name"]) == ("lesend", tid, "Felder")
+    assert L.get(f"/api/jobs/{_job(L.uid, _project(L.uid))}").json()["my_role"] == "besitzer"
+    j3 = L.get(f"/api/jobs/{_job(L.uid, None)}").json()
+    assert (j3["my_role"], j3["team_id"], j3["team_name"]) == ("besitzer", None, None)
+
+
+def test_verschieben_privat_ins_team_mit_auftraegen(app, admin):
+    from app import db
+    L, M = _mk(app, admin, "vsleiter", "vsmitgl")
+    tid = _team("Ziel", {L.uid: "leiter", M.uid: "mitglied"})
+    pid = L.post("/api/projects", json={"name": "Wandert"}, headers=H).json()["id"]
+    jid = _job(L.uid, pid)
+    assert M.get(f"/api/jobs/{jid}").status_code == 404
+    r = L.post(f"/api/projects/{pid}/move", json={"team_id": tid}, headers=H)
+    assert r.status_code == 200, r.text
+    assert (r.json()["team_id"], r.json()["user_id"], r.json()["team_name"]) == (tid, L.uid, "Ziel")
+    assert M.get(f"/api/projects/{pid}").status_code == 200 and M.get(f"/api/jobs/{jid}").status_code == 200
+    assert db.q1("SELECT project_id FROM jobs WHERE id=?", (jid,))["project_id"] == pid      # Auftrag folgt dem Projekt
+    a = _last_audit("project_move")
+    assert a["detail"] == f"Projekt {pid}: privat → Team {tid} „Ziel“" and a["actor"] == L.username
+
+
+def test_verschieben_team_nach_privat(app, admin):
+    L, M = _mk(app, admin, "vpleiter", "vpmitgl")
+    tid = _team("Zurueck", {L.uid: "leiter", M.uid: "mitglied"})
+    pid = M.post("/api/projects", json={"name": "von M", "team_id": tid}, headers=H).json()["id"]
+    _job(L.uid, pid)                                              # nur Auftraege des Verschiebenden
+    r = L.post(f"/api/projects/{pid}/move", json={"team_id": None}, headers=H)
+    assert r.status_code == 200, r.text
+    assert (r.json()["team_id"], r.json()["user_id"], r.json()["my_role"]) == (None, L.uid, "besitzer")
+    assert M.get(f"/api/projects/{pid}").status_code == 404
+    assert _last_audit("project_move")["detail"] == f"Projekt {pid}: Team {tid} „Zurueck“ → privat"
+
+
+def test_verschieben_fremder_auftrag_409(app, admin):
+    from app import db
+    L, M = _mk(app, admin, "vfleiter", "vfmitgl")
+    tid = _team("Fremd", {L.uid: "leiter", M.uid: "mitglied"})
+    pid = _project(L.uid, tid)
+    _job(L.uid, pid)
+    _job(M.uid, pid)
+    r = L.post(f"/api/projects/{pid}/move", json={"team_id": None}, headers=H)
+    assert r.status_code == 409
+    assert r.json()["detail"] == "Das Projekt enthält Aufträge anderer Mitglieder – bitte „In privat kopieren“ verwenden"
+    assert db.q1("SELECT team_id FROM projects WHERE id=?", (pid,))["team_id"] == tid
+
+
+def test_verschieben_geloeschter_ersteller_409(app, admin):
+    from app import db
+    (L,) = _mk(app, admin, "vgleiter")
+    tid = _team("Geloescht", {L.uid: "leiter"})
+    pid = _project(L.uid, tid)
+    jid = _job(L.uid, pid)
+    db.ex("UPDATE jobs SET user_id=NULL WHERE id=?", (jid,))
+    assert L.post(f"/api/projects/{pid}/move", json={"team_id": None}, headers=H).status_code == 409
+
+
+def test_verschieben_rechte_und_ziele(app, admin):
+    from app import access
+    L, M, R, F = _mk(app, admin, "vrleiter", "vrmitgl", "vrlesend", "vraussen")
+    tid = _team("Start", {L.uid: "leiter", M.uid: "mitglied", R.uid: "lesend"})
+    t_o = _team("Fremdes", {F.uid: "leiter"})
+    t_ro = _team("Nur lesen", {L.uid: "lesend"})
+    t_l = _team("Zweites", {L.uid: "leiter"})
+    tp_l, tp_m, priv = _project(L.uid, tid), _project(M.uid, tid), _project(L.uid)
+    assert M.post(f"/api/projects/{tp_l}/move", json={"team_id": None}, headers=H).status_code == 403   # fremd angelegt
+    r = R.post(f"/api/projects/{tp_m}/move", json={"team_id": None}, headers=H)
+    assert r.status_code == 403 and r.json()["detail"] == access.DENY_WRITE
+    assert F.post(f"/api/projects/{tp_l}/move", json={"team_id": None}, headers=H).status_code == 404
+    assert L.post(f"/api/projects/{priv}/move", json={"team_id": t_o}, headers=H).status_code == 404   # kein Mitglied
+    r = L.post(f"/api/projects/{priv}/move", json={"team_id": t_ro}, headers=H)
+    assert r.status_code == 403 and r.json()["detail"] == access.DENY_WRITE                           # Ziel nur lesend
+    r = L.post(f"/api/projects/{priv}/move", json={"team_id": None}, headers=H)
+    assert r.status_code == 400 and r.json()["detail"] == "Das Projekt liegt bereits in diesem Bereich."
+    assert L.post(f"/api/projects/{tp_l}/move", json={"team_id": tid}, headers=H).status_code == 400
+    r = L.post(f"/api/projects/{tp_l}/move", json={"team_id": t_l}, headers=H)
+    assert r.status_code == 400 and "In privat kopieren" in r.json()["detail"]                         # Team -> Team
+    r = admin.post(f"/api/projects/{_project(F.uid)}/move", json={"team_id": t_o}, headers=H)
+    assert r.status_code == 403 and r.json()["detail"] == access.DENY_OWNER                            # Admin: nie move
+    assert L.post(f"/api/projects/{priv}/move", json={"team_id": 10**20}, headers=H).status_code == 422   # Ueberlauf
+
+
+def test_verschieben_mitgliedschaft_weg_vor_transaktion(app, admin, monkeypatch):
+    """Rechte in der Transaktion wiederholt: faellt die Mitgliedschaft im Ziel-Team nach der ersten Pruefung weg,
+    bleibt das Projekt privat (404)."""
+    from app import access, db
+    (L,) = _mk(app, admin, "vtleiter")
+    tid = _team("Weg davor", {L.uid: "leiter"})
+    pid = _project(L.uid)
+    real, calls = access.require_team, []
+
+    def require_team(user, team_id, need):
+        out = real(user, team_id, need)
+        if not calls:                                       # nach der ersten Pruefung: Austritt dazwischen
+            calls.append(1)
+            db.ex("DELETE FROM team_members WHERE team_id=? AND user_id=?", (team_id, user["id"]))
+        return out
+    monkeypatch.setattr(access, "require_team", require_team)
+    r = L.post(f"/api/projects/{pid}/move", json={"team_id": tid}, headers=H)
+    assert r.status_code == 404 and r.json()["detail"] == "Team nicht gefunden", r.text
+    assert db.q1("SELECT team_id FROM projects WHERE id=?", (pid,))["team_id"] is None
+    assert len(calls) == 1
+
+
+def test_benutzer_teamprojekt_loeschen_auftraege_ohne_ersteller(app, admin):
+    """Spec §4: Aufträge bleiben beim Ersteller ohne Projekt; Aufträge ohne Ersteller werden mitgelöscht."""
+    from app import config, db
+    L, M = _mk(app, admin, "lleiter", "lmitgl")
+    tid = _team("Loeschen", {L.uid: "leiter", M.uid: "mitglied"})
+    pid = _project(M.uid, tid)
+    phid = _photo(pid)
+    j_l, j_x = _job(L.uid, pid), _job(M.uid, pid)
+    db.ex("UPDATE jobs SET user_id=NULL WHERE id=?", (j_x,))
+    assert L.delete(f"/api/projects/{pid}", headers=H).json() == {"ok": True}
+    assert db.q1("SELECT project_id FROM jobs WHERE id=?", (j_l,))["project_id"] is None
+    assert L.get(f"/api/jobs/{j_l}").status_code == 200
+    assert db.q1("SELECT id FROM jobs WHERE id=?", (j_x,)) is None
+    assert not (config.DATA_DIR / "jobs" / str(j_x)).exists()
+    assert not (config.DATA_DIR / "photos" / str(phid)).exists()
+
+
+def test_benutzer_loeschen_projekt_inzwischen_verschoben(app, admin, monkeypatch):
+    """Rechte beim Loeschen in der Transaktion wiederholt (guard): verschiebt der Leiter das Projekt zwischen Pruefung
+    und Loeschen nach privat, loescht das Mitglied es nicht (404)."""
+    from app import db, main
+    L, M = _mk(app, admin, "bvleiter", "bvmitgl")
+    tid = _team("Inzwischen", {L.uid: "leiter", M.uid: "mitglied"})
+    pid = _project(M.uid, tid)
+    jx = _job(None, pid)                                    # Auftrag ohne Ersteller: darf bei 404 nicht verschwinden
+    real, calls = main._own_project, []
+
+    def own(p, user, need="write"):
+        out = real(p, user, need)
+        if not calls:                                       # nach der ersten Pruefung: Leiter verschiebt nach privat
+            calls.append(1)
+            db.ex("UPDATE projects SET team_id=NULL, user_id=? WHERE id=?", (L.uid, p))
+        return out
+    monkeypatch.setattr(main, "_own_project", own)
+    r = M.delete(f"/api/projects/{pid}", headers=H)
+    assert r.status_code == 404 and r.json()["detail"] == "Projekt nicht gefunden", r.text
+    assert db.q1("SELECT team_id, user_id FROM projects WHERE id=?", (pid,)) == {"team_id": None, "user_id": L.uid}
+    assert db.q1("SELECT id FROM jobs WHERE id=?", (jx,)) is not None
