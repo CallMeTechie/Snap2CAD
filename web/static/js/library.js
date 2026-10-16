@@ -1,7 +1,7 @@
 // Schritt 1: Projektbibliothek – private und Team-Bibliotheken mit Vorschaubild, Start für neue Projekte
 import { api, h, clear, icon, dt, toast, fail, dialog, confirmDlg, debounce, plural } from "./lib.js";
 import { S, go, onLeave, rememberProject, rememberedProjectId, forgetProject, jobBadge } from "./app.js";
-import { ROLE_TEXT, creatorText, loadScope, projectRights, saveScope, validScope } from "./rights.js";
+import { ROLE_TEXT, creatorText, loadScope, projectRights, saveScope, teamIdOf, validScope } from "./rights.js";
 
 const SORTS = { updated: "Zuletzt geändert", name: "Name", created: "Angelegt" };
 const COLL = new Intl.Collator("de", { sensitivity: "base" });
@@ -14,26 +14,27 @@ function loadView() {
 }
 function saveView(v) { try { localStorage.setItem("lib.view", JSON.stringify(v)); } catch { /* */ } }
 // Bereich der Bibliothek (Spec Teams §7): "private" oder "team:<id>", gemerkt über rights.loadScope/saveScope
-const teamOf = scope => (scope.startsWith("team:") ? Number(scope.slice(5)) : null);
 
-// Neues Projekt: leerer Name ist erlaubt, der Server vergibt dann Datum und Uhrzeit; teamId = im Team anlegen
+// Neues Projekt: leerer Name ist erlaubt, der Server vergibt dann Datum und Uhrzeit; teamId = im Team anlegen.
+// Ergebnis: true = angelegt, false = abgebrochen, null = Anlegen gescheitert (Fehler ist schon gemeldet)
 export async function newProject(teamId = null) {
   const inp = h("input", { class: "input", placeholder: "z. B. Halteplatte Lagersitz", maxlength: 120, "aria-label": "Name" });
   const r = await dialog({ title: "Neues Projekt",
     body: h("div", { class: "field" }, h("label", {}, "Name"), inp, h("span", { class: "hint" }, "Leer lassen = Name aus Datum und Uhrzeit.")),
     actions: [{ label: "Abbrechen", value: null }, { label: "Anlegen", primary: true, submit: true, run: () => ({ name: inp.value.trim() }) }] });
-  if (!r) return;
+  if (!r) return false;
   const at = location.pathname + location.search;
   try {
     S.project = await api("/api/projects", { method: "POST", body: teamId ? { name: r.name, team_id: teamId } : { name: r.name } });
     rememberProject();
     if (location.pathname + location.search === at) go("/fotos");   // inzwischen weitergeklickt: dort bleiben
-  } catch (e) { fail(e); }
+    return true;
+  } catch (e) { fail(e); return null; }
 }
 
 export default async function (main) {
   const view = loadView();
-  let list = [], teams = [], scope = loadScope(), query = "", loadSeq = 0, opening = false;
+  let list = [], teams = [], scope = loadScope(), shownScope = "private", query = "", loadSeq = 0, opening = false;
   let cards = new Map(), lower = new Map();   // je Projekt-ID Karte und kleingeschriebener Name, je load() einmal gebaut
   const search = h("input", { class: "input", type: "search", placeholder: "Projekt suchen …", "aria-label": "Projekte durchsuchen", maxlength: 120 });
   const sortSel = h("select", { class: "input", "aria-label": "Sortierung" },
@@ -46,8 +47,11 @@ export default async function (main) {
     h("label", { class: "check small" }, archCb, "Archivierte zeigen"));
   const scopeBar = h("div", { class: "chips libscope", role: "group", "aria-label": "Bibliothek wählen", hidden: true });
   // scheitert das Anlegen (z. B. Rolle inzwischen Lesend), bleibt die Seite: Bereiche und Knopf neu laden
-  const newBtn = h("button", { class: "btn primary", onclick: async () => { await newProject(teamOf(scope)); if (main.isConnected) reload(); } },
-    icon("plus"), "Neues Projekt");
+  // (nur nach einem gescheiterten Anlegen; Abbrechen und Erfolg laden nichts neu); angelegt wird im angezeigten Bereich
+  async function createHere(teamId = teamIdOf(shownScope)) {
+    if (await newProject(teamId) === null && main.isConnected) reload();
+  }
+  const newBtn = h("button", { class: "btn primary", onclick: () => createHere() }, icon("plus"), "Neues Projekt");
   main.append(
     h("div", { class: "head" }, h("div", { class: "t" }, h("h1", {}, "Projekte"),
       h("p", { class: "lead" }, "Alle Werkstücke mit Fotos, Maßen und CAD-Modellen – privat oder gemeinsam im Team. Von hier aus beginnt jedes neue Projekt.")),
@@ -69,18 +73,22 @@ export default async function (main) {
   // nur die juengste Antwort uebernehmen; Karten (mit Vorschaubild) nur hier neu bauen, damit Suchen
   // und Sortieren laufende Bildladevorgaenge nicht abbrechen
   async function load() {
-    const n = ++loadSeq;
-    const t = await api("/api/teams");
+    const n = ++loadSeq, stale = () => n !== loadSeq || !main.isConnected;   // nach jedem await prüfen, veraltet = still
+    let t = { teams: [] }, teamsOk = true;
+    try { t = await api("/api/teams"); } catch { teamsOk = false; }   // ohne Teams-Liste: privat statt kaputter Seite
+    if (stale()) return;
     const sc = validScope(scope, t.teams);
     let l;
     try { l = await api(`/api/projects?scope=${encodeURIComponent(sc)}`); }
     catch (e) {   // Team inzwischen verlassen oder gelöscht: still zur privaten Bibliothek (Review Focus 3)
-      if (e.status === 404 && sc !== "private" && n === loadSeq) { scope = "private"; saveScope(scope); return load(); }
+      if (stale()) return;
+      if (e.status === 404 && sc !== "private") { scope = "private"; saveScope(scope); return load(); }
       throw e;
     }
-    if (n !== loadSeq || !main.isConnected) return;
+    if (stale()) return;
     teams = t.teams;
-    if (sc !== scope) { scope = sc; saveScope(sc); }
+    shownScope = sc;
+    if (sc !== scope) { scope = sc; if (teamsOk) saveScope(sc); }   // gemerkter Bereich bleibt, wenn nur die Liste fehlte
     menuClose?.();
     list = l;
     drawScopes();
@@ -92,11 +100,13 @@ export default async function (main) {
   const reload = () => load().catch(fail);
 
   function drawScopes() {
-    const chip = (sc, label) => h("button", { class: "chip", type: "button", "aria-pressed": String(sc === scope),
+    const chip = (sc, label) => h("button", { class: "chip", type: "button", "aria-pressed": String(sc === shownScope),
       onclick: () => { if (sc === scope) return; scope = sc; saveScope(sc); reload(); } }, label);
+    const hadFocus = scopeBar.contains(document.activeElement);
     clear(scopeBar, chip("private", "Privat"), teams.map(t => chip(`team:${t.id}`, t.name)));
     scopeBar.hidden = !teams.length;   // ohne Team wie bisher nur die private Bibliothek
-    const t = teams.find(x => `team:${x.id}` === scope);
+    if (hadFocus) scopeBar.querySelector("[aria-pressed=true]")?.focus();   // Tastaturfokus bleibt im Schalter
+    const t = teams.find(x => `team:${x.id}` === shownScope);
     newBtn.disabled = t?.my_role === "lesend";
     newBtn.title = newBtn.disabled ? "Mit der Rolle Lesend lassen sich keine Projekte anlegen" : "";
   }
@@ -139,10 +149,10 @@ export default async function (main) {
   }
 
   function emptyState() {
-    const t = teams.find(x => `team:${x.id}` === scope);
+    const t = teams.find(x => `team:${x.id}` === shownScope);
     if (t) {
       return h("section", { class: "empty card" }, icon("folder", 32), `Im Team „${t.name}“ gibt es noch keine Projekte.`,
-        t.my_role === "lesend" ? null : h("button", { class: "btn sm primary", onclick: () => newProject(t.id) }, icon("plus", 16), "Neues Projekt"));
+        t.my_role === "lesend" ? null : h("button", { class: "btn sm primary", onclick: () => createHere(t.id) }, icon("plus", 16), "Neues Projekt"));
     }
     const st = (n, title, body) => h("li", {}, h("span", { class: "num" }, n), h("span", {}, h("strong", {}, title), h("br"), body));
     return h("section", { class: "card", "aria-labelledby": "start-h" },
@@ -150,7 +160,7 @@ export default async function (main) {
       h("ol", { class: "nextsteps libstart" },
         st("1", "Messunterlage drucken", h("a", { href: "/anleitung#unterlage", class: "small" }, "PDF erzeugen und richtig drucken")),
         st("2", "Werkstück fotografieren", h("a", { href: "/anleitung#fotografieren", class: "small" }, "Tipps zum Fotografieren")),
-        st("3", "Neues Projekt anlegen", h("button", { class: "btn sm primary", style: { marginTop: "6px" }, onclick: () => newProject() }, icon("plus", 16), "Neues Projekt"))));
+        st("3", "Neues Projekt anlegen", h("button", { class: "btn sm primary", style: { marginTop: "6px" }, onclick: () => createHere(null) }, icon("plus", 16), "Neues Projekt"))));
   }
 
   function thumb(p) {

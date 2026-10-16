@@ -21,6 +21,12 @@ export function validScope(stored, teams) {
   return m && (teams || []).some(t => t.id === Number(m[1])) ? `team:${Number(m[1])}` : "private";
 }
 
+// Team-ID aus einem Bereich: "team:<id>" -> Zahl, sonst null (privat)
+export function teamIdOf(scope) {
+  const m = /^team:([1-9][0-9]*)$/.exec(String(scope ?? ""));
+  return m ? Number(m[1]) : null;
+}
+
 // Zeile unter dem Namen einer Team-Karte; gelöschte und ausgetretene Ersteller heißen „ehemaliges Mitglied“
 export function creatorText(p) {
   if (p?.team_id == null) return "";

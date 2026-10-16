@@ -1,7 +1,7 @@
 // Rechte und Bereiche der Bibliothek (web/static/js/rights.js) – Aufruf: node --test tests/js/*.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ROLE_TEXT, SCOPE_KEY, creatorText, groupProjects, loadScope, projectRights, saveScope, validScope } from "../../web/static/js/rights.js";
+import { ROLE_TEXT, SCOPE_KEY, creatorText, groupProjects, loadScope, projectRights, saveScope, teamIdOf, validScope } from "../../web/static/js/rights.js";
 import { plural } from "../../web/static/js/lib.js";
 
 test("projectRights reicht p.rights des Servers durch (eine Quelle: access.allowed)", () => {
@@ -58,4 +58,9 @@ test("groupProjects: Privat zuerst, dann Teams nach Name; leere Gruppen fehlen",
 test("Rollentexte vollständig und ohne Markennamen", () => {
   assert.deepEqual(Object.keys(ROLE_TEXT), ["besitzer", "admin", "leiter", "mitglied", "lesend"]);
   assert.doesNotMatch(JSON.stringify(ROLE_TEXT), /Claude|Anthropic/i);
+});
+
+test("teamIdOf: Bereich zur Team-ID, privat und Ungültiges = null", () => {
+  assert.equal(teamIdOf("team:12"), 12);
+  for (const bad of ["private", "", null, undefined, "team:", "team:0", "team:x", "all"]) assert.equal(teamIdOf(bad), null, String(bad));
 });

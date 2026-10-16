@@ -199,7 +199,7 @@ export function projectPicker(onChange) {
     const opt = p => h("option", { value: p.id, selected: p.id === S.project.id },
       `${p.name}${p.archived ? " (archiviert)" : ""} · ${p.n_photos} Fotos · ${p.n_measurements} Maße`);
     clear(sel, groupProjects(list).map(g => h("optgroup", { label: g.label }, g.items.map(opt))),
-      h("option", { value: "new" }, "+ Neues Projekt …"), h("option", { value: "rename" }, "Projekt umbenennen …"));
+      h("option", { value: "new" }, "+ Neues Projekt …"), h("option", { value: "rename", disabled: !S.project?.rights?.write }, "Projekt umbenennen …"));
   };
   const load = () => api("/api/projects?scope=all");
   load().then(fill).catch(fail);
