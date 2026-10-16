@@ -745,6 +745,12 @@ def test_verwaltung_teamname_grenzen(app, admin):
         r = L.post("/api/teams", json={"name": bad}, headers=H)
         assert r.status_code == 400 and r.json()["detail"] == "Der Teamname enthält unzulässige Zeichen.", bad
     assert L.patch(f"/api/teams/{tid}", json={"name": "Tab\tname"}, headers=H).status_code == 400
+    for bad in ("A\u202eB", "A\u200bB", "A\u2028B", "A\u2029B", "A\ufeffB"):   # Richtungs-, Nullbreiten-, Zeilentrenner
+        r = L.post("/api/teams", json={"name": bad}, headers=H)
+        assert r.status_code == 400 and r.json()["detail"] == "Der Teamname enthält unzulässige Zeichen.", repr(bad)
+    r = L.patch(f"/api/teams/{tid}", json={"name": "Halle\u202e3"}, headers=H)
+    assert r.status_code == 400 and r.json()["detail"] == "Der Teamname enthält unzulässige Zeichen."
+    assert L.get(f"/api/teams/{tid}").json()["name"] == "Halle 2"
 
 
 def test_verwaltung_einladen_annehmen(app, admin):
@@ -929,3 +935,19 @@ def test_verwaltung_loeschen_leer_und_nicht_leer(app, admin):
     assert db.q1("SELECT COUNT(*) n FROM team_members WHERE team_id=?", (tid,))["n"] == 0
     assert L.get("/api/teams").json()["teams"] == []
     assert _last_audit("team_deleted")["detail"] == f"Team {tid} „Loeschen“ gelöscht (0 Projekte)"
+
+
+def test_verwaltung_annehmen_bei_bestehender_mitgliedschaft(app, admin):
+    """Ist der Eingeladene schon Mitglied (z. B. direkt aufgenommen), bleibt seine Rolle; das Audit sagt das wahrheitsgemaess."""
+    from app import db
+    L, M = _mk(app, admin, "vschon", "vschonm")
+    tid = _new_team(L, "Schon")
+    iid = L.post(f"/api/teams/{tid}/invites", json={"username": M.username, "role": "leiter"}, headers=H).json()["id"]
+    db.ex("INSERT INTO team_members(team_id,user_id,role,joined_at) VALUES (?,?,?,?)", (tid, M.uid, "lesend", db.now()))
+    r = M.post(f"/api/team-invites/{iid}/accept", headers=H)
+    assert r.status_code == 200 and r.json()["my_role"] == "lesend", r.text
+    assert db.q1("SELECT status FROM team_invites WHERE id=?", (iid,))["status"] == "angenommen"
+    assert db.q1("SELECT COUNT(*) n FROM team_members WHERE team_id=? AND user_id=?", (tid, M.uid))["n"] == 1
+    a = _last_audit("team_invite_accepted")
+    assert a["detail"] == f"Team {tid} „Schon“: {M.username} hat angenommen, war bereits Mitglied (Lesend)", a["detail"]
+    assert "beigetreten" not in a["detail"]

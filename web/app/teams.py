@@ -31,7 +31,8 @@ def _clean_name(raw: str) -> str:
     name = (raw or "").strip()
     if not 1 <= len(name) <= 80:
         raise HTTPException(400, "Der Teamname muss 1 bis 80 Zeichen lang sein.")
-    if any(unicodedata.category(ch) == "Cc" for ch in name):   # Steuerzeichen (Zeilenumbruch, Tab, NUL …)
+    # Steuerzeichen (Zeilenumbruch, Tab, NUL …), Format- (Richtung, Nullbreite) und Zeilen-/Absatztrenner
+    if any(unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp") for ch in name):
         raise HTTPException(400, "Der Teamname enthält unzulässige Zeichen.")
     return name
 
@@ -152,12 +153,14 @@ def team_get(tid: int, u: dict = Depends(auth.require_user)):
 
 @router.patch("/api/teams/{tid}")
 def team_rename(tid: int, body: TeamIn, request: Request, u: dict = Depends(auth.require_user)):
-    t = access.require_team(u, tid, "leiter")
+    access.require_team(u, tid, "leiter")
     name = _clean_name(body.name)
-    if name != t["name"]:
-        db.ex("UPDATE teams SET name=? WHERE id=?", (name, tid))
-        _audit("team_renamed", f"Team {tid}: „{t['name']}“ → „{name}“", u, request)
-    t = access.require_team(u, tid, "leiter")
+    with db.atomic():   # Leiter in der Transaktion erneut pruefen: kein Wettlauf mit Herabstufen oder Austritt
+        t = access.require_team(u, tid, "leiter")
+        if name != t["name"]:
+            db.ex("UPDATE teams SET name=? WHERE id=?", (name, tid))
+            _audit("team_renamed", f"Team {tid}: „{t['name']}“ → „{name}“", u, request)
+        t = access.require_team(u, tid, "leiter")
     return detail(t, t["my_role"], True)
 
 
@@ -218,11 +221,14 @@ def team_invite_accept(iid: int, request: Request, u: dict = Depends(auth.requir
         inv = _my_invite(iid, u)
         t = db.q1("SELECT * FROM teams WHERE id=?", (inv["team_id"],))
         db.ex("UPDATE team_invites SET status='angenommen', decided_at=? WHERE id=?", (db.now(), iid))
-        if not access.team_role(u["id"], t["id"]):
+        have = access.team_role(u["id"], t["id"])
+        if have:      # schon Mitglied (z. B. vom Admin direkt aufgenommen): Rolle bleibt, die Einladung ist erledigt
+            text = f"hat angenommen, war bereits Mitglied ({ROLE_TEXT[have]})"
+        else:
             db.ex("INSERT INTO team_members(team_id,user_id,role,joined_at) VALUES (?,?,?,?)",
                   (t["id"], u["id"], inv["role"], db.now()))
-        _audit("team_invite_accepted", f"{team_text(t)}: {u['username']} ist beigetreten ({ROLE_TEXT[inv['role']]})",
-               u, request)
+            text = f"ist beigetreten ({ROLE_TEXT[inv['role']]})"
+        _audit("team_invite_accepted", f"{team_text(t)}: {u['username']} {text}", u, request)
     t = access.require_team(u, inv["team_id"], "lesend")
     return detail(t, t["my_role"], t["my_role"] == "leiter")
 
