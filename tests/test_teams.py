@@ -1523,6 +1523,39 @@ def test_benutzer_startup_raeumt_waisen(app, admin):
     assert "projects.sweep()" in inspect.getsource(main._startup)
 
 
+def test_benutzer_startup_meldet_aufgeraeumtes(app, admin, capsys):
+    """Gesamtreview S-1: der Start meldet, wie viele Auftraege und Fotoordner er entfernt hat."""
+    from app import config, db, projects
+    waise = _job(None, None)
+    d = config.DATA_DIR / "photos" / "987654322"
+    d.mkdir(parents=True, exist_ok=True)
+    capsys.readouterr()
+    projects.sweep()
+    out = capsys.readouterr().out
+    assert db.q1("SELECT id FROM jobs WHERE id=?", (waise,)) is None and not d.exists()
+    assert "1 Auftrag" in out and "1 Fotoordner" in out, out
+    projects.sweep()
+    assert capsys.readouterr().out == ""                    # nichts entfernt -> keine Zeile
+
+
+def test_benutzer_startup_leere_fototabelle_loescht_keine_ordner(tmp_path, monkeypatch, capsys):
+    """Gesamtreview S-1: hat die Tabelle photos keine Zeile (Datenbank und Volume passen nicht zusammen), bleiben
+    alle Fotoordner stehen."""
+    from app import config, db, projects
+    c = db._open(tmp_path / "leer.db")
+    monkeypatch.setattr(db, "_conn", c)
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
+    d = tmp_path / "data" / "photos" / "5"
+    d.mkdir(parents=True)
+    (d / "thumb.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+    try:
+        projects.sweep()
+    finally:
+        c.close()
+    assert (d / "thumb.jpg").is_file()
+    assert "photos" in capsys.readouterr().out
+
+
 def test_verwaltung_audit_namen_in_actions():
     """Spec §3: alle Audit-Namen der Teams in ACTIONS (app.js); Seite /teams und Admin-Reiter sind angebunden."""
     root = Path(__file__).resolve().parents[1] / "web/static/js"

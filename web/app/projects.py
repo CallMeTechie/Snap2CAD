@@ -48,13 +48,24 @@ def delete_projects(pids: list[int], then: Callable[[], None] | None = None,
 
 def sweep() -> None:
     """Serverstart (Plan, Lueckenfuellung 22): Auftraege ohne Ersteller und ohne Projekt – Spec §2 schliesst sie aus,
-    ohne Ersteller haben sie keinen Empfaenger – per jobs.delete und Fotoordner photos/<id> ohne Zeile entfernen."""
+    ohne Ersteller haben sie keinen Empfaenger – per jobs.delete und Fotoordner photos/<id> ohne Zeile entfernen.
+    Hat die Tabelle photos keine einzige Zeile, bleiben alle Ordner stehen (Schutz, wenn Datenbank und Volume nicht
+    zusammenpassen, Gesamtreview S-1). Was entfernt wurde, steht als eine Zeile im Startprotokoll."""
+    n_jobs = 0
     for j in db.q("SELECT * FROM jobs WHERE user_id IS NULL AND project_id IS NULL"):
         jobs.delete(j)
+        n_jobs += 1
     root = config.DATA_DIR / "photos"
-    if not root.is_dir():
-        return
-    known = {r["id"] for r in db.q("SELECT id FROM photos")}
-    for d in root.iterdir():
-        if d.is_dir() and d.name.isascii() and d.name.isdigit() and int(d.name) not in known:
-            shutil.rmtree(d, ignore_errors=True)
+    stale = []
+    if root.is_dir():
+        known = {r["id"] for r in db.q("SELECT id FROM photos")}
+        stale = [d for d in root.iterdir() if d.is_dir() and d.name.isascii() and d.name.isdigit() and int(d.name) not in known]
+        if stale and not known:
+            print(f"Aufräumen: {len(stale)} Fotoordner ohne Zeile, die Tabelle photos ist aber leer – nichts gelöscht"
+                  " (passen Datenbank und Datenordner zusammen?).", flush=True)
+            stale = []
+    for d in stale:
+        shutil.rmtree(d, ignore_errors=True)
+    if n_jobs or stale:
+        print(f"Aufräumen: {n_jobs} {'Auftrag' if n_jobs == 1 else 'Aufträge'} ohne Ersteller und Projekt, "
+              f"{len(stale)} Fotoordner ohne Zeile entfernt.", flush=True)
