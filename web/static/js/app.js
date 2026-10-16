@@ -193,7 +193,7 @@ export async function ensureProject(force = false) {
   if (S.project && !force) return S.project;
   const pid = rememberedProjectId();
   if (pid) {
-    try { S.project = await api(`/api/projects/${pid}`); return S.project; } catch { /* weiter */ }
+    try { S.project = await api(`/api/projects/${pid}`); return S.project; } catch (e) { if (e.handled) throw e; }  // offenes Projekt weg: Hook hat gemeldet und navigiert
   }
   S.project = await api("/api/projects/current");
   rememberProject();
