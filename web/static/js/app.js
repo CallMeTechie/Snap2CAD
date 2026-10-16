@@ -60,7 +60,7 @@ async function render() {
 }
 
 // ------------------------------------------------------------------ Kopfzeile
-const STEPS = [["/", "Unterlage"], ["/fotos", "Fotos prüfen"], ["/messen", "Messen"], ["/cad", "CAD-Modell"]];
+const STEPS = [["/", "Projekte"], ["/fotos", "Fotos prüfen"], ["/messen", "Messen"], ["/cad", "CAD-Modell"]];
 
 function statusPill() {
   const st = S.status || {};
@@ -765,7 +765,7 @@ async function showLink(title, link, text) {
 }
 
 // ------------------------------------------------------------------ Arbeitsschritte (Module)
-route(/^\/$/, async main => (await import("./mat.js")).default(main), { step: 1 });
+route(/^\/$/, async main => (await import("./library.js")).default(main), { step: 1 });
 route(/^\/fotos$/, async main => (await import("./photos.js")).default(main), { step: 2 });
 route(/^\/messen$/, async (main) => (await import("./measure.js")).default(main), { step: 3, bare: false });
 route(/^\/cad$/, async main => (await import("./cad.js")).form(main), { step: 4 });
