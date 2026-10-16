@@ -2,6 +2,7 @@
 import itertools
 import re
 import sqlite3
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1533,3 +1534,315 @@ def test_verwaltung_audit_namen_in_actions():
     assert 'route(/^\\/teams$/' in src and "einstellungen|teams" in src
     tj = (root / "teams.js").read_text(encoding="utf-8")
     assert "export async function adminTab(main)" in tj and "export default async function (main)" in tj
+
+
+# ------------------------------------------------------------------ T5: Kopieren
+
+def _jpg(path, w=40, h=30):
+    import cv2
+    import numpy as np
+    ok, data = cv2.imencode(".jpg", np.full((h, w, 3), 128, np.uint8))
+    assert ok
+    path.write_bytes(data.tobytes())
+
+
+def _copy_source(uid, team_id=None):
+    """Quellprojekt: zwei Fotos (top; bottom mit bottom_align auf top) mit Dateien, einer *.tmp-Datei und einem
+    symbolischen Link nach aussen, Teile mit refs/same_as, Messungen, Werte und zwei Auftraege (aktuelle Version 2 ok
+    mit STL; aktuelle Version failed)."""
+    from app import config, db, parts
+    from test_library import _cube_tris, _write_bin
+    pid = db.ex("INSERT INTO projects(user_id,team_id,name,created_at,ctrl_x,ctrl_y,color,material,transparent,finish,"
+                "material_user,cad_check) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (uid, team_id, "Halter", db.now(), 100.3, 229.5, "silber", "Aluminium", 0, "matt", 1, '{"hash": "x"}'))
+    rect = {"w_mm": 190, "h_mm": 230}
+    top = db.ex("INSERT INTO photos(project_id,filename,view,format,status,max_err,analysis,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (pid, "oben.jpg", "top", "A4", "gut", 0.3, db.jdump({"rect": rect}), db.now()))
+    bot = db.ex("INSERT INTO photos(project_id,filename,view,format,status,max_err,analysis,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (pid, "unten.jpg", "bottom", "A4", "gut", 0.4, db.jdump({"rect": rect, "bottom_align": {
+                    "rot": 0, "dx": 1.5, "dy": 0.0, "auto": True, "top_photo_id": top}}), db.now()))
+    for phid in (top, bot):
+        d = config.DATA_DIR / "photos" / str(phid)
+        d.mkdir(parents=True, exist_ok=True)
+        for n in ("orig.jpg", "rect.jpg", "thumb.jpg", "rect_top.jpg"):
+            _jpg(d / n)
+        (d / "edges.json").write_text('{"segments": []}', encoding="utf-8")
+        (d / "rest.tmp").write_bytes(b"halb")
+        geheim = config.DATA_DIR / "geheim.txt"                     # Ziel ausserhalb des Fotoordners
+        geheim.write_text("nicht kopieren", encoding="utf-8")
+        (d / "fremd.jpg").unlink(missing_ok=True)
+        (d / "fremd.jpg").symlink_to(geheim)
+    p_top = parts.create_part(pid, top, "Platte", "body", POLY)
+    p_bot = parts.create_part(pid, bot, "Platte unten", "body", POLY)
+    m1 = db.ex("INSERT INTO measurements(project_id,photo_id,part_id,seq,label,kind,value,unit,caliper,data,source,created_at) "
+               "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (pid, top, p_top, 1, "Länge", "length", 80.0, "mm", 80.1,
+                                                     db.jdump({"view": "top", "points": [[0, 0], [80, 0]]}), "user", db.now()))
+    m2 = db.ex("INSERT INTO measurements(project_id,seq,label,kind,value,unit,data,source,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+               (pid, 2, "Dicke", "length", 6.0, "mm", "{}", "manual", db.now()))
+    for part_id, extra in ((p_top, {"refs": [m1]}), (p_bot, {"same_as": p_top})):
+        d = db.jload(db.q1("SELECT data FROM parts WHERE id=?", (part_id,))["data"])
+        db.ex("UPDATE parts SET data=? WHERE id=?", (db.jdump({**d, **extra}), part_id))
+    pdir = config.DATA_DIR / "photos"
+    msgs = [{"role": "user", "content": [
+        {"type": "text", "text": "# Auftrag: Halter"},
+        {"type": "image_ref", "path": str(pdir / str(top) / "rect.jpg")},
+        {"type": "text", "text": f"Foto {top} (Draufsicht), entzerrt auf die Unterlage"},
+        {"type": "image_ref", "path": str(pdir / str(bot) / "rect_top.jpg")},
+        {"type": "text", "text": f"Foto {bot} (von unten), entzerrt"},
+        {"type": "image_ref", "path": str(pdir / "999999" / "rect.jpg")},
+        {"type": "text", "text": "Foto 999999 (Draufsicht), entzerrt auf die Unterlage"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "Hier ist das Modell."}]},
+        {"role": "user", "content": [{"type": "text", "text": "Änderungswunsch zu Version 1: dicker"}]}]
+    j1 = db.ex("INSERT INTO jobs(user_id,project_id,name,request,status,messages,current_version,created_at,updated_at) "
+               "VALUES (?,?,?,?,?,?,?,?,?)", (uid, pid, "Halter", db.jdump({"photo_ids": [top, bot, 999999], "part_id": p_top,
+                                                                             "process": "fdm"}),
+                                              "done", db.jdump(msgs), 2, db.now(), db.now()))
+    for v, trig in ((1, "create"), (2, "iterate")):
+        db.ex("INSERT INTO job_versions(job_id,version,trigger,request_text,code,claude_text,meta,status,result,checks,usage,"
+              "seconds,created_at,user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+              (j1, v, trig, "", f"X = {v}\n", "Antwort", db.jdump(META), "ok", db.jdump({"bbox": [10.0, 10.0, 10.0]}),
+               db.jdump([{"id": "watertight", "state": "ok"}]), "{}", 1.5, db.now(), uid))
+    vdir = config.DATA_DIR / "jobs" / str(j1) / "v2"
+    vdir.mkdir(parents=True, exist_ok=True)
+    _write_bin(vdir / "model.stl", _cube_tris())
+    (vdir / "model.py").write_text("X = 2\n", encoding="utf-8")
+    (vdir / "model.stl.123.tmp").write_bytes(b"halb")
+    j2 = _job(uid, pid, version_status="failed")
+    for label, job_id, dim_id in (("Höhe", j1, "D2"), ("Breite", None, None)):
+        db.ex("INSERT INTO model_dims(project_id,label,label_norm,grp,value,job_id,dim_id,created_at) VALUES (?,?,?,?,?,?,?,?)",
+              (pid, label, label.lower(), "aussen", 45.0, job_id, dim_id, db.now()))
+    return {"pid": pid, "top": top, "bot": bot, "p_top": p_top, "p_bot": p_bot, "m1": m1, "m2": m2, "j1": j1, "j2": j2}
+
+
+def _src_state(pid):
+    """Zeilen und Dateien des Quellprojekts (Vergleich vorher/nachher)."""
+    from app import config, db
+    rows = {t: db.q(f"SELECT * FROM {t} WHERE project_id=? ORDER BY id", (pid,))
+            for t in ("photos", "parts", "measurements", "model_dims", "jobs")}
+    rows["project"] = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
+    rows["versions"] = db.q("SELECT v.* FROM job_versions v JOIN jobs j ON j.id=v.job_id WHERE j.project_id=? ORDER BY v.id",
+                            (pid,))
+    files = []
+    for kind in ("photos", "jobs"):
+        for r in rows[kind]:
+            files += sorted(str(p.relative_to(config.DATA_DIR)) for p in (config.DATA_DIR / kind / str(r["id"])).rglob("*"))
+    return rows, files
+
+
+def _counts():
+    from app import db
+    return {t: db.q1(f"SELECT COUNT(*) n FROM {t}")["n"]
+            for t in ("projects", "photos", "parts", "measurements", "model_dims", "jobs", "job_versions", "job_log")}
+
+
+def _dirs():
+    from app import config
+    return {k: {p.name for p in (config.DATA_DIR / k).iterdir()} for k in ("photos", "jobs")}
+
+
+def _tmp_left():
+    from app import config
+    t = config.DATA_DIR / "tmp"
+    return sorted(p.name for p in t.glob("copy-*")) if t.is_dir() else []
+
+
+def _wait_job(c, jid, timeout=60):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        j = c.get(f"/api/jobs/{jid}").json()
+        if j["status"] not in ("queued", "running"):
+            return j
+        time.sleep(0.2)
+    raise AssertionError(f"Auftrag {jid} nicht fertig")
+
+
+def _user_row(c):
+    from app import db
+    return db.q1("SELECT * FROM users WHERE id=?", (c.uid,))
+
+
+def test_kopieren_alles_mit_neuen_ids(app, admin):
+    from app import auth, config, db, projcopy
+    L, M = _mk(app, admin, "koleiter", "komitgl")
+    tid = _team("Kopie", {L.uid: "leiter", M.uid: "mitglied"})
+    src = _copy_source(L.uid, tid)
+    vorher = _src_state(src["pid"])
+    usage = auth.usage_this_month(M.uid)
+    new = projcopy.copy_project(_user_row(M), src["pid"], None, None)
+    assert _src_state(src["pid"]) == vorher                                   # Quelle unveraendert
+    assert auth.usage_this_month(M.uid) == usage                              # kein KI-Aufruf, kein Kontingent
+    p = db.q1("SELECT * FROM projects WHERE id=?", (new,))
+    assert (p["name"], p["user_id"], p["team_id"], p["cad_check"], p["archived"]) == ("Halter (Kopie)", M.uid, None, None, 0)
+    assert (p["ctrl_x"], p["ctrl_y"], p["color"], p["material"], p["transparent"], p["finish"], p["material_user"]) == \
+        (100.3, 229.5, "silber", "Aluminium", 0, "matt", 1)
+    ph = db.q("SELECT * FROM photos WHERE project_id=? ORDER BY id", (new,))
+    pmap = {src["top"]: ph[0]["id"], src["bot"]: ph[1]["id"]}
+    assert not set(pmap.values()) & {src["top"], src["bot"]}
+    assert [(x["filename"], x["view"], x["format"], x["status"]) for x in ph] == [("oben.jpg", "top", "A4", "gut"),
+                                                                                ("unten.jpg", "bottom", "A4", "gut")]
+    al = db.jload(ph[1]["analysis"])["bottom_align"]
+    assert al["top_photo_id"] == pmap[src["top"]] and al["dx"] == 1.5
+    for n in pmap.values():
+        assert sorted(f.name for f in (config.DATA_DIR / "photos" / str(n)).iterdir()) == \
+            ["edges.json", "orig.jpg", "rect.jpg", "rect_top.jpg", "thumb.jpg"]               # ohne *.tmp und Link
+    pt = db.q("SELECT * FROM parts WHERE project_id=? ORDER BY id", (new,))
+    ms = db.q("SELECT * FROM measurements WHERE project_id=? ORDER BY id", (new,))
+    tmap = {src["p_top"]: pt[0]["id"], src["p_bot"]: pt[1]["id"]}
+    mmap = {src["m1"]: ms[0]["id"], src["m2"]: ms[1]["id"]}
+    assert [(t["photo_id"], t["seq"], t["label"]) for t in pt] == [(pmap[src["top"]], 1, "Platte"),
+                                                                  (pmap[src["bot"]], 2, "Platte unten")]
+    d_top, d_bot = (db.jload(t["data"]) for t in pt)
+    assert d_top["refs"] == [mmap[src["m1"]]] and d_bot["same_as"] == tmap[src["p_top"]]
+    assert [(m["photo_id"], m["part_id"], m["seq"], m["caliper"]) for m in ms] == \
+        [(pmap[src["top"]], tmap[src["p_top"]], 1, 80.1), (None, None, 2, None)]
+    js = db.q("SELECT * FROM jobs WHERE project_id=?", (new,))
+    assert len(js) == 1                                                       # nur der Auftrag mit gueltiger Version
+    j = js[0]
+    assert (j["user_id"], j["run_by"], j["status"], j["current_version"], j["name"]) == (M.uid, M.uid, "done", 1, "Halter")
+    vs = db.q("SELECT * FROM job_versions WHERE job_id=?", (j["id"],))
+    sv = db.q1("SELECT * FROM job_versions WHERE job_id=? AND version=2", (src["j1"],))
+    assert len(vs) == 1 and (vs[0]["version"], vs[0]["trigger"], vs[0]["status"], vs[0]["user_id"]) == (1, "copy", "ok", M.uid)
+    assert [vs[0][k] for k in ("code", "meta", "result", "checks")] == [sv[k] for k in ("code", "meta", "result", "checks")]
+    vdir = config.DATA_DIR / "jobs" / str(j["id"]) / "v1"
+    assert sorted(f.name for f in vdir.iterdir()) == ["model.py", "model.stl"]
+    req = db.jload(j["request"])
+    assert (req["photo_ids"], req["part_id"], req["process"]) == ([pmap[src["top"]], pmap[src["bot"]]], tmap[src["p_top"]], "fdm")
+    msgs = db.jload(j["messages"])
+    assert len(msgs) == 1 and msgs[0]["role"] == "user"
+    refs = [b["path"] for b in msgs[0]["content"] if b["type"] == "image_ref"]
+    assert refs == [str(config.DATA_DIR / "photos" / str(pmap[src["top"]]) / "rect.jpg"),
+                    str(config.DATA_DIR / "photos" / str(pmap[src["bot"]]) / "rect_top.jpg")]
+    assert all(Path(x).is_file() for x in refs)
+    assert [b["text"] for b in msgs[0]["content"] if b["type"] == "text"] == [
+        "# Auftrag: Halter", f"Foto {pmap[src['top']]} (Draufsicht), entzerrt auf die Unterlage",
+        f"Foto {pmap[src['bot']]} (von unten), entzerrt"]                       # Bild 999999 samt Beschriftung entfallen
+    assert db.q("SELECT label, job_id, dim_id FROM model_dims WHERE project_id=? ORDER BY id", (new,)) == \
+        [{"label": "Höhe", "job_id": j["id"], "dim_id": "D2"}, {"label": "Breite", "job_id": None, "dim_id": None}]
+    assert [r["msg"] for r in db.q("SELECT msg FROM job_log WHERE job_id=?", (j["id"],))] == \
+        [f"Kopie von Auftrag {src['j1']}, Version 2"]
+    r = M.get(f"/api/jobs/{j['id']}/v/1/preview.png")
+    assert r.status_code == 200 and r.content[:8] == b"\x89PNG\r\n\x1a\n"     # Modellbild der Kopie
+    assert _tmp_left() == []
+
+
+def test_kopieren_aenderungswunsch_findet_bilder(app, admin, monkeypatch):
+    """Ein Aenderungswunsch am kopierten Auftrag findet alle Bilder: _materialize laedt jeden image_ref-Pfad."""
+    from app import ai, db, projcopy, sandbox
+    (L,) = _mk(app, admin, "koaend")
+    db.ex("UPDATE users SET cad_quota=-1 WHERE id=?", (L.uid,))
+    src = _copy_source(L.uid)
+    new = projcopy.copy_project(_user_row(L), src["pid"], None, None)
+    jid = db.q1("SELECT id FROM jobs WHERE project_id=?", (new,))["id"]
+    seen, real = [], ai.call
+
+    def call(system, messages, **kw):
+        seen.append(ai._materialize(messages))        # liest jedes Bild; ein fehlender Pfad wirft
+        return real(system, messages, **kw)
+
+    def run(code, dest, cancel=None):
+        dest.mkdir(parents=True, exist_ok=True)
+        return {"ok": True, "seconds": 0.1, "result": {"valid": True, "solids": 1, "bbox": [80.0, 50.0, 6.0],   # wie _FAKE_V1
+                                                      "stl": {"triangles": 12, "watertight": True}}}
+    monkeypatch.setattr(ai, "call", call)
+    monkeypatch.setattr(sandbox, "run", run)
+    r = L.post(f"/api/jobs/{jid}/iterate", json={"text": "Dicke 8 mm"}, headers=H)
+    assert r.status_code == 200, r.text
+    j = _wait_job(L, jid)
+    assert j["status"] == "done", j
+    assert len([b for b in seen[0][0]["content"] if b["type"] == "image"]) == 2
+
+
+@pytest.mark.parametrize("change", ["foto_geloescht", "analysis_geaendert"])
+def test_kopieren_quelle_geaendert_409(app, admin, monkeypatch, change):
+    """Aenderung zwischen (1) und (2): 409 ohne Rueckstaende (keine Zeilen, keine neuen Ordner, kein tmp/copy-*)."""
+    import shutil
+
+    from fastapi import HTTPException
+
+    from app import db, projcopy
+    (L,) = _mk(app, admin, f"ko{change[:5]}")
+    src = _copy_source(L.uid)
+    real, done = shutil.copytree, []
+
+    def copytree(s, d, **kw):
+        out = real(s, d, **kw)
+        if not done:
+            done.append(1)
+            if change == "foto_geloescht":
+                db.ex("DELETE FROM photos WHERE id=?", (src["bot"],))
+            else:
+                db.ex("UPDATE photos SET analysis=? WHERE id=?", (db.jdump({"rect": {"w_mm": 190, "h_mm": 230}, "neu": 1}),
+                                                                   src["top"]))
+        return out
+    monkeypatch.setattr(shutil, "copytree", copytree)
+    before, dirs = _counts(), _dirs()
+    with pytest.raises(HTTPException) as e:
+        projcopy.copy_project(_user_row(L), src["pid"], None, None)
+    assert (e.value.status_code, e.value.detail) == (409, projcopy.CHANGED)
+    after = _counts()
+    assert (after["projects"], after["jobs"], after["job_versions"]) == (before["projects"], before["jobs"],
+                                                                         before["job_versions"])
+    assert _dirs()["photos"] <= dirs["photos"] and _dirs()["jobs"] == dirs["jobs"]
+    assert _tmp_left() == []
+
+
+@pytest.mark.parametrize("step", ["1", "2", "3"])
+def test_kopieren_fehler_hinterlaesst_nichts(app, admin, monkeypatch, step):
+    """Erzwungene Fehler in (1) copytree, (2) in der Transaktion und (3) os.rename: keine Zeilen, keine neuen Ordner unter
+    photos/ und jobs/, kein tmp/copy-*."""
+    import os
+    import shutil
+
+    from fastapi import HTTPException
+
+    from app import jobs, projcopy
+    (L,) = _mk(app, admin, f"kofehl{step}")
+    src = _copy_source(L.uid)
+    if step == "1":
+        def boom(*a, **kw):
+            raise OSError("Platte voll")
+        monkeypatch.setattr(shutil, "copytree", boom)
+    elif step == "2":
+        def boom(*a, **kw):
+            raise RuntimeError("Testfehler in der Transaktion")
+        monkeypatch.setattr(jobs, "log", boom)
+    else:
+        real, calls = os.rename, []
+
+        def rename(a, b):
+            calls.append(1)
+            if len(calls) == 2:
+                raise OSError("Umbenennen fehlgeschlagen")
+            return real(a, b)
+        monkeypatch.setattr(os, "rename", rename)
+    before, dirs = _counts(), _dirs()
+    with pytest.raises((HTTPException, RuntimeError)) as e:
+        projcopy.copy_project(_user_row(L), src["pid"], None, None)
+    if step != "2":
+        assert (e.value.status_code, e.value.detail) == (500, projcopy.FAILED)
+    assert _counts() == before
+    assert _dirs() == dirs
+    assert _tmp_left() == []
+
+
+def test_kopieren_name_leer_und_lang(app, admin):
+    """Review Focus 5: leerer Name -> „<Name> (Kopie)“, auf 120 Zeichen gekuerzt; eigener Name getrimmt."""
+    from app import db, projcopy
+    (L,) = _mk(app, admin, "koname")
+    pid = _project(L.uid, name="x" * 118)
+    a = projcopy.copy_project(_user_row(L), pid, None, "   ")
+    assert db.q1("SELECT name FROM projects WHERE id=?", (a,))["name"] == ("x" * 118 + " (Kopie)")[:120]
+    b = projcopy.copy_project(_user_row(L), pid, None, "  Eigen  ")
+    assert db.q1("SELECT name FROM projects WHERE id=?", (b,))["name"] == "Eigen"
+
+
+def test_kopieren_startup_raeumt_tmp():
+    import inspect
+
+    from app import config, main, projcopy
+    d = config.DATA_DIR / "tmp" / "copy-alt"
+    (d / "photos").mkdir(parents=True, exist_ok=True)
+    (config.DATA_DIR / "tmp" / "anderes").mkdir(exist_ok=True)
+    projcopy.cleanup_tmp()
+    assert not d.exists() and (config.DATA_DIR / "tmp" / "anderes").exists()
+    assert "projcopy.cleanup_tmp()" in inspect.getsource(main._startup)

@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from . import access, ai, auth, check, config, db, geom, jobs, parts, preview, projects, sandbox, settings, teams
+from . import access, ai, auth, check, config, db, geom, jobs, parts, preview, projcopy, projects, sandbox, settings, teams
 
 sys.path.insert(0, str(config.ROOT))
 from core import edges, matgen, vision  # noqa: E402
@@ -43,6 +43,7 @@ def _startup():
     auth.ensure_admin()
     auth.purge_expired()
     jobs.startup()
+    projcopy.cleanup_tmp()   # Reste abgebrochener Kopien (Spec Teams §4)
     projects.sweep()   # Auftraege ohne Ersteller und Projekt, Fotoordner ohne Zeile (Plan, Lueckenfuellung 22)
     ki = "Testmodus" if config.AI_FAKE else {"env": "an (Umgebung)", "db": "an", "none": "aus",
                                              "locked": "aus (Schlüssel nicht entschlüsselbar)"}[settings.api_key_source()]
