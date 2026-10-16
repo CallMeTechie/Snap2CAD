@@ -198,17 +198,19 @@ Routen (alle angemeldet, CSRF wie üblich):
 - Löschen eines Team-Projekts löscht wie heute Fotos/Messungen/Teile/Werte; Aufträge bleiben mit `project_id = NULL` beim
   jeweiligen Ersteller (wie heute bei privaten Projekten); Aufträge, deren Ersteller gelöscht ist (`user_id` leer),
   werden mitgelöscht (`jobs.delete`), damit keine Aufträge ohne Projekt und ohne Ersteller entstehen. Gleiches gilt beim
-  Löschen eines Teams durch den Admin. `jobs.delete` läuft nie innerhalb von `db.atomic`.
+  Löschen eines Teams durch den Admin. `jobs.delete` läuft nie innerhalb von `db.atomic`, sondern erst nach dem COMMIT
+  für die in der Transaktion gesammelten Aufträge; scheitert die erneute Rechteprüfung, bleibt alles erhalten.
 
 ## §5 Admin
 
 - Reiter **„Teams“** in der Benutzerverwaltung: Liste aller Teams (Name, Leiter, Mitglieder, Projektzahl, angelegt),
   Kennzeichen „ohne Leiter“. Je Team: Mitglieder mit Rollen; Rolle setzen (auch Leiter ernennen), Mitglied entfernen,
   Einladungen zurückziehen, **Team löschen** – auch mit Projekten nach Rückfrage mit Eingabe des Teamnamens; dabei werden
-  die Projekte wie beim Projekt-Löschen (§4) entfernt: (1) Aufträge ohne Ersteller in diesen Projekten per `jobs.delete`
-  – außerhalb von `db.atomic`, weil `jobs.delete` `jobs._lock` nimmt und `jobs` die Sperren in umgekehrter Reihenfolge
-  nimmt; (2) in einer Transaktion (`db.atomic`) Foto-ids sammeln, Projektzeilen und Team löschen; (3) nach dem COMMIT die
-  Fotoordner entfernen. Alle übrigen Aufträge bleiben bei ihren Erstellern ohne Projekt.
+  die Projekte wie beim Projekt-Löschen (§4) entfernt: (1) in einer Transaktion (`db.atomic`) Rechte bzw. Projektliste
+  erneut prüfen (bei einem Wettlauf wird nichts gelöscht, auch kein Auftrag), die ids der Aufträge ohne Ersteller und
+  die Foto-ids sammeln, Projektzeilen und Team löschen; (2) nach dem COMMIT die gesammelten Aufträge per `jobs.delete` –
+  außerhalb von `db.atomic`, weil `jobs.delete` `jobs._lock` nimmt und `jobs` die Sperren in umgekehrter Reihenfolge
+  nimmt – und die Fotoordner entfernen. Alle übrigen Aufträge bleiben bei ihren Erstellern ohne Projekt.
   Audit `team_deleted` mit Projektzahl. Die Route der Benutzerverwaltung (`app.js`, Regex
   `^/admin(?:/(einladungen|protokoll|einstellungen))?$`) erhält `teams`.
 - **Benutzer direkt aufnehmen** (Marc, 16.10.2026): `POST /api/admin/teams/{tid}/members {username, role}` mit
