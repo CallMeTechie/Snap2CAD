@@ -648,7 +648,10 @@ route(/^\/auftraege$/, async main => {
   const qs = new URLSearchParams(location.search);
   const team = teamQuery(location.search);   // Spec Teams §7: Filter „Meine · <Team A> · …“
   const all = !team && qs.get("alle") === "1" && isAdmin;
-  const tl = await api("/api/teams").catch(() => ({ teams: [] }));
+  const jobsUrl = `/api/jobs${team ? `?team=${team}` : all ? "?all=1" : ""}`;
+  const settle = pr => pr.then(list => ({ list }), err => ({ err }));
+  // Teams und erste Auftragsliste parallel laden; die Antwort auf die Aufträge wertet load() aus (404 wie bisher)
+  const [tl, first] = await Promise.all([api("/api/teams").catch(() => ({ teams: [] })), settle(api(jobsUrl))]);
   const tName = tl.teams.find(t => t.id === team)?.name || "";
   const box = h("div", { class: "card", style: { padding: "0", gap: "0" } });
   const filter = tl.teams.length ? h("div", { class: "chips", role: "group", "aria-label": "Aufträge filtern" },
@@ -659,10 +662,13 @@ route(/^\/auftraege$/, async main => {
   h("div", { class: "chips" }, isAdmin && !team ? h("label", { class: "check" }, h("input", { type: "checkbox", checked: all, onchange: e => go(e.target.checked ? "/auftraege?alle=1" : "/auftraege") }), "Aufträge aller Benutzer") : null,
     h("a", { class: "btn primary", href: "/cad" }, icon("plus"), "Neuer Auftrag"))), filter, box);
   const showUser = all || !!team;
-  const load = async () => {
+  const load = async (pre = null) => {
     let list;
-    try { list = await api(`/api/jobs${team ? `?team=${team}` : all ? "?all=1" : ""}`); }
-    catch (e) {
+    try {
+      const r = pre ?? await settle(api(jobsUrl));
+      if (r.err) throw r.err;
+      list = r.list;
+    } catch (e) {
       if (e.status !== 404) throw e;
       clear(box, h("div", { class: "empty" }, "Dieses Team gibt es nicht mehr, oder du bist kein Mitglied.", h("a", { class: "btn", href: "/auftraege" }, "Meine Aufträge")));
       return [];
@@ -683,7 +689,7 @@ route(/^\/auftraege$/, async main => {
         } }, icon("trash", 16)))))))));
     return list;
   };
-  const list = await load();
+  const list = await load(first);
   if (!main.isConnected) return;   // währenddessen weitergeklickt: keinen Takt für eine abgehängte Seite starten
   if (list.some(j => j.status === "running" || j.status === "queued")) {
     const t = setInterval(() => load().then(l => { if (!l.some(j => j.status === "running" || j.status === "queued")) clearInterval(t); }).catch(() => {}), 3000);

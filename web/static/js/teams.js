@@ -165,16 +165,15 @@ export default async function (main) {
     return card;
   }
 
-  const r = await api("/api/teams");
-  let det = null;
-  if (open) {
-    try { det = await api(`/api/teams/${open}`); }
-    catch (e) {
-      if (e.status === 404) toast("Dieses Team gibt es nicht mehr, oder du bist kein Mitglied.", "err");
-      else fail(e);   // Liste bleibt sichtbar
-    }
-  }
+  // Liste und geöffnetes Team parallel; ein Fehler beim Team lässt die Liste stehen
+  const [r, one] = await Promise.all([api("/api/teams"),
+    open ? api(`/api/teams/${open}`).then(det => ({ det }), err => ({ err })) : { det: null }]);
   if (!main.isConnected) return;
+  const det = one.det ?? null;
+  if (one.err) {
+    if (one.err.status === 404) toast("Dieses Team gibt es nicht mehr, oder du bist kein Mitglied.", "err");
+    else fail(one.err);   // Liste bleibt sichtbar
+  }
   clear(box, r.invites.length ? invitesCard(r.invites) : null, teamsCard(r.teams), det ? detailCard(det) : null);
 }
 
