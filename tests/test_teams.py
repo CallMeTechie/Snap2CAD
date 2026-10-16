@@ -1786,10 +1786,10 @@ def test_kopieren_quelle_geaendert_409(app, admin, monkeypatch, change):
     assert _tmp_left() == []
 
 
-@pytest.mark.parametrize("step", ["1", "2", "3"])
+@pytest.mark.parametrize("step", ["1", "2", "3", "3-auftrag"])
 def test_kopieren_fehler_hinterlaesst_nichts(app, admin, monkeypatch, step):
-    """Erzwungene Fehler in (1) copytree, (2) in der Transaktion und (3) os.rename: keine Zeilen, keine neuen Ordner unter
-    photos/ und jobs/, kein tmp/copy-*."""
+    """Erzwungene Fehler in (1) copytree, (2) in der Transaktion und (3) os.rename (Fotoordner bzw. Auftragsordner, wenn
+    jobs/<neu>/ schon angelegt ist): 500 FAILED, keine Zeilen, keine neuen Ordner unter photos/ und jobs/, kein tmp/copy-*."""
     import os
     import shutil
 
@@ -1798,6 +1798,7 @@ def test_kopieren_fehler_hinterlaesst_nichts(app, admin, monkeypatch, step):
     from app import jobs, projcopy
     (L,) = _mk(app, admin, f"kofehl{step}")
     src = _copy_source(L.uid)
+    seen = []
     if step == "1":
         def boom(*a, **kw):
             raise OSError("Platte voll")
@@ -1811,15 +1812,84 @@ def test_kopieren_fehler_hinterlaesst_nichts(app, admin, monkeypatch, step):
 
         def rename(a, b):
             calls.append(1)
-            if len(calls) == 2:
+            if step == "3" and len(calls) == 2:
+                raise OSError("Umbenennen fehlgeschlagen")
+            if step == "3-auftrag" and Path(b).name == "v1":
+                seen.append(Path(b).parent.is_dir())                       # jobs/<neu>/ liegt schon an
                 raise OSError("Umbenennen fehlgeschlagen")
             return real(a, b)
         monkeypatch.setattr(os, "rename", rename)
     before, dirs = _counts(), _dirs()
-    with pytest.raises((HTTPException, RuntimeError)) as e:
+    with pytest.raises(HTTPException) as e:
         projcopy.copy_project(_user_row(L), src["pid"], None, None)
-    if step != "2":
-        assert (e.value.status_code, e.value.detail) == (500, projcopy.FAILED)
+    assert (e.value.status_code, e.value.detail) == (500, projcopy.FAILED)
+    assert seen == ([True] if step == "3-auftrag" else [])
+    assert _counts() == before
+    assert _dirs() == dirs
+    assert _tmp_left() == []
+
+
+def test_kopieren_rueckbau_trotz_fehler_beim_auftrag_loeschen(app, admin, monkeypatch):
+    """Scheitert im Rueckbau jobs.delete, werden Projekt und Fotoordner trotzdem entfernt; Antwort 500 FAILED."""
+    import os
+
+    from fastapi import HTTPException
+
+    from app import jobs, projcopy
+    (L,) = _mk(app, admin, "korueck")
+    src = _copy_source(L.uid)
+    real = os.rename
+
+    def rename(a, b):
+        if Path(b).name == "v1":
+            raise OSError("Umbenennen fehlgeschlagen")
+        return real(a, b)
+
+    def delete(job):
+        raise RuntimeError("Testfehler beim Loeschen")
+    monkeypatch.setattr(os, "rename", rename)
+    monkeypatch.setattr(jobs, "delete", delete)
+    before, dirs = _counts(), _dirs()
+    with pytest.raises(HTTPException) as e:
+        projcopy.copy_project(_user_row(L), src["pid"], None, None)
+    assert (e.value.status_code, e.value.detail) == (500, projcopy.FAILED)
+    after = _counts()
+    assert (after["projects"], after["photos"], after["parts"]) == (before["projects"], before["photos"], before["parts"])
+    assert _dirs()["photos"] == dirs["photos"]
+    assert _tmp_left() == []
+
+
+def test_kopieren_guard_in_transaktion(app, admin):
+    """guard() wirft in der Transaktion (z. B. gleichzeitiger Austritt): Fehler des guard, nichts bleibt zurueck."""
+    from fastapi import HTTPException
+
+    from app import db, projcopy
+    (L,) = _mk(app, admin, "koguard")
+    src = _copy_source(L.uid)
+    calls = []
+
+    def guard():
+        calls.append(db.conn().in_transaction)
+        raise HTTPException(404, "Projekt nicht gefunden")
+    before, dirs = _counts(), _dirs()
+    with pytest.raises(HTTPException) as e:
+        projcopy.copy_project(_user_row(L), src["pid"], None, None, guard=guard)
+    assert (e.value.status_code, e.value.detail) == (404, "Projekt nicht gefunden")
+    assert calls == [True]
+    assert _counts() == before
+    assert _dirs() == dirs
+    assert _tmp_left() == []
+
+
+def test_kopieren_nicht_in_aeusserer_transaktion(app, admin):
+    """Wie delete_projects: Aufruf innerhalb von db.atomic -> RuntimeError, ohne etwas anzulegen oder zu kopieren."""
+    from app import db, projcopy
+    (L,) = _mk(app, admin, "koaussen")
+    src = _copy_source(L.uid)
+    before, dirs = _counts(), _dirs()
+    with pytest.raises(RuntimeError):
+        with db.atomic():
+            projcopy.copy_project(_user_row(L), src["pid"], None, None)
     assert _counts() == before
     assert _dirs() == dirs
     assert _tmp_left() == []

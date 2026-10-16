@@ -200,11 +200,15 @@ def _place(tmp: Path, photo_map: dict, job_map: dict):
 
 def _undo(new_pid: int, job_map: dict):
     """Rueckbau nach einem Fehler in (3): die neuen Auftraege per jobs.delete (ausserhalb von db.atomic; sie haben
-    einen Ersteller und blieben sonst ohne Projekt stehen), dann Projektzeilen und Fotoordner wie beim Projekt-Loeschen."""
+    einen Ersteller und blieben sonst ohne Projekt stehen), dann Projektzeilen und Fotoordner wie beim Projekt-Loeschen.
+    Ein Fehler bei einem Auftrag haelt den Rest nicht auf: das Projekt wird in jedem Fall geloescht."""
     for new, _ in job_map.values():
-        j = db.q1("SELECT * FROM jobs WHERE id=?", (new,))
-        if j:
-            jobs.delete(j)
+        try:
+            j = db.q1("SELECT * FROM jobs WHERE id=?", (new,))
+            if j:
+                jobs.delete(j)
+        except Exception as e:
+            print(f"Kopie {new_pid}: Rückbau von Auftrag {new} fehlgeschlagen ({e})", file=sys.stderr, flush=True)
     projects.delete_projects([new_pid])
 
 
@@ -212,21 +216,27 @@ def copy_project(user: dict, src_pid: int, team_id: int | None, name: str | None
                  guard: Callable[[], None] | None = None) -> int:
     """Kopie in team_id (None = privat des Kopierenden); Rechte prueft der Aufrufer vorher und ueber guard erneut als
     erste Zeile in der Transaktion. Rueckgabe: neue Projekt-id."""
-    snap = _snapshot(src_pid)
-    if snap is None:
-        raise HTTPException(409, CHANGED)
+    with db._lock:   # wie projects.delete_projects: (3) braucht ein eigenes COMMIT
+        if db.conn().in_transaction:
+            raise RuntimeError("copy_project nicht innerhalb von db.atomic aufrufen")
     tmp = tmp_root() / f"copy-{secrets.token_hex(8)}"
     try:
         try:
-            _stage(tmp, snap)
-        except OSError:
-            raise HTTPException(500, FAILED) from None
-        with db.atomic():
-            if guard is not None:
-                guard()
-            if _snapshot(src_pid) != snap:
+            snap = _snapshot(src_pid)
+            if snap is None:
                 raise HTTPException(409, CHANGED)
-            new_pid, photo_map, job_map = _insert(user, src_pid, team_id, name)
+            _stage(tmp, snap)
+            with db.atomic():
+                if guard is not None:
+                    guard()
+                if _snapshot(src_pid) != snap:
+                    raise HTTPException(409, CHANGED)
+                new_pid, photo_map, job_map = _insert(user, src_pid, team_id, name)
+        except HTTPException:
+            raise
+        except Exception as e:   # (1)/(2): Transaktion zurueckgerollt, tmp wird unten entfernt
+            print(f"Kopie von Projekt {src_pid} fehlgeschlagen: {e}", file=sys.stderr, flush=True)
+            raise HTTPException(500, FAILED) from e
         try:
             _place(tmp, photo_map, job_map)
         except Exception as e:
@@ -235,7 +245,7 @@ def copy_project(user: dict, src_pid: int, team_id: int | None, name: str | None
             except Exception as u:   # Rueckbau unvollstaendig: Kopie ohne (alle) Dateien bleibt loeschbar (Spec §8)
                 print(f"Kopie {new_pid}: Rückbau fehlgeschlagen ({u})", file=sys.stderr, flush=True)
             print(f"Kopie von Projekt {src_pid} fehlgeschlagen: {e}", file=sys.stderr, flush=True)
-            raise HTTPException(500, FAILED) from None
+            raise HTTPException(500, FAILED) from e
         return new_pid
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
