@@ -1626,6 +1626,21 @@ def test_verwaltung_audit_namen_in_actions():
     assert "export async function adminTab(main)" in tj and "export default async function (main)" in tj
 
 
+def test_rechte_servertexte_in_der_oberflaeche():
+    """Gesamtreview J-9: die Oberflaeche erkennt 403 und 404 am Wortlaut der Servermeldung (lib.js api.onReadOnly,
+    app.js api.onNotFound). Wird eine Seite umformuliert, bricht dieser Test statt still der Lesend- bzw. Verlust-Hook."""
+    from app import access
+    web = Path(__file__).resolve().parents[1] / "web"
+    lib = (web / "static/js/lib.js").read_text(encoding="utf-8")
+    app_js = (web / "static/js/app.js").read_text(encoding="utf-8")
+    server = (web / "app/access.py").read_text(encoding="utf-8")
+    assert access.DENY_WRITE == "Nur lesender Zugriff"
+    assert f'err.message === "{access.DENY_WRITE}"' in lib
+    for text in ("Projekt nicht gefunden", "Auftrag nicht gefunden"):
+        assert f'HTTPException(404, "{text}")' in server, text
+        assert f'msg !== "{text}"' in app_js, text
+
+
 # ------------------------------------------------------------------ T5: Kopieren
 
 def _jpg(path, w=40, h=30):
