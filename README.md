@@ -118,7 +118,7 @@ Formate, Markergröße, Farben und Texte stehen oben bzw. in den Funktionen `mat
 
 Alles aus diesem Repo als selbst gehostete Web-Oberfläche: Unterlage als PDF erzeugen, Fotos hochladen und prüfen, im Browser messen und mit Claude ein CAD-Modell erzeugen lassen.
 
-Startseite ist die Projektbibliothek: Jedes Werkstück ist ein Projekt mit Vorschaubild (3D-Modell, sonst erstes Foto), Zahl der Fotos und Maße und dem letzten CAD-Auftrag; Projekte lassen sich suchen, sortieren, umbenennen, archivieren und löschen. Die Anleitung (Fragezeichen oben rechts) erklärt den ganzen Ablauf, enthält den Generator für die Messunterlage und listet alle Tastenkürzel und Mausbefehle. Die Taste `?` oder `F1` zeigt auf jeder Seite die passenden Kürzel als Kurzhilfe.
+Startseite ist die Projektbibliothek: Jedes Werkstück ist ein Projekt mit Vorschaubild (3D-Modell, sonst erstes Foto), Zahl der Fotos und Maße und dem letzten CAD-Auftrag; Projekte lassen sich suchen, sortieren, umbenennen, archivieren und löschen. Die Anleitung (Fragezeichen oben rechts) erklärt den ganzen Ablauf, enthält den Generator für die Messunterlage und listet alle Tastenkürzel und Mausbefehle. Die Taste `?` oder `F1` zeigt auf jeder Seite die passenden Kürzel als Kurzhilfe (nicht, solange der Fokus in einem Eingabefeld liegt).
 
 <p align="center">
   <img src="docs/webapp_messen.png" alt="Messen im Browser mit Vorschlägen von Claude" width="49%">

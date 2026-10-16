@@ -4,6 +4,8 @@
 
 // Werkzeugtasten der Messseite; measure.js liest sie von hier
 export const TOOL_KEYS = Object.freeze({ v: "pan", l: "length", c: "circle", p: "point", a: "angle", e: "edges" });
+// Umkehrtabelle Werkzeug → Taste (Großbuchstabe), für Anleitung, Kurzhilfe und Werkzeugleiste
+export const KEY_OF = Object.freeze(Object.fromEntries(Object.entries(TOOL_KEYS).map(([k, t]) => [t, k.toUpperCase()])));
 
 // Abschnitte der Anleitung (Sprungmarken /anleitung#id)
 export const SECTIONS = Object.freeze([
@@ -19,12 +21,12 @@ export const GROUP_TITLE = Object.freeze({
 // keys: Tasten und Mausbefehle; „oder“ und „dann“ trennen Alternativen bzw. Folgen, sonst gilt „gleichzeitig“ (+)
 export const SHORTCUTS = Object.freeze({
   messen: [
-    { keys: ["V"], text: "Werkzeug Verschieben: Bild ziehen, Messung im Bild anklicken = auswählen" },
-    { keys: ["L"], text: "Werkzeug Strecke (2 Punkte); auf der Höhenlehre misst es die Höhe" },
-    { keys: ["C"], text: "Werkzeug Kreis aus 3 Punkten auf dem Rand (Durchmesser, in der Messung auf Radius umschaltbar)" },
-    { keys: ["P"], text: "Werkzeug Punkt mit Koordinate (Ursprung unten links)" },
-    { keys: ["A"], text: "Werkzeug Winkel: Punkt auf Schenkel 1, Scheitel, Punkt auf Schenkel 2" },
-    { keys: ["E"], text: "Werkzeug Kanten: Teile auswählen und bearbeiten" },
+    { keys: [KEY_OF.pan], text: "Werkzeug Verschieben: Bild ziehen, Messung im Bild anklicken = auswählen" },
+    { keys: [KEY_OF.length], text: "Werkzeug Strecke (2 Punkte); auf der Höhenlehre misst es die Höhe" },
+    { keys: [KEY_OF.circle], text: "Werkzeug Kreis aus 3 Punkten auf dem Rand (Durchmesser, in der Messung auf Radius umschaltbar)" },
+    { keys: [KEY_OF.point], text: "Werkzeug Punkt mit Koordinate (Ursprung unten links)" },
+    { keys: [KEY_OF.angle], text: "Werkzeug Winkel: Punkt auf Schenkel 1, Scheitel, Punkt auf Schenkel 2" },
+    { keys: [KEY_OF.edges], text: "Werkzeug Kanten: Teile auswählen und bearbeiten" },
     { keys: ["Klick"], text: "Punkt setzen; die Messung wird mit dem letzten Punkt gespeichert. Im Werkzeug Verschieben: Messung auswählen" },
     { keys: ["Shift", "Klick"], text: "Strecke oder Höhe: Punkt waagerecht oder senkrecht zum vorigen Punkt ausrichten" },
     { keys: ["Esc"], text: "Gesetzte Punkte der laufenden Messung verwerfen; beim Ziehen eines Eckpunkts das Ziehen abbrechen" },
@@ -59,7 +61,7 @@ export const SHORTCUTS = Object.freeze({
     { keys: ["Strg", "V"], text: "Bild aus der Zwischenablage einfügen und hochladen" },
     { keys: ["Klick"], text: "Foto in der Liste anzeigen" },
     { keys: ["Enter"], text: "Fokussiertes Foto in der Liste anzeigen" },
-    { keys: ["Klick auf das große Bild"], text: "Bild in voller Auflösung in einem neuen Tab öffnen" },
+    { keys: ["Klick auf das große Bild"], text: "Bild in größerer Ansicht in einem neuen Tab öffnen" },
   ],
   modell: [
     { keys: ["Maus links ziehen"], text: "Modell drehen" },
@@ -81,14 +83,15 @@ export const SHORTCUTS = Object.freeze({
   ueberall: [
     { keys: ["?", "oder", "F1"], text: "Diese Kurzhilfe öffnen (nicht, solange der Fokus in einem Eingabefeld liegt)" },
     { keys: ["Esc"], text: "Kurzhilfe, Dialog oder das Menü „…“ einer Projektkarte schließen" },
-    { keys: ["Tab"], text: "Zum nächsten Bedienelement, mit Shift zurück" },
+    { keys: ["Tab"], text: "Zum nächsten Bedienelement, mit Shift zurück; schließt das Menü „…“ einer Projektkarte" },
     { keys: ["Enter"], text: "Im Dialog: Eingabe bestätigen (z. B. Speichern)" },
-    { keys: ["Pfeil ab", "oder", "Pfeil auf"], text: "Im Menü „…“ einer Projektkarte: Eintrag wechseln" },
+    { keys: ["Pfeil ab", "oder", "Pfeil auf"], text: "Auf dem Knopf „…“ einer Projektkarte: Menü öffnen (beim ersten bzw. letzten Eintrag); im Menü: Eintrag wechseln" },
+    { keys: ["Pos1", "oder", "Ende"], text: "Im Menü „…“ einer Projektkarte: erster bzw. letzter Eintrag" },
   ],
 });
 
 // Benannte Tasten (als <kbd> gezeigt); alles andere mit mehr als einem Zeichen ist ein Mausbefehl (Text)
-const KEY_NAMES = new Set(["Strg", "Shift", "Alt", "Esc", "Enter", "Entf", "Rücktaste", "Tab", "F1", "Pfeil ab", "Pfeil auf"]);
+const KEY_NAMES = new Set(["Strg", "Shift", "Alt", "Esc", "Enter", "Entf", "Rücktaste", "Tab", "F1", "Pfeil ab", "Pfeil auf", "Pos1", "Ende"]);
 export const SEPARATORS = Object.freeze({ oder: " oder ", dann: " dann " });
 export const isKey = k => k.length === 1 || KEY_NAMES.has(k);
 

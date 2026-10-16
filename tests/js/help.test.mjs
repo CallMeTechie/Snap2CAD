@@ -1,7 +1,7 @@
 // Tastenkürzel der Anleitung und Kurzhilfe (web/static/js/help.js) – Aufruf: node --test tests/js/*.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { SHORTCUTS, TOOL_KEYS, SECTIONS, groupsFor } from "../../web/static/js/help.js";
+import { SHORTCUTS, TOOL_KEYS, KEY_OF, SECTIONS, SEPARATORS, isKey, groupsFor } from "../../web/static/js/help.js";
 
 const GROUPS = ["messen", "kanten", "fotos", "modell", "ueberall"];
 
@@ -43,4 +43,30 @@ test("Abschnitte und Kurzhilfe je Seite", () => {
   assert.deepEqual(groupsFor("/cad/12"), ["modell", "ueberall"]);
   assert.deepEqual(groupsFor("/cad"), ["modell", "ueberall"]);
   assert.deepEqual(groupsFor("/"), ["ueberall"]);
+});
+
+// Jeder Mausbefehl steht hier ausdrücklich: ein Tippfehler im Tastennamen fiele sonst als Text statt <kbd> durch
+const MOUSE = new Set([
+  "Klick", "Doppelklick", "Mausrad", "Maus links ziehen", "Maus Mitte ziehen", "Maus rechts ziehen", "Zwei Finger", "Ein Finger",
+  "Maus links auf Eckpunkt ziehen", "Klick auf Griff +", "Rechtsklick auf Kante", "Maus rechts von Kante ziehen",
+  "Maus rechts von Eckpunkt ziehen", "Maus rechts im Leerraum ziehen", "Dateien auf die Fläche ziehen", "Klick auf das große Bild",
+  "Klick auf ein Maß", "Klick auf eine Tabellenzeile", "Klick auf Oben, Vorn oder Seite", "Klick auf eine Version", "Umriss ziehen",
+]);
+
+test("jeder Eintrag ist Trenner, Taste oder bekannter Mausbefehl; Trenner nie am Rand oder doppelt", () => {
+  for (const [g, list] of Object.entries(SHORTCUTS)) {
+    for (const { keys } of list) {
+      keys.forEach((k, i) => {
+        if (Object.hasOwn(SEPARATORS, k)) {
+          assert.ok(i > 0 && i < keys.length - 1, `${g}: Trenner am Rand in ${keys}`);
+          assert.ok(!Object.hasOwn(SEPARATORS, keys[i + 1]), `${g}: zwei Trenner in ${keys}`);
+        } else assert.ok(isKey(k) || MOUSE.has(k), `${g}: unbekannt „${k}“`);
+      });
+    }
+  }
+});
+
+test("Werkzeugtasten in der Kurzhilfe kommen aus TOOL_KEYS", () => {
+  assert.deepEqual(KEY_OF, { pan: "V", length: "L", circle: "C", point: "P", angle: "A", edges: "E" });
+  for (const k of Object.values(KEY_OF)) assert.ok(isKey(k), k);
 });

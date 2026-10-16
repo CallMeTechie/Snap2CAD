@@ -4,12 +4,11 @@ import { S, ensureProject, reloadProject, projectPicker, onLeave } from "./app.j
 import { VIEW_LABEL } from "./photos.js";
 import { createPartsLayer, partsPanel, partColor } from "./edges.js";
 import { groupText, r3, segDist } from "./geom.js";
-import { TOOL_KEYS } from "./help.js";
+import { TOOL_KEYS, KEY_OF } from "./help.js";
 
 const KIND = { length: "Strecke", height: "Höhe", diameter: "Durchmesser", radius: "Radius", angle: "Winkel", point: "Punkt" };
 const NEED = { length: 2, height: 2, diameter: 3, radius: 3, angle: 3, point: 1 };
-// Taste je Werkzeug aus help.js (TOOL_KEYS), damit Anleitung, Kurzhilfe und Verhalten nicht auseinanderlaufen
-const KEY_OF = Object.fromEntries(Object.entries(TOOL_KEYS).map(([k, t]) => [t, k.toUpperCase()]));
+// Taste je Werkzeug aus help.js (KEY_OF, aus TOOL_KEYS), damit Anleitung, Kurzhilfe und Verhalten nicht auseinanderlaufen
 const TOOLS = [
   ["pan", "Verschieben", "pan"], ["length", "Strecke", "line"], ["circle", "Kreis aus 3 Punkten", "circle"],
   ["point", "Punkt mit Koordinate", "point"], ["angle", "Winkel", "angle"], ["edges", "Kanten", "edges"],

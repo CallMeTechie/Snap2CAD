@@ -1,6 +1,6 @@
 // Anleitung: Ablauf, Messunterlage (mit Generator), Fotografieren, Bedienung je Seite, Tastatur und Maus, Probleme
 import { h, icon } from "./lib.js";
-import { SECTIONS, SHORTCUTS } from "./help.js";
+import { SECTIONS, SHORTCUTS, KEY_OF } from "./help.js";
 import { matGenerator } from "./mat.js";
 import { shortcutTable } from "./kurzhilfe.js";
 
@@ -22,7 +22,7 @@ function ablauf() {
   return section("ablauf", card(
     h("ol", { class: "gsteps" },
       st("1", "/", "Projekte", "Jedes Werkstück ist ein Projekt mit eigenen Fotos, Maßen und CAD-Aufträgen. In der Projektbibliothek wird ein neues Projekt angelegt oder ein vorhandenes geöffnet."),
-      st("2", "/fotos", "Fotos prüfen", "Fotos des Werkstücks auf der Messunterlage hochladen. Die Marker werden erkannt und jedes Foto auf die Tischebene entzerrt; nur Fotos mit grünem oder gelbem Status gehen in die Messung."),
+      st("2", "/fotos", "Fotos prüfen", "Fotos des Werkstücks auf der Messunterlage hochladen. Die Marker werden erkannt und jedes Foto auf die Tischebene entzerrt. Nur auswertbare Fotos (mindestens vier Marker erkannt) werden Messquellen; Fotos mit „unsicher“ besser wiederholen. Für den CAD-Auftrag wählt Snap2CAD „unsichere“ Fotos nicht von selbst aus."),
       st("3", "/messen", "Messen", "Auf der entzerrten Draufsicht Strecken, Kreise, Punkte und Winkel setzen und Kanten erkennen lassen. Messschieberwerte machen kritische Maße verbindlich, die KI kann weitere Maße vorschlagen."),
       st("4", "/cad", "CAD-Modell", "Aus Maßen, Fotos und Beschreibung schreibt die KI ein parametrisches Modell, das eine abgeschottete Sandbox als STEP und STL erzeugt und prüft. Änderungen und nachgemessene Werte ergeben neue Versionen.")),
     P("Die Anleitung ist jederzeit über das Fragezeichen oben rechts erreichbar. Die Taste ", K("?"), " (oder ", K("F1"), ") zeigt auf jeder Seite die passenden Tastenkürzel.")));
@@ -69,7 +69,7 @@ function fotos() {
       [B("Hochladen:"), " Fotos auf die Fläche ziehen, „Dateien auswählen“, am Handy „Foto aufnehmen“ oder ein Bild aus der Zwischenablage mit ", K("Strg"), " + ", K("V"), " einfügen. JPG, PNG und HEIC in Originalauflösung."],
       [B("Ansicht:"), " oben unter „Ansicht“ festlegen, wofür die nächsten Fotos stehen (Draufsicht, Von unten, Gekippt (Höhe), Höhenlehre, Übersicht). In der Fotoliste lässt sich die Ansicht je Foto nachträglich ändern. „Unterlage“ erkennt A4 oder A3 automatisch oder legt das Format fest."],
       [B("Ampel und Restfehler:"), " je Foto stehen die erkannten Marker und der größte Restfehler der Entzerrung. Bis 0,5 mm ist das Foto „gut“ (grün), bis 1 mm „brauchbar“ (gelb), darüber „unsicher – wiederholen“ (rot). Unter vier Markern ist es „nicht auswertbar“. Die Balken zeigen den Restfehler je Marker."],
-      [B("Original, Entzerrt, Beide, Höhenlehre:"), " schaltet die Bilder darunter um; ein Klick auf ein Bild öffnet es in voller Auflösung."],
+      [B("Original, Entzerrt, Beide, Höhenlehre:"), " schaltet die Bilder darunter um; ein Klick auf ein Bild öffnet es in größerer Ansicht in einem neuen Tab."],
       [B("Lage der Unteransicht:"), " bei Fotos „Von unten“ zeigt der Kasten „Lage zur Draufsicht“ die Überlagerung. Steht dort „Ausrichtung unsicher“ oder passt die Überlagerung nicht, die richtige Lage wählen (z. B. „seitlich umgedreht“ oder „nach vorn umgedreht“); „Wieder automatisch“ setzt die Wahl zurück."],
       [B("Kontrollmaß vom Ausdruck:"), " den gemessenen Wert der 100-mm-Skala eintragen, auf Wunsch auch das Raster senkrecht (230 mm bei A4, 360 mm bei A3). Die Faktoren X und Y gelten für alle Fotos des Projekts; leer = Faktor 1."],
       [B("Kasten „Werkstück“:"), " Farbe, Material, Transparenz und Oberfläche vor „Kanten erkennen“ setzen. Nur diese Handeingaben steuern die Kantenerkennung (z. B. helle oder durchscheinende Teile); eine Schätzung der KI wirkt dort nicht. „Zurücksetzen“ entfernt die Handeingaben."],
@@ -81,7 +81,7 @@ function messen() {
   return section("messen", card(
     UL([
       [B("Quelle:"), " oben links unter „Foto“ die entzerrte Ansicht wählen – Draufsicht, Unteransicht oder Höhenlehre eines Fotos."],
-      [B("Werkzeuge:"), " Verschieben (", K("V"), "), Strecke (", K("L"), "; auf der Höhenlehre die Höhe ab der Tischkante), Kreis aus 3 Punkten auf dem Rand (", K("C"), "; Durchmesser, in der Messung auf Radius umschaltbar), Punkt mit Koordinate (", K("P"), "; Ursprung unten links), Winkel (", K("A"), "; Schenkel, Scheitel, Schenkel) und Kanten (", K("E"), ")."],
+      [B("Werkzeuge:"), " Verschieben (", K(KEY_OF.pan), "), Strecke (", K(KEY_OF.length), "; auf der Höhenlehre die Höhe ab der Tischkante), Kreis aus 3 Punkten auf dem Rand (", K(KEY_OF.circle), "; Durchmesser, in der Messung auf Radius umschaltbar), Punkt mit Koordinate (", K(KEY_OF.point), "; Ursprung unten links), Winkel (", K(KEY_OF.angle), "; Schenkel, Scheitel, Schenkel) und Kanten (", K(KEY_OF.edges), ")."],
       [B("Punkte setzen:"), " im Bild klicken; mit dem letzten Punkt wird die Messung gespeichert. ", K("Shift"), " richtet eine Strecke waagerecht oder senkrecht aus, ", K("Esc"), " verwirft die gesetzten Punkte, ", K("Rücktaste"), " nimmt den letzten zurück."],
       [B("Kantenfang und Lupe:"), " der Kantenfang rastet Punkte auf die deutlichste Kante in der Nähe ein (grüner Kreis = gefangen, im Werkzeug Verschieben aus). Die Lupe zeigt den Bereich unter dem Zeiger vergrößert (nicht bei Touch). Beides lässt sich in der Werkzeugleiste abschalten."],
       [B("Messung anklicken und benennen:"), " im Werkzeug Verschieben im Bild oder in der Liste rechts. Die Messung klappt auf: Bezeichnung, Unsicherheit, Messschieber, Teil, Passung, Notiz, „Kritisches Maß“ und Löschen."],
@@ -100,7 +100,7 @@ function kanten() {
   return section("kanten", card(
     P("Teile sind Umrisse auf einer Draufsicht oder Unteransicht (T1, T2 …) mit Bezeichnung und Rolle (Grundkörper oder montiertes Teil). Aus ihnen entstehen automatische Maße. Die Teileliste steht rechts über den Messungen; ein Klick wählt ein Teil und schaltet auf das Werkzeug Kanten."),
     UL([
-      [B("Eckpunkte ziehen:"), " in jedem Werkzeug. Das ausgewählte Teil zeigt große Griffe, alle anderen kleine Punkte."],
+      [B("Eckpunkte ziehen:"), " in jedem Werkzeug. Im Werkzeug Kanten zeigt das ausgewählte Teil große Griffe; sonst tragen alle Teile kleine Punkte."],
       [B("Punkte einfügen:"), " im Werkzeug Kanten den Griff „+“ in der Kantenmitte des ausgewählten Teils anklicken oder ziehen. In jedem Werkzeug setzt ein Rechtsklick auf eine Kante dort einen Punkt; rechts ziehen von einer Kante oder einem Eckpunkt fügt einen Punkt ein und zieht ihn mit. Höchstens 64 Eckpunkte je Teil."],
       [B("Punkte löschen:"), " im Werkzeug Kanten den Eckpunkt anklicken, dann ", K("Entf"), " oder ", K("Rücktaste"), ". Ein Teil behält mindestens drei Eckpunkte."],
       [B("Neues Teil zeichnen:"), " „Neues Teil“ in der Teileliste oder rechts ziehen im Leerraum neben den Teilen. Punkte per Klick setzen; abschließen mit Doppelklick, ", K("Enter"), " oder Klick auf den ersten Punkt (ab drei Punkten). ", K("Esc"), " verwirft das Teil, ", K("Rücktaste"), " entfernt den letzten Punkt."],
@@ -147,7 +147,7 @@ function bemassung() {
 
 function tastatur() {
   return section("tastatur", card(
-    P("Tastenkürzel wirken nicht, solange der Fokus in einem Eingabefeld liegt; auf der Messseite auch nicht mit gedrückter ", K("Strg"), "-, ", K("Alt"), "- oder Befehlstaste. ", K("?"), " oder ", K("F1"), " zeigt die Tabellen der aktuellen Seite als Kurzhilfe."),
+    P("Tastenkürzel wirken nicht, solange der Fokus in einem Eingabefeld liegt; auf der Messseite auch nicht mit gedrückter ", K("Strg"), "-, ", K("Alt"), "- oder Befehlstaste. ", K("?"), " oder ", K("F1"), " zeigt die Tabellen der aktuellen Seite als Kurzhilfe. In Eingabefeldern öffnen ", K("?"), " und ", K("F1"), " die Kurzhilfe nicht."),
     Object.keys(SHORTCUTS).map(g => shortcutTable(g))));
 }
 
@@ -163,6 +163,9 @@ function probleme() {
     q("Neuaufbau abgelehnt", "Neuaufbauten ohne KI sind auf 30 je Stunde und Benutzer begrenzt (Voreinstellung), und es läuft höchstens einer zur Zeit. Später erneut versuchen oder mehrere Werte gemeinsam über „Werte übernehmen“ senden.")));
 }
 
+// Inhalt in der Reihenfolge von SECTIONS (dieselbe Liste wie das Inhaltsverzeichnis)
+const BUILD = { ablauf, unterlage, fotografieren, fotos, messen, kanten, cad, bemassung, tastatur, probleme };
+
 export default function (main) {
   const toc = h("nav", { class: "gtoc", "aria-label": "Inhalt der Anleitung" },
     h("span", { class: "label" }, "Inhalt"),
@@ -171,5 +174,5 @@ export default function (main) {
     h("div", { class: "head" }, h("div", { class: "t" }, h("h1", {}, "Anleitung"),
       h("p", { class: "lead" }, "Vom Ausdruck der Messunterlage bis zum CAD-Modell, mit allen Tastenkürzeln und Mausbefehlen."))),
     h("div", { class: "guide-layout" }, toc,
-      h("div", { class: "gmain" }, ablauf(), unterlage(), fotografieren(), fotos(), messen(), kanten(), cad(), bemassung(), tastatur(), probleme())));
+      h("div", { class: "gmain" }, SECTIONS.map(([id]) => BUILD[id]()))));
 }

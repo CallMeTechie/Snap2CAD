@@ -10,7 +10,13 @@ const routes = [];
 function route(re, fn, opts = {}) { routes.push({ re, fn, ...opts }); }
 
 export function go(path, replace = false) {
-  if (location.pathname + location.search === path) { render(); return; }
+  const u = new URL(path, location.href);
+  if (u.pathname + u.search === location.pathname + location.search) {
+    // dieselbe Seite: nur die Sprungmarke anpassen (ohne Marke = oben), nicht an die alte springen
+    if (u.hash !== location.hash) history.replaceState({}, "", path);
+    render();
+    return;
+  }
   history[replace ? "replaceState" : "pushState"]({}, "", path);
   render();
 }
@@ -40,6 +46,7 @@ document.addEventListener("click", ev => {
   go(url.pathname + url.search + url.hash);
 });
 
+let kurzhilfe = null, khLoading = false;   // Modul der Kurzhilfe als einmal geladenes Promise
 // Kurzhilfe: ? oder F1 auf jeder angemeldeten Seite mit Kopfzeile, nicht in Eingabefeldern
 document.addEventListener("keydown", ev => {
   if (ev.key !== "?" && ev.key !== "F1") return;
@@ -47,7 +54,12 @@ document.addEventListener("keydown", ev => {
   if (ev.target instanceof Element && ev.target.closest("input,textarea,select,[contenteditable]")) return;
   if (document.querySelector("dialog[open]")) return;   // anderer Dialog offen (die Kurzhilfe schliesst sich selbst)
   ev.preventDefault();
-  import("./kurzhilfe.js").then(m => m.toggleShortcuts(location.pathname)).catch(fail);
+  if (khLoading) return;   // Modul laedt noch: weitere ? / F1 ignorieren
+  khLoading = true;
+  (kurzhilfe ??= import("./kurzhilfe.js"))
+    .then(m => m.toggleShortcuts(location.pathname))
+    .catch(e => { kurzhilfe = null; fail(e); })
+    .finally(() => { khLoading = false; });
 });
 
 api.onUnauthorized = () => { S.me = null; if (!location.pathname.startsWith("/login")) go("/login", true); };
@@ -60,7 +72,9 @@ export async function refreshMe() {
   return r;
 }
 
+let renderGen = 0;   // nur das juengste Rendern darf scrollen
 async function render() {
+  const gen = ++renderGen;
   for (const fn of S.leave.splice(0)) { try { fn(); } catch (e) { console.error(e); } }
   const path = location.pathname;
   shownPath = path + location.search;
@@ -81,6 +95,7 @@ async function render() {
   } catch (e) {
     fail(e);
   }
+  if (gen !== renderGen) return;
   if (!jumpToHash()) window.scrollTo(0, 0);
 }
 
@@ -148,8 +163,7 @@ async function logout() {
 // ------------------------------------------------------------------ Projekt
 export async function ensureProject(force = false) {
   if (S.project && !force) return S.project;
-  let pid = null;
-  try { pid = localStorage.getItem(`mu.project.${S.me.id}`); } catch { /* */ }
+  const pid = rememberedProjectId();
   if (pid) {
     try { S.project = await api(`/api/projects/${pid}`); return S.project; } catch { /* weiter */ }
   }
@@ -165,8 +179,16 @@ export async function reloadProject() {
   if (n === reloadSeq && S.project?.id === id) S.project = p;
   return S.project;
 }
+// zuletzt geoeffnetes Projekt je Benutzer im Browser
+export const projectKey = () => `mu.project.${S.me.id}`;
 export function rememberProject() {
-  try { localStorage.setItem(`mu.project.${S.me.id}`, S.project.id); } catch { /* */ }
+  try { localStorage.setItem(projectKey(), S.project.id); } catch { /* */ }
+}
+export function rememberedProjectId() {
+  try { return Number(localStorage.getItem(projectKey())) || null; } catch { return null; }
+}
+export function forgetProject() {
+  try { localStorage.removeItem(projectKey()); } catch { /* */ }
 }
 
 export function projectPicker(onChange) {

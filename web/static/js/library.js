@@ -1,9 +1,10 @@
 // Schritt 1: Projektbibliothek – alle Werkstücke mit Vorschaubild, Start für neue Projekte
-import { api, h, clear, icon, dt, toast, fail, dialog, confirmDlg } from "./lib.js";
-import { S, go, onLeave, rememberProject, jobBadge } from "./app.js";
+import { api, h, clear, icon, dt, toast, fail, dialog, confirmDlg, debounce } from "./lib.js";
+import { S, go, onLeave, rememberProject, rememberedProjectId, forgetProject, jobBadge } from "./app.js";
 
 const SORTS = { updated: "Zuletzt geändert", name: "Name", created: "Angelegt" };
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+const COLL = new Intl.Collator("de", { sensitivity: "base" });
 
 function loadView() {
   try {
@@ -12,9 +13,6 @@ function loadView() {
   } catch { return { sort: "updated", archived: false }; }
 }
 function saveView(v) { try { localStorage.setItem("lib.view", JSON.stringify(v)); } catch { /* */ } }
-const remKey = () => `mu.project.${S.me.id}`;
-function remembered() { try { return Number(localStorage.getItem(remKey())) || null; } catch { return null; } }
-function forget() { try { localStorage.removeItem(remKey()); } catch { /* */ } }
 
 // Neues Projekt: leerer Name ist erlaubt, der Server vergibt dann Datum und Uhrzeit
 export async function newProject() {
@@ -23,16 +21,18 @@ export async function newProject() {
     body: h("div", { class: "field" }, h("label", {}, "Name"), inp, h("span", { class: "hint" }, "Leer lassen = Name aus Datum und Uhrzeit.")),
     actions: [{ label: "Abbrechen", value: null }, { label: "Anlegen", primary: true, submit: true, run: () => ({ name: inp.value.trim() }) }] });
   if (!r) return;
+  const at = location.pathname + location.search;
   try {
     S.project = await api("/api/projects", { method: "POST", body: { name: r.name } });
     rememberProject();
-    go("/fotos");
+    if (location.pathname + location.search === at) go("/fotos");   // inzwischen weitergeklickt: dort bleiben
   } catch (e) { fail(e); }
 }
 
 export default async function (main) {
   const view = loadView();
-  let list = [], query = "";
+  let list = [], query = "", loadSeq = 0, opening = false;
+  let cards = new Map(), lower = new Map();   // je Projekt-ID Karte und kleingeschriebener Name, je load() einmal gebaut
   const search = h("input", { class: "input", type: "search", placeholder: "Projekt suchen …", "aria-label": "Projekte durchsuchen", maxlength: 120 });
   const sortSel = h("select", { class: "input", "aria-label": "Sortierung" },
     Object.entries(SORTS).map(([k, t]) => h("option", { value: k, selected: k === view.sort }, t)));
@@ -48,7 +48,7 @@ export default async function (main) {
     h("button", { class: "btn primary", onclick: newProject }, icon("plus"), "Neues Projekt")),
     tools, grid);
 
-  search.addEventListener("input", () => { query = search.value.trim().toLowerCase(); draw(); });
+  search.addEventListener("input", debounce(() => { query = search.value.trim().toLowerCase(); if (main.isConnected) draw(); }, 150));
   sortSel.addEventListener("change", () => { view.sort = sortSel.value; saveView(view); draw(); });
   archCb.addEventListener("change", () => { view.archived = archCb.checked; saveView(view); draw(); });
 
@@ -58,25 +58,39 @@ export default async function (main) {
   document.addEventListener("click", outside);
   onLeave(() => document.removeEventListener("click", outside));
 
+  // nur die juengste Antwort uebernehmen; Karten (mit Vorschaubild) nur hier neu bauen, damit Suchen
+  // und Sortieren laufende Bildladevorgaenge nicht abbrechen
   async function load() {
-    list = await api("/api/projects");
-    if (main.isConnected) draw();
+    const n = ++loadSeq;
+    const l = await api("/api/projects");
+    if (n !== loadSeq || !main.isConnected) return;
+    menuClose?.();
+    list = l;
+    const cur = rememberedProjectId();
+    cards = new Map(list.map(p => [p.id, card(p, p.id === cur)]));
+    lower = new Map(list.map(p => [p.id, p.name.toLowerCase()]));
+    draw();
   }
   const reload = () => load().catch(fail);
 
   async function open(p, path) {
+    if (opening) return;   // Doppelklick: nur einmal laden
+    opening = true;
     try {
-      S.project = await api(`/api/projects/${p.id}`);
+      const proj = await api(`/api/projects/${p.id}`);
+      if (!main.isConnected) return;   // inzwischen andere Seite
+      S.project = proj;
       rememberProject();
       go(path);
-    } catch (e) { fail(e); reload(); }
+    } catch (e) { fail(e); if (main.isConnected) reload(); }
+    finally { opening = false; }
   }
 
   function sorted() {
-    const out = list.filter(p => (view.archived || !p.archived) && (!query || p.name.toLowerCase().includes(query)));
+    const out = list.filter(p => (view.archived || !p.archived) && (!query || lower.get(p.id).includes(query)));
     const by = { updated: (a, b) => String(b.updated_at).localeCompare(String(a.updated_at)) || b.id - a.id,
       created: (a, b) => String(b.created_at).localeCompare(String(a.created_at)) || b.id - a.id,
-      name: (a, b) => a.name.localeCompare(b.name, "de", { sensitivity: "base" }) || b.id - a.id }[view.sort];
+      name: (a, b) => COLL.compare(a.name, b.name) || b.id - a.id }[view.sort];
     return out.sort(by);
   }
 
@@ -93,8 +107,7 @@ export default async function (main) {
       grid.classList.add("one");
       return;
     }
-    const cur = remembered();
-    clear(grid, shown.map(p => card(p, p.id === cur)));
+    grid.replaceChildren(...shown.map(p => cards.get(p.id)));
   }
 
   function emptyState() {
@@ -197,9 +210,9 @@ export default async function (main) {
   async function remove(p) {
     if (!await confirmDlg(`„${p.name}“ löschen?`,
       "Fotos, Messungen, Teile und die am Modell gemerkten Messschieberwerte dieses Projekts werden endgültig gelöscht. "
-      + "Die CAD-Aufträge bleiben unter „Meine Aufträge“ erhalten.", "Endgültig löschen", true)) return;
+      + "Die CAD-Aufträge bleiben unter „Meine Aufträge“ erhalten, aber ohne Fotos für den Foto-Abgleich.", "Endgültig löschen", true)) return;
     await api(`/api/projects/${p.id}`, { method: "DELETE" });
-    if (remembered() === p.id) forget();
+    if (rememberedProjectId() === p.id) forgetProject();
     if (S.project?.id === p.id) S.project = null;
     toast("Projekt gelöscht", "ok");
     await reload();

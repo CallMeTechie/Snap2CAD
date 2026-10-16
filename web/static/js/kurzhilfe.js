@@ -24,6 +24,7 @@ export function shortcutTable(group, idPrefix = "keys") {
 }
 
 let open = null;   // { dlg, back }
+let leaveHooked = false;   // Seitenwechsel schliesst die Kurzhilfe; je Seite nur einmal angemeldet
 
 export function closeShortcuts() {
   if (!open) return;
@@ -47,14 +48,21 @@ export function toggleShortcuts(path) {
   // Tasten nicht an die Seite dahinter weiterreichen (z. B. Werkzeugtasten der Messseite); Esc schließt
   dlg.addEventListener("keydown", e => {
     e.stopPropagation();
-    if (e.key === "Escape") { e.preventDefault(); closeShortcuts(); }
-    else if (e.key === "?" || e.key === "F1") { e.preventDefault(); closeShortcuts(); }
+    if (e.key === "Escape" || e.key === "?" || e.key === "F1") { e.preventDefault(); closeShortcuts(); }
   });
   dlg.addEventListener("cancel", e => { e.preventDefault(); closeShortcuts(); });
-  dlg.addEventListener("click", e => { if (e.target === dlg) closeShortcuts(); });   // Klick auf den Hintergrund
+  // Klick auf den Hintergrund schliesst; Klicks im Dialogrechteck (auch auf seine Bildlaufleiste) nicht
+  dlg.addEventListener("click", e => {
+    if (e.target !== dlg) return;
+    const r = dlg.getBoundingClientRect();
+    if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) closeShortcuts();
+  });
   document.body.append(dlg);
   dlg.showModal();
   open = { dlg, back };
   closeBtn.focus();
-  onLeave(closeShortcuts);   // Seitenwechsel schließt die Kurzhilfe
+  if (!leaveHooked) {
+    leaveHooked = true;
+    onLeave(() => { leaveHooked = false; closeShortcuts(); });
+  }
 }
