@@ -1,7 +1,7 @@
 // Snap2CAD – Einstieg, Router, Kopfzeile, Anmeldung, Konto, Verwaltung
 import { api, h, clear, icon, LOGO, toast, fail, dialog, confirmDlg, dt, until, initials, num, debounce, strength,
   STRENGTH_TEXT, parseNum, copyText, plural, menuLabel } from "./lib.js";
-import { groupProjects, isReadOnly, notFoundConcerns, readOnlyText } from "./rights.js";
+import { groupProjects, isReadOnly, notFoundConcerns, readOnlyText, teamQuery } from "./rights.js";
 
 export const S = { me: null, project: null, leave: [] };
 const app = document.getElementById("app");
@@ -621,7 +621,7 @@ export function jobBadge(st) { const [t, k] = JOB_STATUS[st] || [st, "off"]; ret
 route(/^\/auftraege$/, async main => {
   const isAdmin = S.me.role === "admin";
   const qs = new URLSearchParams(location.search);
-  const team = Number(qs.get("team")) || null;   // Spec Teams §7: Filter „Meine · <Team A> · …“
+  const team = teamQuery(location.search);   // Spec Teams §7: Filter „Meine · <Team A> · …“
   const all = !team && qs.get("alle") === "1" && isAdmin;
   const tl = await api("/api/teams").catch(() => ({ teams: [] }));
   const tName = tl.teams.find(t => t.id === team)?.name || "";
@@ -629,7 +629,7 @@ route(/^\/auftraege$/, async main => {
   const filter = tl.teams.length ? h("div", { class: "chips", role: "group", "aria-label": "Aufträge filtern" },
     h("a", { class: "chip", href: "/auftraege", "aria-current": !team && !all ? "page" : null }, "Meine"),
     tl.teams.map(t => h("a", { class: "chip", href: `/auftraege?team=${t.id}`, "aria-current": team === t.id ? "page" : null }, t.name))) : null;
-  main.append(h("div", { class: "head" }, h("div", { class: "t" }, h("h1", {}, team ? `Aufträge im Team ${tName}`.trim() : all ? "Alle Aufträge" : "Meine Aufträge"),
+  main.append(h("div", { class: "head" }, h("div", { class: "t" }, h("h1", {}, team ? tName ? `Aufträge im Team ${tName}` : "Team-Aufträge" : all ? "Alle Aufträge" : "Meine Aufträge"),
     h("p", { class: "lead" }, "CAD-Aufträge laufen auf dem Server weiter, auch wenn du die Seite verlässt.")),
   h("div", { class: "chips" }, isAdmin && !team ? h("label", { class: "check" }, h("input", { type: "checkbox", checked: all, onchange: e => go(e.target.checked ? "/auftraege?alle=1" : "/auftraege") }), "Aufträge aller Benutzer") : null,
     h("a", { class: "btn primary", href: "/cad" }, icon("plus"), "Neuer Auftrag"))), filter, box);
@@ -659,6 +659,7 @@ route(/^\/auftraege$/, async main => {
     return list;
   };
   const list = await load();
+  if (!main.isConnected) return;   // währenddessen weitergeklickt: keinen Takt für eine abgehängte Seite starten
   if (list.some(j => j.status === "running" || j.status === "queued")) {
     const t = setInterval(() => load().then(l => { if (!l.some(j => j.status === "running" || j.status === "queued")) clearInterval(t); }).catch(() => {}), 3000);
     onLeave(() => clearInterval(t));
