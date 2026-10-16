@@ -23,28 +23,33 @@ _lock = threading.RLock()
 _VERTEX = re.compile(rb"vertex\s+(\S+)\s+(\S+)\s+(\S+)", re.I)
 
 
+def _stride(n: int) -> int:
+    return max(1, -(-n // MAX_TRIS))
+
+
 def _read_stl(path: Path) -> np.ndarray:
-    """Dreiecke als float32-Feld (n, 3, 3); leeres Feld bei Fehlern."""
+    """Dreiecke als float32-Feld (n, 3, 3), schon auf hoechstens MAX_TRIS ausgeduennt; leeres Feld bei Fehlern."""
     data = path.read_bytes()
     if len(data) >= 84:
         n = int.from_bytes(data[80:84], "little")
         if 84 + 50 * n == len(data):
             rec = np.frombuffer(data, dtype=np.dtype([("n", "<f4", 3), ("v", "<f4", (3, 3)), ("a", "<u2")]), count=n, offset=84)
-            return rec["v"].astype(np.float32)
+            return rec["v"][:: _stride(n)].astype(np.float32)     # erst ausduennen, dann umkopieren
     if data.lstrip()[:5].lower() == b"solid":
         vals = _VERTEX.findall(data)
         if vals and len(vals) % 3 == 0:
+            vals = [v for i in range(0, len(vals) // 3, _stride(len(vals) // 3)) for v in vals[3 * i:3 * i + 3]]
             return np.array(vals, dtype=np.float64).astype(np.float32).reshape(-1, 3, 3)
     return np.zeros((0, 3, 3), np.float32)
 
 
 def _render(tris: np.ndarray, w: int, h: int) -> np.ndarray | None:
+    if len(tris) > MAX_TRIS:                   # Sicherung fuer direkte Aufrufer; _read_stl duennt schon aus
+        tris = tris[:: _stride(len(tris))]
     tris = tris.astype(np.float64)
     tris = tris[np.isfinite(tris).all(axis=(1, 2))]
     if len(tris) == 0:
         return None
-    if len(tris) > MAX_TRIS:
-        tris = tris[::-(-len(tris) // MAX_TRIS)]
     d = np.array(VIEW_DIR) / np.linalg.norm(VIEW_DIR)
     right = np.cross([0.0, 0.0, 1.0], d)
     right /= np.linalg.norm(right)
@@ -109,7 +114,9 @@ def render_stl_png(stl_path: Path, out_path: Path, w: int = 480, h: int = 360) -
 
 
 def ensure_png(stl_path: Path, out_path: Path) -> bool:
-    """Vorhandenes Bild verwenden, sonst einmal rendern (parallele Anfragen warten auf den Lock)."""
+    """Vorhandenes Bild verwenden (ohne Lock), sonst einmal rendern (parallele Anfragen warten auf den Lock)."""
+    if out_path.is_file():
+        return True
     with _lock:
         if out_path.is_file():
             return True

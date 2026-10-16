@@ -112,6 +112,7 @@ CREATE INDEX IF NOT EXISTS ix_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS ix_photos_project ON photos(project_id);
 CREATE INDEX IF NOT EXISTS ix_meas_project ON measurements(project_id);
 CREATE INDEX IF NOT EXISTS ix_jobs_user ON jobs(user_id);
+CREATE INDEX IF NOT EXISTS ix_jobs_project ON jobs(project_id);
 CREATE INDEX IF NOT EXISTS ix_log_job ON job_log(job_id);
 CREATE INDEX IF NOT EXISTS ix_parts_photo ON parts(photo_id);
 """

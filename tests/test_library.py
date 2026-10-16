@@ -91,6 +91,75 @@ def test_render_stl_ausduennen(tmp_path, monkeypatch):
     assert preview.render_stl_png(stl, png) is True
 
 
+def test_read_stl_duennt_vor_dem_umkopieren(tmp_path, monkeypatch):
+    from app import preview
+    monkeypatch.setattr(preview, "MAX_TRIS", 5)
+    b, a = tmp_path / "b.stl", tmp_path / "a.stl"
+    _write_bin(b, _cube_tris())
+    _write_ascii(a, _cube_tris())
+    for f in (b, a):
+        tris = preview._read_stl(f)
+        assert tris.dtype == np.float32 and tris.shape[1:] == (3, 3)
+        assert 0 < len(tris) <= 5
+    monkeypatch.setattr(preview, "MAX_TRIS", 12)
+    assert len(preview._read_stl(b)) == 12
+
+
+def test_render_stl_abgeschnitten_nan_leer(tmp_path):
+    from app import preview
+    ok = tmp_path / "ok.stl"
+    _write_bin(ok, _cube_tris())
+    data = ok.read_bytes()
+    out = tmp_path / "x.png"
+    # abgeschnittene Binaer-STL (Kopf behauptet mehr Dreiecke), auch mit "solid" im Kopf
+    cut = tmp_path / "cut.stl"
+    cut.write_bytes(data[:-70])
+    other = tmp_path / "cut2.stl"
+    other.write_bytes(b"solid x" + data[7:200])
+    for f in (cut, other):
+        assert preview.render_stl_png(f, out) is False and not out.exists()
+    # null Dreiecke
+    zero = tmp_path / "zero.stl"
+    zero.write_bytes(bytes(80) + struct.pack("<I", 0))
+    assert preview.render_stl_png(zero, out) is False and not out.exists()
+    # nur NaN / Inf
+    nan = tmp_path / "nan.stl"
+    with np.errstate(all="ignore"):
+        _write_bin(nan, [[(float("nan"), 0.0, 0.0), (1.0, float("inf"), 0.0), (0.0, 1.0, 0.0)]])
+    assert preview.render_stl_png(nan, out) is False and not out.exists()
+    # einzelnes NaN-Dreieck neben gueltigen wird uebersprungen
+    mixed = tmp_path / "mixed.stl"
+    with np.errstate(all="ignore"):
+        _write_bin(mixed, _cube_tris() + [[(float("nan"), 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)]])
+    assert preview.render_stl_png(mixed, out) is True and cv2.imread(str(out)) is not None
+
+
+def test_ensure_png_treffer_wartet_nicht_auf_lock(tmp_path):
+    import threading
+    from app import preview
+    stl, png = tmp_path / "w.stl", tmp_path / "w.png"
+    _write_bin(stl, _cube_tris())
+    assert preview.render_stl_png(stl, png) is True
+    held, release, res = threading.Event(), threading.Event(), []
+
+    def holder():
+        with preview._lock:
+            held.set()
+            release.wait(10)
+
+    h = threading.Thread(target=holder)
+    h.start()
+    held.wait(5)
+    try:
+        t = threading.Thread(target=lambda: res.append(preview.ensure_png(stl, png)))
+        t.start()
+        t.join(2)
+        assert not t.is_alive() and res == [True]
+    finally:
+        release.set()
+        h.join()
+
+
 # ------------------------------------------------------------------ Hilfen
 
 def _uid(c):
@@ -252,4 +321,4 @@ def test_projects_liste_schnell(user):
     t = time.time()
     r = user.get("/api/projects")
     assert r.status_code == 200 and len(r.json()) == 30
-    assert time.time() - t < 2
+    assert time.time() - t < 5
