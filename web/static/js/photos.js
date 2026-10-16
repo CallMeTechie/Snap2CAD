@@ -68,7 +68,9 @@ export default async function (main) {
       h("label", { class: "field", style: { gap: "4px" } }, h("span", { class: "label" }, "Unterlage"), fmtSel),
       h("label", { class: "field", style: { gap: "4px" } }, h("span", { class: "label" }, "Ansicht"), viewSel))),
     h("div", { class: "photos-layout" },
-      h("aside", { "aria-label": "Hochgeladene Fotos", style: { display: "flex", flexDirection: "column", gap: "12px" } }, drop, ws, list,
+      h("aside", { "aria-label": "Hochgeladene Fotos", style: { display: "flex", flexDirection: "column", gap: "12px" } },
+        h("p", { class: "small muted matlink" }, icon("printer", 16), "Noch keine Messunterlage? ", h("a", { href: "/anleitung#unterlage" }, "Messunterlage drucken")),
+        drop, ws, list,
         h("button", { class: "btn ghost sm", style: { alignSelf: "flex-start" }, onclick: tipsDialog }, icon("info", 16), "Fototipps")),
       detail));
 
@@ -196,7 +198,7 @@ export default async function (main) {
     if (!p) {
       clear(detail, h("div", { class: "empty" }, icon("camera", 34), h("strong", {}, "Noch keine Fotos in diesem Projekt"),
         h("span", {}, "Unterlage ausdrucken, Teil auflegen, senkrecht fotografieren und hier hochladen."),
-        h("a", { href: "/", class: "small" }, "Unterlage erzeugen")));
+        h("a", { href: "/anleitung#unterlage", class: "small" }, "Messunterlage drucken")));
       return;
     }
     const a = p.analysis || {};

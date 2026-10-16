@@ -10,20 +10,56 @@ const routes = [];
 function route(re, fn, opts = {}) { routes.push({ re, fn, ...opts }); }
 
 export function go(path, replace = false) {
-  if (location.pathname + location.search === path) { render(); return; }
+  const u = new URL(path, location.href);
+  if (u.pathname + u.search === location.pathname + location.search) {
+    // dieselbe Seite: nur die Sprungmarke anpassen (ohne Marke = oben), nicht an die alte springen
+    if (u.hash !== location.hash) history.replaceState({}, "", path);
+    render();
+    return;
+  }
   history[replace ? "replaceState" : "pushState"]({}, "", path);
   render();
 }
 export function onLeave(fn) { S.leave.push(fn); }
 
-window.addEventListener("popstate", () => render());
+// Sprungmarke (#abschnitt) der aktuellen Seite anspringen; false = keine passende Stelle
+function jumpToHash() {
+  let id = "";
+  try { id = decodeURIComponent(location.hash.slice(1)); } catch { /* kaputte Kodierung */ }
+  const el = id ? document.getElementById(id) : null;
+  if (el) el.scrollIntoView({ block: "start" });
+  return !!el;
+}
+let shownPath = null;   // Pfad und Suche der gezeigten Seite: Zurueck zwischen Sprungmarken baut die Seite nicht neu auf
+window.addEventListener("popstate", () => { if (location.pathname + location.search === shownPath) jumpToHash(); else render(); });
 document.addEventListener("click", ev => {
   const a = ev.target.closest("a");
   if (!a || a.target || a.hasAttribute("download") || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button !== 0) return;
   const url = new URL(a.href, location.href);
   if (url.origin !== location.origin || url.pathname.startsWith("/api/") || url.pathname.startsWith("/static/")) return;
   ev.preventDefault();
-  go(url.pathname + url.search);
+  if (url.hash && url.pathname + url.search === shownPath) {   // Sprungmarke auf derselben Seite
+    if (url.hash !== location.hash) history.pushState({}, "", url.hash);
+    jumpToHash();
+    return;
+  }
+  go(url.pathname + url.search + url.hash);
+});
+
+let kurzhilfe = null, khLoading = false;   // Modul der Kurzhilfe als einmal geladenes Promise
+// Kurzhilfe: ? oder F1 auf jeder angemeldeten Seite mit Kopfzeile, nicht in Eingabefeldern
+document.addEventListener("keydown", ev => {
+  if (ev.key !== "?" && ev.key !== "F1") return;
+  if (ev.ctrlKey || ev.metaKey || ev.altKey || !S.me || !document.querySelector("header.top")) return;
+  if (ev.target instanceof Element && ev.target.closest("input,textarea,select,[contenteditable]")) return;
+  if (document.querySelector("dialog[open]")) return;   // anderer Dialog offen (die Kurzhilfe schliesst sich selbst)
+  ev.preventDefault();
+  if (khLoading) return;   // Modul laedt noch: weitere ? / F1 ignorieren
+  khLoading = true;
+  (kurzhilfe ??= import("./kurzhilfe.js"))
+    .then(m => m.toggleShortcuts(location.pathname))
+    .catch(e => { kurzhilfe = null; fail(e); })
+    .finally(() => { khLoading = false; });
 });
 
 api.onUnauthorized = () => { S.me = null; if (!location.pathname.startsWith("/login")) go("/login", true); };
@@ -36,9 +72,12 @@ export async function refreshMe() {
   return r;
 }
 
+let renderGen = 0;   // nur das juengste Rendern darf scrollen
 async function render() {
+  const gen = ++renderGen;
   for (const fn of S.leave.splice(0)) { try { fn(); } catch (e) { console.error(e); } }
   const path = location.pathname;
+  shownPath = path + location.search;
   let m, r;
   for (r of routes) { m = path.match(r.re); if (m) break; m = null; }
   if (!m) { r = routes.find(x => x.notFound); m = []; }
@@ -56,11 +95,12 @@ async function render() {
   } catch (e) {
     fail(e);
   }
-  window.scrollTo(0, 0);
+  if (gen !== renderGen) return;
+  if (!jumpToHash()) window.scrollTo(0, 0);
 }
 
 // ------------------------------------------------------------------ Kopfzeile
-const STEPS = [["/", "Unterlage"], ["/fotos", "Fotos prüfen"], ["/messen", "Messen"], ["/cad", "CAD-Modell"]];
+const STEPS = [["/", "Projekte"], ["/fotos", "Fotos prüfen"], ["/messen", "Messen"], ["/cad", "CAD-Modell"]];
 
 function statusPill() {
   const st = S.status || {};
@@ -99,6 +139,7 @@ function header(step) {
         h("br"), us ? `CAD diesen Monat: ${us.used} / ${us.quota ?? "∞"}` : ""),
       h("div", { class: "sep" }),
       locked ? null : h("a", { href: "/auftraege", role: "menuitem" }, icon("list"), "Meine Aufträge"),
+      locked ? null : h("a", { href: "/anleitung", role: "menuitem" }, icon("help"), "Anleitung"),
       locked ? null : h("a", { href: "/konto", role: "menuitem" }, icon("key"), "Konto und Passwort"),
       !locked && u.role === "admin" ? h("a", { href: "/admin", role: "menuitem" }, icon("users"), "Benutzerverwaltung") : null,
       h("div", { class: "sep" }),
@@ -107,7 +148,9 @@ function header(step) {
   const hdr = h("header", { class: "top" },
     h("a", { class: "brand", href: "/" }, LOGO(), "Snap2CAD"),
     nav,
-    h("div", { class: "top-right" }, statusPill(), h("div", { class: "usermenu" }, btn, menu)));
+    h("div", { class: "top-right" }, statusPill(),
+      locked ? null : h("a", { class: "iconbtn helpbtn", href: "/anleitung", title: "Anleitung (Taste ?)", "aria-label": "Anleitung (Taste ?)" }, icon("help", 20)),
+      h("div", { class: "usermenu" }, btn, menu)));
   return hdr;
 }
 
@@ -120,8 +163,7 @@ async function logout() {
 // ------------------------------------------------------------------ Projekt
 export async function ensureProject(force = false) {
   if (S.project && !force) return S.project;
-  let pid = null;
-  try { pid = localStorage.getItem(`mu.project.${S.me.id}`); } catch { /* */ }
+  const pid = rememberedProjectId();
   if (pid) {
     try { S.project = await api(`/api/projects/${pid}`); return S.project; } catch { /* weiter */ }
   }
@@ -137,8 +179,16 @@ export async function reloadProject() {
   if (n === reloadSeq && S.project?.id === id) S.project = p;
   return S.project;
 }
+// zuletzt geoeffnetes Projekt je Benutzer im Browser
+export const projectKey = () => `mu.project.${S.me.id}`;
 export function rememberProject() {
-  try { localStorage.setItem(`mu.project.${S.me.id}`, S.project.id); } catch { /* */ }
+  try { localStorage.setItem(projectKey(), S.project.id); } catch { /* */ }
+}
+export function rememberedProjectId() {
+  try { return Number(localStorage.getItem(projectKey())) || null; } catch { return null; }
+}
+export function forgetProject() {
+  try { localStorage.removeItem(projectKey()); } catch { /* */ }
 }
 
 export function projectPicker(onChange) {
@@ -765,7 +815,8 @@ async function showLink(title, link, text) {
 }
 
 // ------------------------------------------------------------------ Arbeitsschritte (Module)
-route(/^\/$/, async main => (await import("./mat.js")).default(main), { step: 1 });
+route(/^\/$/, async main => (await import("./library.js")).default(main), { step: 1 });
+route(/^\/anleitung$/, async main => (await import("./guide.js")).default(main));
 route(/^\/fotos$/, async main => (await import("./photos.js")).default(main), { step: 2 });
 route(/^\/messen$/, async (main) => (await import("./measure.js")).default(main), { step: 3, bare: false });
 route(/^\/cad$/, async main => (await import("./cad.js")).form(main), { step: 4 });

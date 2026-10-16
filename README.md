@@ -118,6 +118,8 @@ Formate, Markergröße, Farben und Texte stehen oben bzw. in den Funktionen `mat
 
 Alles aus diesem Repo als selbst gehostete Web-Oberfläche: Unterlage als PDF erzeugen, Fotos hochladen und prüfen, im Browser messen und mit Claude ein CAD-Modell erzeugen lassen.
 
+Startseite ist die Projektbibliothek: Jedes Werkstück ist ein Projekt mit Vorschaubild (3D-Modell, sonst erstes Foto), Zahl der Fotos und Maße und dem letzten CAD-Auftrag; Projekte lassen sich suchen, sortieren, umbenennen, archivieren und löschen. Die Anleitung (Fragezeichen oben rechts) erklärt den ganzen Ablauf, enthält den Generator für die Messunterlage und listet alle Tastenkürzel und Mausbefehle. Die Taste `?` oder `F1` zeigt auf jeder Seite die passenden Kürzel als Kurzhilfe (nicht, solange der Fokus in einem Eingabefeld liegt).
+
 <p align="center">
   <img src="docs/webapp_messen.png" alt="Messen im Browser mit Vorschlägen von Claude" width="49%">
   <img src="docs/webapp_cad.png" alt="CAD-Ergebnis mit 3D-Ansicht, Downloads und Prüfung" width="49%">
@@ -125,7 +127,7 @@ Alles aus diesem Repo als selbst gehostete Web-Oberfläche: Unterlage als PDF er
 
 | Schritt | Was passiert |
 |---|---|
-| 1 · Unterlage | PDF in A4 oder A3, Seiten wählbar, optionale Kopfzeile, Vorschau |
+| 1 · Projekte | Projektbibliothek mit Vorschaubild, Suche, Sortierung, Archiv · Messunterlage als PDF (A4/A3, Seiten wählbar, Kopfzeile, Vorschau) in der Anleitung |
 | 2 · Fotos prüfen | Marker-Erkennung, Restfehler je Marker, entzerrte Draufsicht und Höhenlehre, Kontrollmaß-Faktoren |
 | 3 · Messen | Strecke, Kreis aus 3 Punkten, Punkt, Winkel, Höhe · Kantenfang, Lupe, Zoom · Messschieber-Werte, kritische Maße · Claude schlägt zusätzlich Maße aus dem Foto vor |
 | 4 · CAD mit Claude | Claude schreibt build123d-Code, eine Sandbox erzeugt STEP und STL, prüft sie und lässt Fehler automatisch korrigieren · 3D-Ansicht (drehen, zoomen, Schnitt), Foto-Abgleich, Änderungswünsche als neue Versionen, Download als ZIP |
