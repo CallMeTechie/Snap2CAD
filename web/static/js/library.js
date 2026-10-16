@@ -304,7 +304,7 @@ export default async function (main) {
   }
   async function copyToPrivate(p) {
     if (!await confirmDlg(`„${p.name}“ in privat kopieren?`,
-      "Die Kopie enthält Fotos, Messungen, Teile, gemerkte Werte und von jedem CAD-Auftrag die aktuelle gültige Version; sie gehört dir. Das Original bleibt im Team.",
+      "Die Kopie enthält Fotos, Messungen, Teile, gemerkte Werte und von jedem fertigen CAD-Auftrag die aktuelle Version; sie gehört dir. Das Original bleibt im Team.",
       "In privat kopieren")) return;
     await copyTo(p, null);
   }
