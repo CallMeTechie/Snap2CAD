@@ -80,7 +80,7 @@ export default async function (main) {
   let edgeDrag = false, rDrag = false;  // Eckpunkt ziehen (links) bzw. Rechtsklick-Ziehen der Teile-Ebene
 
   const roSlot = h("div");   // Hinweis „Nur ansehen“ (Rolle Lesend)
-  const picker = projectPicker(() => { selId = null; init(); roRefresh(); });
+  const picker = projectPicker(() => { selId = null; init().catch(fail); roRefresh(); });
   let pickerT = 0;
   const refreshPicker = () => { if (!main.isConnected) return; clearTimeout(pickerT); pickerT = setTimeout(() => picker.refresh(), 800); };
   clear(main,
