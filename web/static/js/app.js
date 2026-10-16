@@ -657,7 +657,8 @@ route(/^\/auftraege$/, async main => {
   const filter = tl.teams.length ? h("div", { class: "chips", role: "group", "aria-label": "Aufträge filtern" },
     h("a", { class: "chip", href: "/auftraege", "aria-current": !team && !all ? "page" : null }, "Meine"),
     tl.teams.map(t => h("a", { class: "chip", href: `/auftraege?team=${t.id}`, "aria-current": team === t.id ? "page" : null }, t.name))) : null;
-  main.append(h("div", { class: "head" }, h("div", { class: "t" }, h("h1", {}, team ? tName ? `Aufträge im Team ${tName}` : "Team-Aufträge" : all ? "Alle Aufträge" : "Meine Aufträge"),
+  const title = team ? (tName ? `Aufträge im Team ${tName}` : "Team-Aufträge") : all ? "Alle Aufträge" : "Meine Aufträge";
+  main.append(h("div", { class: "head" }, h("div", { class: "t" }, h("h1", {}, title),
     h("p", { class: "lead" }, "CAD-Aufträge laufen auf dem Server weiter, auch wenn du die Seite verlässt.")),
   h("div", { class: "chips" }, isAdmin && !team ? h("label", { class: "check" }, h("input", { type: "checkbox", checked: all, onchange: e => go(e.target.checked ? "/auftraege?alle=1" : "/auftraege") }), "Aufträge aller Benutzer") : null,
     h("a", { class: "btn primary", href: "/cad" }, icon("plus"), "Neuer Auftrag"))), filter, box);

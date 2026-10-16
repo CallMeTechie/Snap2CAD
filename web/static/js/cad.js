@@ -216,7 +216,7 @@ export async function form(main) {
 export async function job(main, id) {
   let J = await api(`/api/jobs/${id}`);
   if (!main.isConnected) return;  // waehrend des Ladens weg navigiert: keine Uhr und keine Abfrage starten
-  const readOnly = J.my_role === "lesend";   // Rolle Lesend: alles sehen, nichts ändern (Spec Teams §7)
+  const readOnly = isReadOnly(J);   // Rolle Lesend: alles sehen, nichts ändern (Spec Teams §7)
   let ver = null, tab = "3d", viewer = null, timer = null, inflight = false, gone = false, fails = 0, jv = 0, liveCode = false, lastSig = "",
     followLatest = false,   // nach einem Neuaufbau: am Ende die neue aktuelle Version zeigen
     view3 = null, view3Used = false;   // 3D-Ansicht { version, box, views3 }: bleibt bei gleicher Version stehen (kein neuer Viewer)

@@ -17,8 +17,8 @@ export function saveScope(v) { try { localStorage.setItem(SCOPE_KEY, v); } catch
 
 // Gemerkter Bereich (lib.scope): "private" oder "team:<id>" eines eigenen Teams; alles andere wird "private"
 export function validScope(stored, teams) {
-  const m = /^team:([1-9][0-9]*)$/.exec(String(stored ?? ""));
-  return m && (teams || []).some(t => t.id === Number(m[1])) ? `team:${Number(m[1])}` : "private";
+  const id = teamIdOf(stored);
+  return id != null && (teams || []).some(t => t.id === id) ? `team:${id}` : "private";
 }
 
 // Team-ID aus einem Bereich: "team:<id>" -> Zahl, sonst null (privat)

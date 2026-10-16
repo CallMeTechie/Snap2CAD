@@ -55,7 +55,7 @@ export default async function (main) {
   async function decide(i, what) {
     try {
       const r = await api(`/api/team-invites/${i.id}/${what}`, { method: "POST" });
-      await refreshMe().catch(() => {});
+      await refreshMe().catch(e => console.error(e));
       toast(what === "accept" ? `Willkommen im Team „${i.team_name}“` : "Einladung abgelehnt", "ok");
       goIfStill(start, what === "accept" ? `/teams?team=${r.id}` : "/teams");
     } catch (e) { fail(e); goIfStill(start, "/teams"); }
