@@ -65,8 +65,10 @@ export function notFoundConcerns(path, projectId, jobId) {
   return null;
 }
 
-// ?team=<id> der Seiten „Teams“: nur reine Ziffern (höchstens 18), sonst null
+// ?team=<id> der Seiten „Teams“: nur reine Ziffern (höchstens 15, also eine sichere Ganzzahl), sonst null
 export function teamQuery(search) {
   const v = new URLSearchParams(search || "").get("team");
-  return v && /^\d{1,18}$/.test(v) && Number(v) > 0 ? Number(v) : null;
+  if (!v || !/^\d{1,15}$/.test(v)) return null;
+  const n = Number(v);
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
 }

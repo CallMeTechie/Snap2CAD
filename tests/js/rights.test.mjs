@@ -159,6 +159,10 @@ test("teamQuery: nur reine Ziffern als Team-Nummer, alles andere null", () => {
   for (const bad of ["", "?team=", "?team=0", "?team=1.5", "?team=-3", "?team=abc", "?team=1e3", "?team=%207",
     "?team=9223372036854775808", "?team=1234567890123456789"]) assert.equal(teamQuery(bad), null, bad);
   assert.equal(teamQuery(undefined), null);
+  assert.equal(teamQuery("?team=999999999999999"), 999999999999999);                    // 15 Ziffern: sichere Ganzzahl
+  for (const big of ["?team=9999999999999999", "?team=9007199254740993", "?team=123456789012345678"]) {
+    assert.equal(teamQuery(big), null, big);                                           // mehr als 15 Ziffern: null
+  }
 });
 
 test("menuLabel: Einladungszahl nur wenn vorhanden, Einzahl bei 1", () => {
