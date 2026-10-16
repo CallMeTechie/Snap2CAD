@@ -58,3 +58,9 @@ export function notFoundConcerns(path, projectId, jobId) {
   if (projectId != null && under(`/api/projects/${projectId}`)) return "project";
   return null;
 }
+
+// ?team=<id> der Seiten „Teams“: nur reine Ziffern (höchstens 18), sonst null
+export function teamQuery(search) {
+  const v = new URLSearchParams(search || "").get("team");
+  return v && /^\d{1,18}$/.test(v) && Number(v) > 0 ? Number(v) : null;
+}

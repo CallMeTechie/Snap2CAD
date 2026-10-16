@@ -1,8 +1,8 @@
 // Rechte und Bereiche der Bibliothek (web/static/js/rights.js) – Aufruf: node --test tests/js/*.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ROLE_TEXT, SCOPE_KEY, creatorText, groupProjects, isReadOnly, loadScope, notFoundConcerns, projectRights, readOnlyText, saveScope, teamIdOf, validScope } from "../../web/static/js/rights.js";
-import { api, plural, upload } from "../../web/static/js/lib.js";
+import { ROLE_TEXT, SCOPE_KEY, creatorText, groupProjects, isReadOnly, loadScope, notFoundConcerns, projectRights, readOnlyText, saveScope, teamIdOf, teamQuery, validScope } from "../../web/static/js/rights.js";
+import { api, menuLabel, plural, upload } from "../../web/static/js/lib.js";
 
 test("projectRights reicht p.rights des Servers durch (eine Quelle: access.allowed)", () => {
   const none = { write: false, delete: false, move: false, copy: false };
@@ -140,4 +140,19 @@ test("upload meldet 404 und 403 „Nur lesender Zugriff“ an dieselben Hooks wi
   } finally { globalThis.XMLHttpRequest = old; api.onNotFound = null; api.onReadOnly = null; }
   assert.deepEqual(seen, [["Projekt nicht gefunden", "/api/projects/7/photos"]]);
   assert.equal(ro, 1);
+});
+
+test("teamQuery: nur reine Ziffern als Team-Nummer, alles andere null", () => {
+  assert.equal(teamQuery("?team=7"), 7);
+  assert.equal(teamQuery("?x=1&team=42"), 42);
+  for (const bad of ["", "?team=", "?team=0", "?team=1.5", "?team=-3", "?team=abc", "?team=1e3", "?team=%207",
+    "?team=9223372036854775808", "?team=1234567890123456789"]) assert.equal(teamQuery(bad), null, bad);
+  assert.equal(teamQuery(undefined), null);
+});
+
+test("menuLabel: Einladungszahl nur wenn vorhanden, Einzahl bei 1", () => {
+  assert.equal(menuLabel({ username: "anna" }), "Benutzermenü: anna");
+  assert.equal(menuLabel({ username: "anna", role: "admin" }, 0), "Benutzermenü: anna, Administrator");
+  assert.equal(menuLabel({ username: "anna" }, 1), "Benutzermenü: anna, 1 Team-Einladung");
+  assert.equal(menuLabel({ username: "anna", role: "admin" }, 3), "Benutzermenü: anna, Administrator, 3 Team-Einladungen");
 });

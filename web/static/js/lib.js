@@ -154,6 +154,9 @@ export function parseNum(s) {
 }
 // „1 Foto“ / „3 Fotos“ – eine Stelle für Bibliothek, Teams und Verwaltung
 export const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+// Beschriftung des Benutzermenü-Knopfes (Kopfzeile); mit offenen Team-Einladungen
+export const menuLabel = (u, invites = 0) => `Benutzermenü: ${u.username}${u.role === "admin" ? ", Administrator" : ""}${
+  invites ? `, ${plural(invites, "Team-Einladung", "Team-Einladungen")}` : ""}`;
 export function dt(iso, withTime = true) {
   if (!iso) return "–";
   const d = new Date(iso), now = new Date();

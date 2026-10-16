@@ -1,6 +1,6 @@
 // Snap2CAD – Einstieg, Router, Kopfzeile, Anmeldung, Konto, Verwaltung
 import { api, h, clear, icon, LOGO, toast, fail, dialog, confirmDlg, dt, until, initials, num, debounce, strength,
-  STRENGTH_TEXT, parseNum, copyText, plural } from "./lib.js";
+  STRENGTH_TEXT, parseNum, copyText, plural, menuLabel } from "./lib.js";
 import { groupProjects, isReadOnly, notFoundConcerns, readOnlyText } from "./rights.js";
 
 export const S = { me: null, project: null, leave: [] };
@@ -148,13 +148,12 @@ function inviteBadge() {
 function header(step) {
   const u = S.me;
   const locked = !!u.must_change_pw;
-  const nInv = S.status?.team_invites || 0;
   const nav = h("nav", { class: "steps", "aria-label": "Arbeitsschritte" }, STEPS.map(([href, lbl], i) =>
     h("a", { class: "step", href, "aria-current": step === i + 1 ? "page" : null, "aria-disabled": locked ? "true" : null },
       h("span", { class: "n" }, i + 1), h("span", { class: "lbl" }, lbl))));
   const menu = h("div", { class: "menu", hidden: true, role: "menu" });
   const btn = h("button", { class: "userbtn", "aria-haspopup": "menu", "aria-expanded": "false",
-    "aria-label": `Benutzermenü: ${u.username}${u.role === "admin" ? ", Administrator" : ""}${nInv ? `, ${nInv} Team-Einladung${nInv > 1 ? "en" : ""}` : ""}` },
+    "aria-label": menuLabel(u, S.status?.team_invites || 0) },
     h("span", { class: "avatar" }, initials(u)), h("span", { class: "uname" }, u.username),
     u.role === "admin" ? h("span", { class: "tag" }, "ADMIN") : null, inviteBadge(), icon("chevron", 14));
   const close = () => { menu.hidden = true; btn.setAttribute("aria-expanded", "false"); };
@@ -920,6 +919,11 @@ route(/.*/, async main => {
     const top = document.querySelector(".top-right");
     if (top && S.status) { const pills = top.querySelectorAll(".pill"); pills.forEach(p => p.remove()); top.prepend(...statusPill().filter(Boolean)); }
     const ub = document.querySelector(".userbtn");   // Abzeichen offener Team-Einladungen nachführen
-    if (ub) { ub.querySelector(".ibadge")?.remove(); const b = inviteBadge(); if (b) ub.insertBefore(b, ub.lastElementChild); }
+    if (ub) {
+      ub.querySelector(".ibadge")?.remove();
+      const b = inviteBadge();
+      if (b) ub.insertBefore(b, ub.lastElementChild);
+      ub.setAttribute("aria-label", menuLabel(S.me, S.status?.team_invites || 0));
+    }
   }).catch(() => {}); }, 60000);
 })();
