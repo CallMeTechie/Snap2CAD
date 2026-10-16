@@ -262,6 +262,39 @@ def test_migration_abbruch_behaelt_ursache(tmp_path):
     assert _dump(p) == vor                                                      # Schliessen verwirft die Transaktion
 
 
+class _BoomCommit(sqlite3.Connection):
+    """COMMIT scheitert, solange fail gesetzt ist (z. B. volle Platte oder SQLITE_BUSY)."""
+
+    fail = False
+
+    def execute(self, sql, *args):
+        if self.fail and sql == "COMMIT":
+            raise sqlite3.OperationalError("Testfehler beim COMMIT")
+        return super().execute(sql, *args)
+
+
+def test_verwaltung_atomic_commit_fehler_rollt_zurueck(tmp_path, monkeypatch):
+    """Gesamtreview S-3: scheitert COMMIT, rollt atomic() zurueck und gibt den Fehler weiter; keine Transaktion bleibt
+    offen, das naechste atomic() schreibt normal."""
+    from app import db
+    c = db._open(tmp_path / "commit.db", factory=_BoomCommit)
+    monkeypatch.setattr(db, "_conn", c)
+    try:
+        c.fail = True
+        with pytest.raises(sqlite3.OperationalError, match="Testfehler beim COMMIT"):
+            with db.atomic():
+                db.ex("INSERT INTO teams(name,created_at) VALUES ('weg', 'x')")
+        assert c.in_transaction is False
+        assert db.q("SELECT name FROM teams") == []
+        c.fail = False
+        with db.atomic():
+            db.ex("INSERT INTO teams(name,created_at) VALUES ('bleibt', 'x')")
+        assert c.in_transaction is False
+        assert [r["name"] for r in db.q("SELECT name FROM teams")] == ["bleibt"]
+    finally:
+        c.close()
+
+
 # ------------------------------------------------------------------ Hilfen
 
 _seq = itertools.count(1)

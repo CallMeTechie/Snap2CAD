@@ -314,7 +314,7 @@ def tx(statements: list[tuple[str, tuple]]):
 def atomic():
     """Mehrere Lese-/Schreibschritte als eine Transaktion. Haelt _lock, damit parallele Anfragen (Threadpool)
     Aenderung + Neuberechnung nicht verschraenken. Verschachtelt = keine Savepoints: eine im inneren Block
-    gefangene Ausnahme rollt nichts zurueck."""
+    gefangene Ausnahme rollt nichts zurueck. Scheitert COMMIT, wird zurueckgerollt und der Fehler weitergegeben."""
     with _lock:
         c = conn()
         if c.in_transaction:
@@ -327,7 +327,17 @@ def atomic():
             if c.in_transaction:
                 c.execute("ROLLBACK")
             raise
-        c.execute("COMMIT")
+        try:
+            c.execute("COMMIT")
+        except BaseException:
+            # Gesamtreview S-3: sonst bliebe die Transaktion offen und jedes folgende atomic() liefe verschachtelt
+            # ohne eigenes COMMIT; ein Fehler beim ROLLBACK verdeckt die eigentliche Ursache nicht
+            try:
+                if c.in_transaction:
+                    c.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
 def jload(s, default=None):
     if s is None or s == "":
         return default
