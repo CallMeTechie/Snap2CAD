@@ -113,6 +113,8 @@ def require_job(user: dict, job_id: int, need: str) -> dict:
 
 def require_team(user: dict, team_id: int, need: str) -> dict:
     """need = Mindestrolle "lesend" | "mitglied" | "leiter". Kein Mitglied -> 404 „Team nicht gefunden“."""
+    if need not in ROLE_RANK:
+        raise ValueError(need)
     t = db.q1("SELECT * FROM teams WHERE id=?", (team_id,))
     role = team_role(user["id"], team_id) if t else None
     if role is None:
