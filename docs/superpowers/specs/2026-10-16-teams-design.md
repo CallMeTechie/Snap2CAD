@@ -211,6 +211,15 @@ Routen (alle angemeldet, CSRF wie üblich):
   Fotoordner entfernen. Alle übrigen Aufträge bleiben bei ihren Erstellern ohne Projekt.
   Audit `team_deleted` mit Projektzahl. Die Route der Benutzerverwaltung (`app.js`, Regex
   `^/admin(?:/(einladungen|protokoll|einstellungen))?$`) erhält `teams`.
+- **Benutzer direkt aufnehmen** (Marc, 16.10.2026): `POST /api/admin/teams/{tid}/members {username, role}` mit
+  `require_admin`, ohne Einladung und Annahme – der Ausweg für ein Team ohne Mitglieder, aber mit Projekten. Benutzer
+  per exaktem Benutzernamen (Groß/klein egal) und aktiv, sonst 404 „Benutzer nicht gefunden“; schon Mitglied → 409;
+  eine offene Einladung an ihn wird zurückgezogen. Audit `team_member_added_admin` (in `ACTIONS`). Der Admin-Reiter
+  erhält dafür das Feld „Benutzer aufnehmen“ mit Rollenauswahl.
+- **Leere Teams**: Ein Team ohne Mitglieder **und** ohne Projekte wird automatisch gelöscht, sobald es dazu kommt –
+  beim Austritt des letzten Mitglieds (§3), wenn der Admin das letzte Mitglied entfernt, und beim Löschen des letzten
+  Mitglieds (`succeed_leaders`, in derselben Transaktion); Audit `team_deleted`. Ein Team ohne Mitglieder mit
+  Projekten bleibt und ist „ohne Leiter“ gekennzeichnet.
 - Routen unter `/api/admin/teams…` mit `require_admin`; Inhalte der Team-Projekte sind dort nicht abrufbar.
   `GET /api/jobs?all=1` liefert dem Admin nur Aufträge ohne Projekt, in privaten Projekten und in Teams, in denen er
   Mitglied ist (`LEFT JOIN users`, Ersteller leer = „gelöschter Benutzer“); die Auftragszahl in `admin_users` zählt nur
@@ -220,7 +229,8 @@ Routen (alle angemeldet, CSRF wie üblich):
   `DELETE FROM projects WHERE user_id=? AND team_id IS NULL` – die Kaskade greift wegen `ON DELETE SET NULL` nicht
   mehr); **Team-Projekte und Aufträge in Team-Projekten bleiben** (Ersteller wird leer); Mitgliedschaften und
   Einladungen entfallen per Kaskade. War er letzter Leiter eines Teams mit weiteren Mitgliedern, wird das älteste
-  verbleibende Mitglied (frühestes `joined_at`) Leiter (Audit `team_leader_auto`). Die Nachfolge wird vor dem Löschen
+  verbleibende Mitglied (frühestes `joined_at`) Leiter (Audit `team_leader_auto`); war er das letzte Mitglied eines
+  Teams ohne Projekte, wird das Team gelöscht (siehe „Leere Teams“). Die Nachfolge wird vor dem Löschen
   der Benutzerzeile ermittelt und in derselben Transaktion wie `DELETE FROM users` gesetzt. Die Bestätigung
   (`admin_users` und `app.js`) nennt die Zahl der Team-Projekte, die bleiben.
 
@@ -232,7 +242,9 @@ Routen (alle angemeldet, CSRF wie üblich):
   `user_id` = Kopierender.
 - `auth.usage_this_month(user_id)` zählt Versionen mit `trigger IN ('create','iterate')` und `v.user_id = ?` – ohne
   Rückgriff auf `jobs.user_id`, damit die Versionen eines gelöschten Auslösers nicht dem Ersteller angerechnet werden.
-- Neuaufbau-Grenzen (`_param_limits`): laufend und je Stunde über `v.user_id`.
+- Neuaufbau-Grenzen (`_param_limits`): laufend und je Stunde über `v.user_id`; Versionen ohne Auslöser zählen über
+  `COALESCE(v.user_id, j.user_id)` beim Ersteller – in Produktion betrifft das nur Neuaufbauten eines gelöschten
+  Auslösers der letzten Stunde.
 - Laufende Aufträge je Nutzer (max. 3): gezählt über `jobs.run_by` bei Status `queued`/`running`, geprüft wie heute nur
   in `create`; `iterate` und `param` setzen `run_by`, prüfen die Zahl aber nicht (`param` behält seine eigene Grenze).
 - KI-Tageskontingent (`_ai_uses_today`, Audit-basiert): unverändert beim Auslöser.
@@ -264,9 +276,11 @@ Routen (alle angemeldet, CSRF wie üblich):
 - Verschieben während ein Auftrag des Projekts läuft: erlaubt (Auftrag folgt dem Projekt, Rechte gelten ab sofort).
 - Kopieren während ein Auftrag läuft: kopiert die aktuelle gültige Version; laufende Versionen nicht.
 - Benutzer verliert die Mitgliedschaft, während er eine Seite offen hat: nächste Anfrage → 404; die Oberfläche zeigt die
-  Meldung und führt zur Bibliothek.
+  Meldung und führt zur Bibliothek; auf der Auftragsseite führt sie zu „Meine Aufträge“.
 - Team ohne Leiter (nur durch Benutzer-Löschen ohne verbleibende Mitglieder möglich, oder Admin-Eingriff): im Admin-
-  Reiter gekennzeichnet; Admin kann einen Leiter ernennen, sobald es Mitglieder gibt, oder das Team löschen.
+  Reiter gekennzeichnet; der Admin ernennt einen Leiter unter den Mitgliedern, nimmt einen Benutzer direkt auf (auch
+  als Leiter, §5 – so bekommt auch ein Team ohne Mitglieder mit Projekten wieder einen Leiter) oder löscht das Team.
+  Ein Team ohne Mitglieder und ohne Projekte entsteht nicht; es wird gelöscht (§5).
 - Namen von Teams sind nicht eindeutig; Anzeige immer mit Teamname, interne Zuordnung über id.
 - Ein Benutzer sieht von anderen Benutzern nur Benutzername und Anzeigename von Mitgliedern seiner Teams, von
   Erstellern in seinen Team-Bibliotheken und vom Einladenden einer an ihn gerichteten offenen Einladung.
