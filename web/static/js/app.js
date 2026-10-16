@@ -1,7 +1,7 @@
 // Snap2CAD – Einstieg, Router, Kopfzeile, Anmeldung, Konto, Verwaltung
 import { api, h, clear, icon, LOGO, toast, fail, dialog, confirmDlg, dt, until, initials, num, debounce, strength,
   STRENGTH_TEXT, parseNum, copyText, plural, menuLabel } from "./lib.js";
-import { groupProjects, isReadOnly, notFoundConcerns, readOnlyText, teamQuery } from "./rights.js";
+import { groupProjects, isReadOnly, notFoundConcerns, readOnlyRedraw, readOnlyText, teamQuery } from "./rights.js";
 
 export const S = { me: null, project: null, leave: [] };
 const app = document.getElementById("app");
@@ -87,8 +87,10 @@ api.onReadOnly = () => {
   if (roDone || (!job && !S.project)) return;
   roDone = true;
   const redraw = () => { roRedraw = true; render(); };
-  if (job) redraw();
-  else reloadProject().then(p => { if (isReadOnly(p)) redraw(); }).catch(() => {});
+  if (job) { redraw(); return; }
+  const here = () => ({ path: location.pathname + location.search, projectId: S.project?.id ?? null });
+  const start = here();   // inzwischen Seite oder Projekt gewechselt: nicht die neue Seite neu zeichnen
+  reloadProject().then(p => { if (readOnlyRedraw(start, here(), p)) redraw(); }).catch(() => { roDone = false; });
 };
 
 export async function refreshMe() {

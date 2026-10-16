@@ -1,7 +1,7 @@
 // Rechte und Bereiche der Bibliothek (web/static/js/rights.js) – Aufruf: node --test tests/js/*.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ROLE_TEXT, SCOPE_KEY, creatorText, groupProjects, isReadOnly, loadScope, notFoundConcerns, projectRights, readOnlyText, saveScope, teamIdOf, teamQuery, validScope } from "../../web/static/js/rights.js";
+import { ROLE_TEXT, SCOPE_KEY, creatorText, groupProjects, isReadOnly, loadScope, notFoundConcerns, projectRights, readOnlyRedraw, readOnlyText, saveScope, teamIdOf, teamQuery, validScope } from "../../web/static/js/rights.js";
 import { api, menuLabel, plural, upload } from "../../web/static/js/lib.js";
 
 test("projectRights reicht p.rights des Servers durch (eine Quelle: access.allowed)", () => {
@@ -109,6 +109,17 @@ test("notFoundConcerns: nur Pfade des offenen Projekts bzw. Auftrags (nicht das 
   assert.equal(notFoundConcerns("/api/jobs/13", 7, 12), null);
   assert.equal(notFoundConcerns("/api/jobs/12", 7, null), null);
   assert.equal(notFoundConcerns(undefined, 7, 12), null);
+});
+
+test("readOnlyRedraw: nur dieselbe Seite mit demselben Projekt und Rolle Lesend wird neu gezeichnet", () => {
+  const start = { path: "/messen", projectId: 7 }, ro = { id: 7, my_role: "lesend" };
+  assert.equal(readOnlyRedraw(start, { path: "/messen", projectId: 7 }, ro), true);
+  assert.equal(readOnlyRedraw(start, { path: "/fotos", projectId: 7 }, ro), false);                 // Seite gewechselt
+  assert.equal(readOnlyRedraw(start, { path: "/messen", projectId: 8 }, { id: 8, my_role: "lesend" }), false);   // Projekt gewechselt
+  assert.equal(readOnlyRedraw(start, { path: "/messen", projectId: null }, null), false);            // Zugriff verloren
+  assert.equal(readOnlyRedraw(start, { path: "/messen", projectId: 7 }, { id: 7, my_role: "mitglied" }), false);
+  assert.equal(readOnlyRedraw(start, { path: "/messen", projectId: 7 }, { id: 9, my_role: "lesend" }), false);
+  assert.equal(readOnlyRedraw(null, { path: "/messen", projectId: 7 }, ro), false);
 });
 
 test("api: onNotFound bekommt den Pfad; true markiert den Fehler als gemeldet (kein zweiter Toast)", async () => {

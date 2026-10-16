@@ -48,6 +48,12 @@ export function groupProjects(list) {
 // Rolle „Lesend“: Fotos, Messen und CAD nur ansehen (Spec Teams §7)
 export const isReadOnly = p => p?.my_role === "lesend";
 export const readOnlyText = p => `Nur ansehen – Rolle Lesend im Team ${p?.team_name || ""}`.trim();
+// Nach einem 403 „Nur lesender Zugriff“ (app.js api.onReadOnly): neu zeichnen nur, wenn noch dieselbe Seite (start.path)
+// mit demselben Projekt offen ist und das nachgeladene Projekt p die Rolle Lesend hat
+export function readOnlyRedraw(start, now, p) {
+  if (!start || !now || start.path !== now.path || start.projectId !== now.projectId) return false;
+  return p?.id === start.projectId && isReadOnly(p);
+}
 
 // Betrifft eine 404-Antwort auf `path` das offene Projekt (projectId) bzw. den offenen Auftrag (jobId)? Nur dann ist der
 // Zugriff darauf verloren; ein 404 auf ein anderes Projekt (Projektwahl, veraltete Merkung) darf die Seite nicht verlassen.
