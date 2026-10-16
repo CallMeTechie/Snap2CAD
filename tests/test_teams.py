@@ -578,12 +578,13 @@ def test_kontingent_geloeschter_ausloeser(app, admin, monkeypatch):
     tid = _team("Weg", {L.uid: "leiter", M.uid: "mitglied"})
     jid = _job(L.uid, _project(L.uid, tid))
     monkeypatch.setattr(jobs, "_submit", lambda *a: None)
+    before_l = auth.usage_this_month(L.uid)                    # vor dem Aendern durch M (die Version aus _job zaehlt)
     assert M.post(f"/api/jobs/{jid}/iterate", json={"text": "x 7 mm"}, headers=H).status_code == 200
     jobs._new_version(jid, "iterate", "x 7 mm", "", {})
     db.ex("UPDATE jobs SET status='done' WHERE id=?", (jid,))
-    before = auth.usage_this_month(L.uid)
+    assert auth.usage_this_month(L.uid) == before_l            # M's Version zaehlt nicht beim Leiter
     assert admin.delete(f"/api/admin/users/{M.uid}", headers=H).status_code == 200
-    assert auth.usage_this_month(L.uid) == before
+    assert auth.usage_this_month(L.uid) == before_l
     assert db.q1("SELECT COUNT(*) n FROM job_versions WHERE job_id=? AND user_id IS NULL", (jid,))["n"] == 1
     assert db.q1("SELECT run_by FROM jobs WHERE id=?", (jid,))["run_by"] is None
 
@@ -606,3 +607,45 @@ def test_kontingent_param_grenzen_beim_ausloeser(app, admin, monkeypatch):
     finally:
         db.ex("UPDATE jobs SET status='done' WHERE id IN (?,?,?)", (j1, j2, j3))
         db.ex("UPDATE job_versions SET status='cancelled' WHERE job_id IN (?,?,?) AND status='running'", (j1, j2, j3))
+
+
+def test_kontingent_ausloeser_geloescht_waehrend_lauf(app, admin):
+    """Wird der Ausloeser geloescht, waehrend sein Lauf am Auftrag des Leiters noch Versionen anlegt, wird user_id NULL
+    (zaehlt bei niemandem) statt eines Fremdschluessel-Fehlers, der den Auftrag des Leiters scheitern liesse."""
+    from app import auth, db, jobs
+    L, M = _mk(app, admin, "klaufg", "klaufgm")
+    tid = _team("LaufWeg", {L.uid: "leiter", M.uid: "mitglied"})
+    jid = _job(L.uid, _project(L.uid, tid))
+    before_l = auth.usage_this_month(L.uid)
+    db.ex("UPDATE jobs SET run_by=? WHERE id=?", (M.uid, jid))   # Lauf von M, "by" wurde beim Start gemerkt
+    assert admin.delete(f"/api/admin/users/{M.uid}", headers=H).status_code == 200
+    v = jobs._new_version(jid, "iterate", "x", "", {}, by=M.uid)   # by zeigt auf den geloeschten Benutzer
+    v2 = jobs._new_version(jid, "autofix", "", "", {}, by=M.uid)
+    for ver in (v, v2):
+        assert db.q1("SELECT user_id FROM job_versions WHERE job_id=? AND version=?", (jid, ver))["user_id"] is None
+    assert auth.usage_this_month(L.uid) == before_l
+
+
+def test_kontingent_lauf_uebernimmt_ausloeser_in_autofix(app, admin, monkeypatch):
+    """Echter _run (KI im Testmodus): M aendert den Auftrag des Leiters, die erste Antwort ist fehlerhaft, ein Autofix
+    folgt. Beide Versionen dieses Laufs gehoeren M, auch wenn jobs.run_by waehrenddessen nicht mehr auf M zeigt
+    (der Lauf haelt den beim Start gemerkten Ausloeser, nicht den Rueckgriff auf jobs.run_by)."""
+    from app import ai, auth, db
+    from test_api import wait_job
+    L, M = _mk(app, admin, "krun", "krunm")
+    tid = _team("Lauf", {L.uid: "leiter", M.uid: "mitglied"})
+    jid = _job(L.uid, _project(L.uid, tid))            # messages=[]: die Testmodus-KI liefert zuerst den fehlerhaften Code
+    before = auth.usage_this_month(L.uid), auth.usage_this_month(M.uid)
+    real_call = ai.call
+
+    def call(*a, **kw):
+        db.ex("UPDATE jobs SET run_by=NULL WHERE id=?", (jid,))
+        return real_call(*a, **kw)
+
+    monkeypatch.setattr(ai, "call", call)
+    assert M.post(f"/api/jobs/{jid}/iterate", json={"text": "Dicke 8 mm"}, headers=H).status_code == 200
+    wait_job(M, jid)
+    rows = db.q("SELECT trigger, user_id FROM job_versions WHERE job_id=? AND version>1 ORDER BY version", (jid,))
+    assert [r["trigger"] for r in rows] == ["iterate", "autofix"]
+    assert [r["user_id"] for r in rows] == [M.uid, M.uid]
+    assert (auth.usage_this_month(L.uid), auth.usage_this_month(M.uid)) == (before[0], before[1] + 1)

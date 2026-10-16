@@ -769,11 +769,13 @@ def _run_safe(job_id, trigger, request_text, ev):
 
 def _new_version(job_id: int, trigger: str, request_text: str, text: str, usage: dict, by: int | None = None) -> int:
     """Versionsnummer vergeben und Zeile sofort anlegen (unter Sperre, ohne Doppelvergabe). Ausloeser = by (vom Lauf
-    beim Start gemerkt, auch fuer Autofix-Versionen desselben Laufs), ohne by jobs.run_by (Spec Teams §6)."""
+    beim Start gemerkt, auch fuer Autofix-Versionen desselben Laufs), ohne by jobs.run_by (Spec Teams §6). Ein inzwischen
+    geloeschter Ausloeser wird NULL (zaehlt bei niemandem) statt den Lauf am Fremdschluessel scheitern zu lassen."""
     with _lock:
         v = db.q1("SELECT COALESCE(MAX(version),0)+1 v FROM job_versions WHERE job_id=?", (job_id,))["v"]
         db.ex("""INSERT INTO job_versions(job_id,version,trigger,request_text,claude_text,status,usage,created_at,user_id)
-                 VALUES (?,?,?,?,?, 'running', ?, ?, COALESCE(?, (SELECT run_by FROM jobs WHERE id=?)))""",
+                 VALUES (?,?,?,?,?, 'running', ?, ?,
+                         (SELECT id FROM users WHERE id=COALESCE(?, (SELECT run_by FROM jobs WHERE id=?))))""",
               (job_id, v, trigger, request_text, text, db.jdump(usage), db.now(), by, job_id))
     return v
 
