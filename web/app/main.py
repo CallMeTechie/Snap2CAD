@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from . import ai, auth, check, config, db, geom, jobs, parts, sandbox, settings
+from . import ai, auth, check, config, db, geom, jobs, parts, preview, sandbox, settings
 
 sys.path.insert(0, str(config.ROOT))
 from core import edges, matgen, vision  # noqa: E402
@@ -763,9 +763,31 @@ def _project_public(p: dict, detail: bool = False) -> dict:
     return out
 
 
+def _library_fields(p: dict) -> dict:
+    """Bibliotheksfelder der Projektliste: letzter Auftrag, Vorschaubild, letzte Aenderung."""
+    pid = p["id"]
+    lj = db.q1("SELECT id,name,status,current_version,updated_at FROM jobs WHERE project_id=? "
+               "ORDER BY updated_at DESC, id DESC LIMIT 1", (pid,))
+    mj = db.q1("SELECT j.id, j.current_version FROM jobs j JOIN job_versions v "
+               "ON v.job_id=j.id AND v.version=j.current_version "
+               "WHERE j.project_id=? AND v.status='ok' ORDER BY j.updated_at DESC, j.id DESC LIMIT 1", (pid,))
+    thumb = None
+    if mj:
+        thumb = {"kind": "model", "url": f"/api/jobs/{mj['id']}/v/{mj['current_version']}/preview.png"}
+    else:
+        for ph in db.q("SELECT id FROM photos WHERE project_id=? ORDER BY (view='top') DESC, id", (pid,)):
+            if (_photo_dir(ph["id"]) / "thumb.jpg").is_file():
+                thumb = {"kind": "photo", "url": f"/api/photos/{ph['id']}/thumb.jpg"}
+                break
+    stamps = db.q1("SELECT (SELECT MAX(created_at) FROM photos WHERE project_id=?) ph, "
+                   "(SELECT MAX(created_at) FROM measurements WHERE project_id=?) me", (pid, pid))
+    updated = max(x for x in (p["created_at"], stamps["ph"], stamps["me"], lj["updated_at"] if lj else None) if x)
+    return {"last_job": lj, "thumb": thumb, "updated_at": updated}
+
+
 @app.get("/api/projects")
 def projects(u: dict = Depends(auth.require_user)):
-    return [_project_public(p) for p in
+    return [{**_project_public(p), **_library_fields(p)} for p in
             db.q("SELECT * FROM projects WHERE user_id=? ORDER BY archived, id DESC", (u["id"],))]
 
 
@@ -1762,6 +1784,17 @@ FILE_TYPES = {"model.step": "application/step", "model.stl": "model/stl", "model
 
 def _file_base(j: dict) -> str:
     return _ascii_name(j["name"], f"auftrag_{j['id']}")
+
+
+@app.get("/api/jobs/{jid}/v/{ver}/preview.png")
+def job_preview(jid: int, ver: int, u: dict = Depends(auth.require_user)):
+    _own_job(jid, u)
+    v = db.q1("SELECT status FROM job_versions WHERE job_id=? AND version=?", (jid, ver))
+    d = jobs.version_dir(jid, ver)
+    stl = d / "model.stl"
+    if not v or v["status"] != "ok" or not stl.is_file() or not preview.ensure_png(stl, d / "preview.png"):
+        raise HTTPException(404, "Kein Modellbild")
+    return FileResponse(d / "preview.png", media_type="image/png", headers={"Cache-Control": "private, max-age=86400"})
 
 
 @app.get("/api/jobs/{jid}/v/{ver}/{name}")
