@@ -1582,6 +1582,8 @@ def test_benutzer_startup_raeumt_waisen(app, admin):
 def test_benutzer_startup_meldet_aufgeraeumtes(app, admin, capsys):
     """Gesamtreview S-1: der Start meldet, wie viele Auftraege und Fotoordner er entfernt hat."""
     from app import config, db, projects
+    (L,) = _mk(app, admin, "bmelde")
+    _photo(_project(L.uid))                                 # mindestens eine Fotozeile, sonst greift der Leer-Schutz
     waise = _job(None, None)
     d = config.DATA_DIR / "photos" / "987654322"
     d.mkdir(parents=True, exist_ok=True)
