@@ -1,5 +1,6 @@
 """Teams mit gemeinsamen Bibliotheken (Spec 2026-10-16, T1–T8)."""
 import itertools
+import re
 import sqlite3
 from collections import Counter
 from datetime import datetime, timezone
@@ -1518,3 +1519,17 @@ def test_benutzer_startup_raeumt_waisen(app, admin):
     assert db.q1("SELECT id FROM jobs WHERE id=?", (bleibt,))
     assert not ohne_zeile.exists() and (config.DATA_DIR / "photos" / str(mit_zeile)).is_dir()
     assert "projects.sweep()" in inspect.getsource(main._startup)
+
+
+def test_verwaltung_audit_namen_in_actions():
+    """Spec §3: alle Audit-Namen der Teams in ACTIONS (app.js); Seite /teams und Admin-Reiter sind angebunden."""
+    root = Path(__file__).resolve().parents[1] / "web/static/js"
+    src = (root / "app.js").read_text(encoding="utf-8")
+    block = src.split("const ACTIONS = {", 1)[1].split("};", 1)[0]
+    for name in ("team_created", "team_renamed", "team_invite", "team_invite_failed", "team_invite_revoked",
+                 "team_invite_accepted", "team_invite_declined", "team_role", "team_member_removed",
+                 "team_member_added_admin", "team_left", "team_deleted", "team_leader_auto", "project_move", "project_copy"):
+        assert re.search(rf"\b{name}:", block), name
+    assert 'route(/^\\/teams$/' in src and "einstellungen|teams" in src
+    tj = (root / "teams.js").read_text(encoding="utf-8")
+    assert "export async function adminTab(main)" in tj and "export default async function (main)" in tj

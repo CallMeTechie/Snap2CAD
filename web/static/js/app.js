@@ -1,6 +1,6 @@
 // Snap2CAD – Einstieg, Router, Kopfzeile, Anmeldung, Konto, Verwaltung
 import { api, h, clear, icon, LOGO, toast, fail, dialog, confirmDlg, dt, until, initials, num, debounce, strength,
-  STRENGTH_TEXT, parseNum, copyText } from "./lib.js";
+  STRENGTH_TEXT, parseNum, copyText, plural } from "./lib.js";
 import { groupProjects, isReadOnly, notFoundConcerns, readOnlyText } from "./rights.js";
 
 export const S = { me: null, project: null, leave: [] };
@@ -139,17 +139,24 @@ function statusPill() {
   return [pill, sb];
 }
 
+// Abzeichen offener Team-Einladungen am Benutzermenü (Spec Teams §7)
+function inviteBadge() {
+  const n = S.status?.team_invites || 0;
+  return n ? h("span", { class: "ibadge", "aria-hidden": "true" }, n > 9 ? "9+" : String(n)) : null;
+}
+
 function header(step) {
   const u = S.me;
   const locked = !!u.must_change_pw;
+  const nInv = S.status?.team_invites || 0;
   const nav = h("nav", { class: "steps", "aria-label": "Arbeitsschritte" }, STEPS.map(([href, lbl], i) =>
     h("a", { class: "step", href, "aria-current": step === i + 1 ? "page" : null, "aria-disabled": locked ? "true" : null },
       h("span", { class: "n" }, i + 1), h("span", { class: "lbl" }, lbl))));
   const menu = h("div", { class: "menu", hidden: true, role: "menu" });
   const btn = h("button", { class: "userbtn", "aria-haspopup": "menu", "aria-expanded": "false",
-    "aria-label": `Benutzermenü: ${u.username}${u.role === "admin" ? ", Administrator" : ""}` },
+    "aria-label": `Benutzermenü: ${u.username}${u.role === "admin" ? ", Administrator" : ""}${nInv ? `, ${nInv} Team-Einladung${nInv > 1 ? "en" : ""}` : ""}` },
     h("span", { class: "avatar" }, initials(u)), h("span", { class: "uname" }, u.username),
-    u.role === "admin" ? h("span", { class: "tag" }, "ADMIN") : null, icon("chevron", 14));
+    u.role === "admin" ? h("span", { class: "tag" }, "ADMIN") : null, inviteBadge(), icon("chevron", 14));
   const close = () => { menu.hidden = true; btn.setAttribute("aria-expanded", "false"); };
   btn.addEventListener("click", ev => {
     ev.stopPropagation();
@@ -161,12 +168,14 @@ function header(step) {
   document.addEventListener("click", close);
   onLeave(() => document.removeEventListener("click", close));
   function buildMenu() {
-    const us = S.status?.usage;
+    const us = S.status?.usage, inv = S.status?.team_invites || 0;
     clear(menu,
       h("div", { class: "info" }, h("strong", { style: { color: "var(--text)" } }, u.display_name || u.username),
         h("br"), us ? `CAD diesen Monat: ${us.used} / ${us.quota ?? "∞"}` : ""),
       h("div", { class: "sep" }),
       locked ? null : h("a", { href: "/auftraege", role: "menuitem" }, icon("list"), "Meine Aufträge"),
+      locked ? null : h("a", { href: "/teams", role: "menuitem" }, icon("users"), "Teams"),
+      !locked && inv ? h("a", { href: "/teams", role: "menuitem" }, icon("users"), `Team-Einladungen (${inv})`) : null,
       locked ? null : h("a", { href: "/anleitung", role: "menuitem" }, icon("help"), "Anleitung"),
       locked ? null : h("a", { href: "/konto", role: "menuitem" }, icon("key"), "Konto und Passwort"),
       !locked && u.role === "admin" ? h("a", { href: "/admin", role: "menuitem" }, icon("users"), "Benutzerverwaltung") : null,
@@ -652,9 +661,16 @@ const ACTIONS = {
   admin_created: "Admin angelegt", cad_create: "CAD-Auftrag", suggest: "Maßvorschläge",
   setup: "Ersteinrichtung", setup_denied: "Einrichtung abgelehnt", settings_changed: "Einstellungen geändert",
   confirm_failed: "Passwortbestätigung falsch",
+  team_created: "Team gegründet", team_renamed: "Team umbenannt", team_invite: "Team-Einladung",
+  team_invite_failed: "Team-Einladung abgewiesen", team_invite_revoked: "Team-Einladung zurückgezogen",
+  team_invite_accepted: "Team-Einladung angenommen", team_invite_declined: "Team-Einladung abgelehnt",
+  team_role: "Team-Rolle geändert", team_member_removed: "Team-Mitglied entfernt",
+  team_member_added_admin: "Team-Mitglied aufgenommen (Administrator)", team_left: "Team verlassen",
+  team_deleted: "Team gelöscht", team_leader_auto: "Team-Leiter nachgerückt", project_move: "Projekt verschoben",
+  project_copy: "Projekt kopiert",
 };
 
-route(/^\/admin(?:\/(einladungen|protokoll|einstellungen))?$/, async (main, tab = "benutzer") => {
+route(/^\/admin(?:\/(einladungen|protokoll|einstellungen|teams))?$/, async (main, tab = "benutzer") => {
   const [users, invites, status] = await Promise.all([api("/api/admin/users"), api("/api/admin/invites"), api("/api/admin/status")]);
   const open = invites.filter(i => i.state === "offen");
   const openBox = h("div", { style: { display: "flex", flexDirection: "column", gap: "4px" } });
@@ -664,11 +680,12 @@ route(/^\/admin(?:\/(einladungen|protokoll|einstellungen))?$/, async (main, tab 
   h("div", { class: "pill" }, h("span", { class: `dot ${status.sandbox ? "" : "err"}` }), `Sandbox ${status.sandbox ? "läuft" : "offline"} · `,
     h("span", { class: "mono" }, `${num(status.tokens_month.input / 1000, 0)}k / ${num(status.tokens_month.output / 1000, 0)}k Token (${month})`))));
   const tabs = h("div", { class: "tabs", role: "tablist", "aria-label": "Bereiche" },
-    [["benutzer", "Benutzer", users.length], ["einladungen", "Einladungen", open.length], ["protokoll", "Protokoll", null], ["einstellungen", "Einstellungen", null]].map(([k, t, c]) =>
+    [["benutzer", "Benutzer", users.length], ["einladungen", "Einladungen", open.length], ["teams", "Teams", null], ["protokoll", "Protokoll", null], ["einstellungen", "Einstellungen", null]].map(([k, t, c]) =>
       h("button", { role: "tab", "data-tab": k, "aria-selected": String(tab === k), onclick: () => go(k === "benutzer" ? "/admin" : `/admin/${k}`, true) }, t, c != null ? h("span", { class: "cnt" }, c) : null)));
   main.append(tabs);
   if (tab === "protokoll") return auditTab(main);
   if (tab === "einstellungen") return settingsTab(main);
+  if (tab === "teams") return (await import("./teams.js")).adminTab(main);
   const left = h("section", { class: "card", style: { padding: "0", gap: "0" }, "aria-label": tab === "benutzer" ? "Benutzerliste" : "Einladungen" });
   main.append(h("div", { class: "admin-layout" }, left, inviteAside(open)));
   if (tab === "einladungen") {
@@ -726,7 +743,7 @@ route(/^\/admin(?:\/(einladungen|protokoll|einstellungen))?$/, async (main, tab 
       }),
       me ? null : h("div", { class: "sep" }),
       me ? null : act("Löschen …", async () => {
-        if (!await confirmDlg(`${u.username} löschen?`, "Das Konto wird mit allen Projekten, Fotos und CAD-Aufträgen endgültig gelöscht.", "Endgültig löschen", true)) return;
+        if (!await confirmDlg(`${u.username} löschen?`, `Das Konto wird mit allen privaten Projekten, Fotos und CAD-Aufträgen endgültig gelöscht.${u.team_projects ? ` ${plural(u.team_projects, "Team-Projekt bleibt", "Team-Projekte bleiben")} im Team, ohne Ersteller.` : ""}`, "Endgültig löschen", true)) return;
         await api(`/api/admin/users/${u.id}`, { method: "DELETE" }); go("/admin", true);
       }, "danger"));
     return h("tr", {},
@@ -886,6 +903,7 @@ async function showLink(title, link, text) {
 // ------------------------------------------------------------------ Arbeitsschritte (Module)
 route(/^\/$/, async main => (await import("./library.js")).default(main), { step: 1 });
 route(/^\/anleitung$/, async main => (await import("./guide.js")).default(main));
+route(/^\/teams$/, async main => (await import("./teams.js")).default(main));
 route(/^\/fotos$/, async main => (await import("./photos.js")).default(main), { step: 2 });
 route(/^\/messen$/, async (main) => (await import("./measure.js")).default(main), { step: 3, bare: false });
 route(/^\/cad$/, async main => (await import("./cad.js")).form(main), { step: 4 });
@@ -901,5 +919,7 @@ route(/.*/, async main => {
   setInterval(() => { if (S.me) refreshMe().then(() => {
     const top = document.querySelector(".top-right");
     if (top && S.status) { const pills = top.querySelectorAll(".pill"); pills.forEach(p => p.remove()); top.prepend(...statusPill().filter(Boolean)); }
+    const ub = document.querySelector(".userbtn");   // Abzeichen offener Team-Einladungen nachführen
+    if (ub) { ub.querySelector(".ibadge")?.remove(); const b = inviteBadge(); if (b) ub.insertBefore(b, ub.lastElementChild); }
   }).catch(() => {}); }, 60000);
 })();
