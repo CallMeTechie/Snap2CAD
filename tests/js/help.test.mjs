@@ -37,12 +37,13 @@ test("Texte ohne Markennamen", () => {
 
 test("Abschnitte und Kurzhilfe je Seite", () => {
   assert.deepEqual(SECTIONS.map(s => s[0]),
-    ["ablauf", "unterlage", "fotografieren", "fotos", "messen", "kanten", "cad", "bemassung", "tastatur", "probleme"]);
+    ["ablauf", "unterlage", "fotografieren", "fotos", "messen", "kanten", "cad", "bemassung", "teams", "tastatur", "probleme"]);
   assert.deepEqual(groupsFor("/messen"), ["messen", "kanten", "ueberall"]);
   assert.deepEqual(groupsFor("/fotos"), ["fotos", "ueberall"]);
   assert.deepEqual(groupsFor("/cad/12"), ["modell", "ueberall"]);
   assert.deepEqual(groupsFor("/cad"), ["modell", "ueberall"]);
   assert.deepEqual(groupsFor("/"), ["ueberall"]);
+  assert.deepEqual(groupsFor("/teams"), ["ueberall"]);
 });
 
 // Jeder Mausbefehl steht hier ausdrücklich: ein Tippfehler im Tastennamen fiele sonst als Text statt <kbd> durch

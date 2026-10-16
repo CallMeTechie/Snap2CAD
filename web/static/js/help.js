@@ -11,7 +11,7 @@ export const KEY_OF = Object.freeze(Object.fromEntries(Object.entries(TOOL_KEYS)
 export const SECTIONS = Object.freeze([
   ["ablauf", "Ablauf"], ["unterlage", "Messunterlage drucken"], ["fotografieren", "Fotografieren"], ["fotos", "Fotos prüfen"],
   ["messen", "Messen"], ["kanten", "Kanten und Teile"], ["cad", "CAD-Modell"], ["bemassung", "Bemaßung am Modell"],
-  ["tastatur", "Tastatur und Maus"], ["probleme", "Häufige Probleme"],
+  ["teams", "Teams"], ["tastatur", "Tastatur und Maus"], ["probleme", "Häufige Probleme"],
 ]);
 
 export const GROUP_TITLE = Object.freeze({

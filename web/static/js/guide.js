@@ -145,6 +145,30 @@ function bemassung() {
     ])));
 }
 
+function teams() {
+  const row = (r, ...c) => h("tr", {}, h("th", { scope: "row" }, r), ...c.map(x => h("td", {}, x)));
+  return section("teams", card(
+    P("Jedes Konto hat eine private Bibliothek. Ein Team hat zusätzlich eine gemeinsame Bibliothek: Alle Mitglieder sehen deren Projekte mit Fotos, Maßen, Teilen, Werkstück-Angaben, gemerkten Messschieberwerten und CAD-Aufträgen. Ein Konto kann in mehreren Teams sein."),
+    UL([
+      [B("Bereich wählen:"), " oben in der Projektbibliothek „Privat“ oder ein Team anklicken; die Wahl bleibt in diesem Browser gespeichert. „Neues Projekt“ legt im gewählten Bereich an. Team-Karten zeigen, wer das Projekt angelegt hat."],
+      [B("Projektauswahl:"), " auf den Seiten Fotos prüfen, Messen und CAD-Modell ist die Liste nach „Privat“ und Teams gruppiert."],
+      [B("Team gründen und einladen:"), " im Benutzermenü „Teams“ → „Team gründen“; wer gründet, wird Leiter. Eingeladen wird mit dem genauen Benutzernamen (Groß- und Kleinschreibung egal) und einer Rolle; höchstens 20 Einladungsversuche je Stunde."],
+      [B("Einladung annehmen:"), " offene Einladungen zeigen ein Abzeichen am Benutzermenü und den Eintrag „Team-Einladungen“. Unter „Teams“ annehmen oder ablehnen; erst danach sind Mitglieder und Projekte sichtbar."],
+      [B("Verschieben:"), " im Menü „…“ einer Karte „In Team verschieben …“ bzw. „In privat verschieben“; die CAD-Aufträge kommen mit. Nach privat geht es nicht, wenn das Projekt Aufträge anderer Mitglieder enthält."],
+      [B("Austreten:"), " unter „Teams“ beim Team „Austreten …“. Die eigenen Team-Projekte bleiben im Team und zeigen „von ehemaligem Mitglied“. Der letzte Leiter bestimmt vorher einen anderen Leiter; das letzte Mitglied kann nur ein leeres Team verlassen, das dabei gelöscht wird."],
+      [B("Kontingent:"), " jeder CAD-Lauf und jeder Neuaufbau zählt bei dem, der ihn auslöst – auch am Auftrag eines anderen Mitglieds. „Meine Aufträge“ filtert nach Team."],
+    ]),
+    h("div", { class: "tablewrap" }, h("table", { class: "t" },
+      h("thead", {}, h("tr", {}, h("th", {}, "Recht"), h("th", {}, "Leiter"), h("th", {}, "Mitglied"), h("th", {}, "Lesend"))),
+      h("tbody", {},
+        row("Projekte ansehen, Dateien und CSV laden", "ja", "ja", "ja"),
+        row("Fotos, Messen, Kanten, Werkstück, KI und CAD", "ja", "ja", "nein"),
+        row("Projekt umbenennen und archivieren", "ja", "ja", "nein"),
+        row("Projekt löschen und verschieben", "jedes", "nur selbst angelegte", "nein"),
+        row("Mitglieder einladen, Rollen ändern, entfernen, Team umbenennen und löschen", "ja", "nein", "nein")))),
+    NOTE("info", "Mit der Rolle Lesend steht auf Fotos prüfen, Messen und CAD-Modell oben „Nur ansehen“; Bearbeiten ist dort gesperrt.")));
+}
+
 function tastatur() {
   return section("tastatur", card(
     P("Tastenkürzel wirken nicht, solange der Fokus in einem Eingabefeld liegt; auf der Messseite auch nicht mit gedrückter ", K("Strg"), "-, ", K("Alt"), "- oder Befehlstaste. ", K("?"), " oder ", K("F1"), " zeigt die Tabellen der aktuellen Seite als Kurzhilfe. In Eingabefeldern öffnen ", K("?"), " und ", K("F1"), " die Kurzhilfe nicht."),
@@ -164,7 +188,7 @@ function probleme() {
 }
 
 // Inhalt in der Reihenfolge von SECTIONS (dieselbe Liste wie das Inhaltsverzeichnis)
-const BUILD = { ablauf, unterlage, fotografieren, fotos, messen, kanten, cad, bemassung, tastatur, probleme };
+const BUILD = { ablauf, unterlage, fotografieren, fotos, messen, kanten, cad, bemassung, teams, tastatur, probleme };
 
 export default function (main) {
   const toc = h("nav", { class: "gtoc", "aria-label": "Inhalt der Anleitung" },

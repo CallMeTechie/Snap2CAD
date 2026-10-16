@@ -620,20 +620,34 @@ export function jobBadge(st) { const [t, k] = JOB_STATUS[st] || [st, "off"]; ret
 
 route(/^\/auftraege$/, async main => {
   const isAdmin = S.me.role === "admin";
-  let all = new URLSearchParams(location.search).get("alle") === "1" && isAdmin;
+  const qs = new URLSearchParams(location.search);
+  const team = Number(qs.get("team")) || null;   // Spec Teams §7: Filter „Meine · <Team A> · …“
+  const all = !team && qs.get("alle") === "1" && isAdmin;
+  const tl = await api("/api/teams").catch(() => ({ teams: [] }));
+  const tName = tl.teams.find(t => t.id === team)?.name || "";
   const box = h("div", { class: "card", style: { padding: "0", gap: "0" } });
-  main.append(h("div", { class: "head" }, h("div", { class: "t" }, h("h1", {}, all ? "Alle Aufträge" : "Meine Aufträge"),
+  const filter = tl.teams.length ? h("div", { class: "chips", role: "group", "aria-label": "Aufträge filtern" },
+    h("a", { class: "chip", href: "/auftraege", "aria-current": !team && !all ? "page" : null }, "Meine"),
+    tl.teams.map(t => h("a", { class: "chip", href: `/auftraege?team=${t.id}`, "aria-current": team === t.id ? "page" : null }, t.name))) : null;
+  main.append(h("div", { class: "head" }, h("div", { class: "t" }, h("h1", {}, team ? `Aufträge im Team ${tName}`.trim() : all ? "Alle Aufträge" : "Meine Aufträge"),
     h("p", { class: "lead" }, "CAD-Aufträge laufen auf dem Server weiter, auch wenn du die Seite verlässt.")),
-  h("div", { class: "chips" }, isAdmin ? h("label", { class: "check" }, h("input", { type: "checkbox", checked: all, onchange: e => go(e.target.checked ? "/auftraege?alle=1" : "/auftraege") }), "Aufträge aller Benutzer") : null,
-    h("a", { class: "btn primary", href: "/cad" }, icon("plus"), "Neuer Auftrag"))), box);
+  h("div", { class: "chips" }, isAdmin && !team ? h("label", { class: "check" }, h("input", { type: "checkbox", checked: all, onchange: e => go(e.target.checked ? "/auftraege?alle=1" : "/auftraege") }), "Aufträge aller Benutzer") : null,
+    h("a", { class: "btn primary", href: "/cad" }, icon("plus"), "Neuer Auftrag"))), filter, box);
+  const showUser = all || !!team;
   const load = async () => {
-    const list = await api(`/api/jobs${all ? "?all=1" : ""}`);
-    if (!list.length) { clear(box, h("div", { class: "empty" }, icon("cube", 32), "Noch keine Aufträge.", h("a", { class: "btn", href: "/cad" }, "Ersten Auftrag anlegen"))); return list; }
+    let list;
+    try { list = await api(`/api/jobs${team ? `?team=${team}` : all ? "?all=1" : ""}`); }
+    catch (e) {
+      if (e.status !== 404) throw e;
+      clear(box, h("div", { class: "empty" }, "Dieses Team gibt es nicht mehr, oder du bist kein Mitglied.", h("a", { class: "btn", href: "/auftraege" }, "Meine Aufträge")));
+      return [];
+    }
+    if (!list.length) { clear(box, h("div", { class: "empty" }, icon("cube", 32), team ? "Im Team gibt es noch keine Aufträge." : "Noch keine Aufträge.", h("a", { class: "btn", href: "/cad" }, "Ersten Auftrag anlegen"))); return list; }
     clear(box, h("div", { class: "tablewrap" }, h("table", { class: "t" },
-      h("thead", {}, h("tr", {}, h("th", {}, "Auftrag"), all ? h("th", {}, "Benutzer") : null, h("th", {}, "Status"), h("th", {}, "Versionen"), h("th", {}, "Abmessungen"), h("th", {}, "Aktualisiert"), h("th", {}, h("span", { class: "sr" }, "Aktionen")))),
+      h("thead", {}, h("tr", {}, h("th", {}, "Auftrag"), showUser ? h("th", {}, team ? "Ersteller" : "Benutzer") : null, h("th", {}, "Status"), h("th", {}, "Versionen"), h("th", {}, "Abmessungen"), h("th", {}, "Aktualisiert"), h("th", {}, h("span", { class: "sr" }, "Aktionen")))),
       h("tbody", {}, list.map(j => h("tr", {},
         h("td", {}, h("a", { href: `/cad/${j.id}`, style: { fontWeight: 600 } }, j.name), h("div", { class: "xs muted" }, `#${j.id} · ${({ fdm: "FDM", sla: "SLA", cnc: "CNC" })[j.request?.process] || ""}`)),
-        all ? h("td", {}, j.username) : null,
+        showUser ? h("td", {}, j.username || "gelöschter Benutzer") : null,
         h("td", {}, jobBadge(j.status)),
         h("td", { class: "num" }, j.n_versions),
         h("td", { class: "num" }, j.bbox ? `${num(j.bbox[0], 1)} × ${num(j.bbox[1], 1)} × ${num(j.bbox[2], 1)}` : "–"),
