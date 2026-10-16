@@ -1238,3 +1238,277 @@ def test_rechte_bereich_all_ohne_fremde(app, admin):
     assert not a_all & {tp, priv, own}
     r = admin.get(f"/api/projects?scope=team:{tid}")
     assert r.status_code == 404 and r.json()["detail"] == "Team nicht gefunden"
+
+
+# ------------------------------------------------------------------ T7/T8: Benutzer loeschen, Admin-Reiter
+
+def test_admin_teams_liste(app, admin, user):
+    L, M = _mk(app, admin, "adleiter", "admitgl")
+    tid = _team("Sichtbar", {L.uid: "leiter", M.uid: "mitglied"})
+    ohne = _team("Verwaist", {M.uid: "mitglied"})
+    _project(L.uid, tid)
+    rows = {t["id"]: t for t in admin.get("/api/admin/teams").json()}
+    assert (rows[tid]["leaders"], rows[tid]["n_members"], rows[tid]["n_projects"], rows[tid]["no_leader"]) == \
+        ([L.username], 2, 1, False)
+    assert rows[ohne]["no_leader"] is True and rows[ohne]["leaders"] == []
+    assert user.get("/api/admin/teams").status_code == 403
+    d = admin.get(f"/api/admin/teams/{tid}").json()
+    assert set(d) == {"id", "name", "created_at", "my_role", "n_projects", "members", "invites"} and d["my_role"] is None
+    assert admin.get("/api/admin/teams/999999").status_code == 404
+
+
+def test_admin_rollen_entfernen_einladung(app, admin):
+    from app import db
+    L, M, Y, Z = _mk(app, admin, "arleiter", "armitgl", "argast", "argastz")
+    tid = _team("Eingriff", {L.uid: "leiter", M.uid: "mitglied"})
+    iid = L.post(f"/api/teams/{tid}/invites", json={"username": Y.username}, headers=H).json()["id"]
+    r = admin.patch(f"/api/admin/teams/{tid}/members/{M.uid}", json={"role": "leiter"}, headers=H)
+    assert r.status_code == 200 and {m["user_id"]: m["role"] for m in r.json()["members"]}[M.uid] == "leiter"
+    assert _last_audit("team_role")["detail"] == f"Team {tid} „Eingriff“: {M.username} → Leiter (Administrator)"
+    j2 = M.post(f"/api/teams/{tid}/invites", json={"username": Z.username}, headers=H).json()["id"]    # M ist Leiter
+    r = admin.delete(f"/api/admin/teams/{tid}/members/{L.uid}", headers=H)
+    assert r.status_code == 200 and [m["user_id"] for m in r.json()["members"]] == [M.uid]
+    assert r.json()["team_deleted"] is False
+    assert db.q1("SELECT status FROM team_invites WHERE id=?", (iid,))["status"] == "zurueckgezogen"   # von L
+    assert db.q1("SELECT status FROM team_invites WHERE id=?", (j2,))["status"] == "offen"
+    assert admin.delete(f"/api/admin/teams/{tid}/invites/{j2}", headers=H).json() == {"ok": True}
+    assert db.q1("SELECT status FROM team_invites WHERE id=?", (j2,))["status"] == "zurueckgezogen"
+    assert admin.patch(f"/api/admin/teams/{tid}/members/{L.uid}", json={"role": "lesend"}, headers=H).status_code == 404
+    assert admin.patch(f"/api/admin/teams/{tid}/members/{M.uid}", json={"role": "chef"}, headers=H).status_code == 400
+
+
+def test_admin_mitglied_direkt_aufnehmen(app, admin):
+    """Team ohne Mitglieder mit Projekt: der Admin nimmt R direkt als Leiter auf, R sieht das Projekt (Spec §5, §8)."""
+    from app import db
+    L, R, D = _mk(app, admin, "amleiter", "amneu", "amaus")
+    tid = _team("Verwaist", {L.uid: "leiter"})
+    pid = _project(L.uid, tid)
+    iid = db.ex("INSERT INTO team_invites(team_id,user_id,role,invited_by,created_at) VALUES (?,?,?,?,?)",
+                (tid, R.uid, "lesend", L.uid, db.now()))
+    db.ex("DELETE FROM team_members WHERE team_id=?", (tid,))                   # letztes Mitglied weg, Projekt bleibt
+    assert R.get(f"/api/projects/{pid}").status_code == 404
+    r = admin.post(f"/api/admin/teams/{tid}/members", json={"username": f" {R.username.upper()} ", "role": "leiter"},
+                   headers=H)
+    assert r.status_code == 200, r.text
+    assert [(m["user_id"], m["role"]) for m in r.json()["members"]] == [(R.uid, "leiter")]
+    assert R.get(f"/api/projects/{pid}").json()["my_role"] == "leiter"
+    assert db.q1("SELECT status FROM team_invites WHERE id=?", (iid,))["status"] == "zurueckgezogen"
+    assert _last_audit("team_member_added_admin")["detail"] == \
+        f"Team {tid} „Verwaist“: {R.username} als Leiter aufgenommen (Administrator)"
+    r = admin.post(f"/api/admin/teams/{tid}/members", json={"username": R.username, "role": "mitglied"}, headers=H)
+    assert r.status_code == 409 and r.json()["detail"] == "Ist bereits Mitglied dieses Teams."
+    db.ex("UPDATE users SET status='disabled' WHERE id=?", (D.uid,))
+    for name in ("gibtesnicht", D.username, "  "):
+        r = admin.post(f"/api/admin/teams/{tid}/members", json={"username": name, "role": "mitglied"}, headers=H)
+        assert r.status_code == 404 and r.json()["detail"] == "Benutzer nicht gefunden", name
+    assert admin.post(f"/api/admin/teams/{tid}/members", json={"username": L.username, "role": "chef"},
+                      headers=H).status_code == 400
+    assert admin.post("/api/admin/teams/999999/members", json={"username": L.username}, headers=H).status_code == 404
+
+
+def test_admin_letztes_mitglied_entfernen(app, admin):
+    """Entfernt der Admin das letzte Mitglied: ein Team ohne Projekte wird geloescht, eines mit Projekten bleibt."""
+    from app import db
+    L, M = _mk(app, admin, "aeleiter", "aemitgl")
+    leer, voll = _team("Leer", {L.uid: "leiter"}), _team("Voll", {M.uid: "leiter"})
+    pid = _project(M.uid, voll)
+    assert admin.delete(f"/api/admin/teams/{leer}/members/{L.uid}", headers=H).json() == {"ok": True, "team_deleted": True}
+    assert db.q1("SELECT id FROM teams WHERE id=?", (leer,)) is None
+    assert _last_audit("team_deleted")["detail"] == \
+        f"Team {leer} „Leer“ gelöscht (letztes Mitglied entfernt, Administrator, 0 Projekte)"
+    r = admin.delete(f"/api/admin/teams/{voll}/members/{M.uid}", headers=H)
+    assert r.status_code == 200 and r.json()["members"] == [] and r.json()["team_deleted"] is False
+    assert db.q1("SELECT team_id FROM projects WHERE id=?", (pid,))["team_id"] == voll
+
+
+def test_admin_routen_nur_admin(app, welt):
+    """Alle Routen unter /api/admin/teams verlangen den Administrator (403 auch fuer einen Team-Leiter)."""
+    ks = sorted(k for k in _routes(app) if k[1].startswith("/api/admin/teams"))
+    assert len(ks) == 7, ks
+    for m, p in ks:
+        r = welt.L.request(m, p.format(tid=welt.tid, uid=welt.M.uid, iid=1),
+                           json={"role": "lesend", "username": welt.X.username}, headers=H)
+        assert r.status_code == 403 and r.json()["detail"] == "Nur für Administratoren", (m, p, r.text)
+
+
+def test_admin_team_loeschen_mit_projekten(app, admin):
+    from app import config, db
+    L, M = _mk(app, admin, "atleiter", "atmitgl")
+    tid = _team("Abriss", {L.uid: "leiter", M.uid: "mitglied"})
+    p1, p2 = _project(L.uid, tid), _project(M.uid, tid)
+    ph = _photo(p1)
+    j_l, j_x = _job(L.uid, p1), _job(M.uid, p2)
+    db.ex("UPDATE jobs SET user_id=NULL WHERE id=?", (j_x,))
+    r = admin.delete(f"/api/admin/teams/{tid}", headers=H)
+    assert r.status_code == 409 and r.json()["detail"].startswith("Das Team hat noch 2 Projekte")
+    assert admin.delete(f"/api/admin/teams/{tid}?confirm=Falsch", headers=H).status_code == 409
+    r = admin.delete(f"/api/admin/teams/{tid}?confirm=Abriss", headers=H)
+    assert r.json() == {"ok": True, "projects": 2}
+    assert db.q1("SELECT id FROM teams WHERE id=?", (tid,)) is None
+    assert db.q1("SELECT COUNT(*) n FROM projects WHERE id IN (?,?)", (p1, p2))["n"] == 0
+    assert not (config.DATA_DIR / "photos" / str(ph)).exists()
+    assert db.q1("SELECT project_id, user_id FROM jobs WHERE id=?", (j_l,)) == {"project_id": None, "user_id": L.uid}
+    assert db.q1("SELECT id FROM jobs WHERE id=?", (j_x,)) is None
+    assert "2 Projekte" in _last_audit("team_deleted")["detail"]
+    t2 = _team("Leer", {L.uid: "leiter"})
+    assert admin.delete(f"/api/admin/teams/{t2}", headers=H).json() == {"ok": True, "projects": 0}
+
+
+def test_admin_team_loeschen_verschobenes_projekt_bleibt(app, admin, monkeypatch):
+    """Wird ein Projekt zwischen Zaehlen und Loeschen aus dem Team verschoben, loescht der Admin es nicht mit (409)."""
+    from app import db, teams
+    (L,) = _mk(app, admin, "atvleiter")
+    tid = _team("Wettlauf", {L.uid: "leiter"})
+    p1, p2 = _project(L.uid, tid), _project(L.uid, tid)
+    real = teams.projects.delete_projects
+
+    def racy(pids, then=None, guard=None):
+        db.ex("UPDATE projects SET team_id=NULL WHERE id=?", (p2,))            # gleichzeitig nach privat verschoben
+        return real(pids, then=then, guard=guard)
+    monkeypatch.setattr(teams.projects, "delete_projects", racy)
+    r = admin.delete(f"/api/admin/teams/{tid}?confirm=Wettlauf", headers=H)
+    assert r.status_code == 409 and r.json()["detail"] == "Im Team hat sich gerade etwas geändert – bitte erneut löschen."
+    assert db.q1("SELECT team_id FROM projects WHERE id=?", (p2,))["team_id"] is None              # Projekt existiert
+    assert db.q1("SELECT team_id FROM projects WHERE id=?", (p1,))["team_id"] == tid               # nichts geloescht
+    assert db.q1("SELECT id FROM teams WHERE id=?", (tid,))
+
+
+def test_admin_kein_inhalt_ohne_mitgliedschaft(app, admin):
+    from app import db
+    (L,) = _mk(app, admin, "akleiter")
+    tid = _team("Privatsache", {L.uid: "leiter"})
+    pid = _project(L.uid, tid)
+    jid = _job(L.uid, pid)
+    admin_uid = db.q1("SELECT id FROM users WHERE username='admin'")["id"]
+    assert admin.get(f"/api/projects/{pid}").status_code == 404
+    assert admin.get(f"/api/jobs/{jid}").status_code == 404
+    assert jid not in [j["id"] for j in admin.get("/api/jobs?all=1").json()]
+    db.ex("INSERT INTO team_members(team_id,user_id,role,joined_at) VALUES (?,?,?,?)", (tid, admin_uid, "lesend", db.now()))
+    try:
+        assert admin.get(f"/api/projects/{pid}").json()["my_role"] == "lesend"
+        assert admin.patch(f"/api/projects/{pid}", json={"name": "x"}, headers=H).status_code == 403
+        assert jid in [j["id"] for j in admin.get("/api/jobs?all=1").json()]
+    finally:
+        db.ex("DELETE FROM team_members WHERE team_id=? AND user_id=?", (tid, admin_uid))
+
+
+def test_admin_auftraege_alle(app, admin):
+    from app import db
+    (L,) = _mk(app, admin, "aaleiter")
+    admin_uid = db.q1("SELECT id FROM users WHERE username='admin'")["id"]
+    j_priv, j_none = _job(L.uid, _project(L.uid)), _job(L.uid, None)
+    j_team = _job(L.uid, _project(L.uid, _team("Fremd", {L.uid: "leiter"})))
+    t_adm = _team("Mit Admin", {L.uid: "leiter", admin_uid: "mitglied"})
+    j_del = _job(L.uid, _project(L.uid, t_adm))
+    db.ex("UPDATE jobs SET user_id=NULL WHERE id=?", (j_del,))
+    rows = {j["id"]: j for j in admin.get("/api/jobs?all=1").json()}
+    assert j_priv in rows and j_none in rows and j_team not in rows
+    assert rows[j_priv]["username"] == L.username
+    assert rows[j_del]["username"] is None and rows[j_del]["user_id"] is None        # LEFT JOIN: geloeschter Benutzer
+
+
+def test_admin_benutzerliste_zahlen(app, admin):
+    (L,) = _mk(app, admin, "azleiter")
+    tid = _team("Zahl", {L.uid: "leiter"})
+    _project(L.uid, tid)
+    _project(L.uid, tid)
+    _job(L.uid, None)
+    u = next(x for x in admin.get("/api/admin/users").json() if x["id"] == L.uid)
+    assert (u["team_projects"], u["jobs"]) == (2, 1)
+
+
+def test_benutzer_loeschen_private_weg_team_bleibt(app, admin):
+    from app import config, db
+    L, M = _mk(app, admin, "buleiter", "bumitgl")
+    tid = _team("Bleibt", {L.uid: "leiter", M.uid: "mitglied"})
+    t2 = _team("Andere", {L.uid: "leiter"})
+    priv = _project(M.uid)
+    ph = _photo(priv)
+    j_priv, j_none = _job(M.uid, priv), _job(M.uid, None)
+    j_l_in_priv = _job(L.uid, priv)
+    tp = _project(M.uid, tid)
+    j_team = _job(M.uid, tp)
+    db.ex("INSERT INTO team_invites(team_id,user_id,role,invited_by,created_at) VALUES (?,?,?,?,?)",
+          (t2, M.uid, "mitglied", L.uid, db.now()))
+    r = admin.delete(f"/api/admin/users/{M.uid}", headers=H)
+    assert r.json() == {"ok": True, "team_projects_kept": 1}
+    assert db.q1("SELECT id FROM projects WHERE id=?", (priv,)) is None
+    assert not (config.DATA_DIR / "photos" / str(ph)).exists()
+    for j in (j_priv, j_none):
+        assert db.q1("SELECT id FROM jobs WHERE id=?", (j,)) is None and not (config.DATA_DIR / "jobs" / str(j)).exists()
+    assert db.q1("SELECT project_id, user_id FROM jobs WHERE id=?", (j_l_in_priv,)) == {"project_id": None, "user_id": L.uid}
+    assert db.q1("SELECT user_id, team_id FROM projects WHERE id=?", (tp,)) == {"user_id": None, "team_id": tid}
+    assert db.q1("SELECT user_id, project_id FROM jobs WHERE id=?", (j_team,)) == {"user_id": None, "project_id": tp}
+    assert db.q1("SELECT COUNT(*) n FROM team_members WHERE user_id=?", (M.uid,))["n"] == 0
+    assert db.q1("SELECT COUNT(*) n FROM team_invites WHERE user_id=?", (M.uid,))["n"] == 0
+    e = next(p for p in L.get(f"/api/projects?scope=team:{tid}").json() if p["id"] == tp)
+    assert e["creator"] is None and e["creator_is_member"] is False
+    assert "1 Team-Projekt bleibt" in _last_audit("user_deleted")["detail"]
+
+
+def test_benutzer_leiter_nachfolge(app, admin):
+    from app import db
+    L, A1, A2, B = _mk(app, admin, "blleiter", "blaelt", "bljung", "blzweit")
+    erbe = _team("Erbe", {L.uid: "leiter", A1.uid: "mitglied", A2.uid: "lesend"})
+    zwei = _team("Zwei Leiter", {L.uid: "leiter", B.uid: "leiter", A1.uid: "mitglied"})
+    solo = _team("Allein", {L.uid: "leiter"})                                  # ohne Projekte: wird mit geloescht
+    rest = _team("Allein mit Projekt", {L.uid: "leiter"})
+    _project(L.uid, rest)
+    assert admin.delete(f"/api/admin/users/{L.uid}", headers=H).status_code == 200
+    roles = {r["user_id"]: r["role"] for r in db.q("SELECT user_id, role FROM team_members WHERE team_id=?", (erbe,))}
+    assert roles == {A1.uid: "leiter", A2.uid: "lesend"}                       # aeltestes verbleibendes Mitglied
+    roles2 = {r["user_id"]: r["role"] for r in db.q("SELECT user_id, role FROM team_members WHERE team_id=?", (zwei,))}
+    assert roles2 == {B.uid: "leiter", A1.uid: "mitglied"}                     # anderer Leiter da: keine Nachfolge
+    autos = db.q("SELECT detail FROM audit WHERE action='team_leader_auto' AND detail LIKE ?",
+                 (f"%(Nachfolge für {L.username})",))
+    assert [a["detail"] for a in autos] == [f"Team {erbe} „Erbe“: {A1.username} ist jetzt Leiter (Nachfolge für {L.username})"]
+    assert db.q1("SELECT id FROM teams WHERE id=?", (solo,)) is None           # leer und ohne Projekte: geloescht
+    assert db.q1("SELECT detail FROM audit WHERE action='team_deleted' AND detail LIKE ?", (f"Team {solo} %",))["detail"] \
+        == f"Team {solo} „Allein“ gelöscht (letztes Mitglied {L.username} gelöscht, 0 Projekte)"
+    assert db.q1("SELECT id FROM teams WHERE id=?", (rest,))                   # ohne Mitglieder, mit Projekt: bleibt
+    assert next(t for t in admin.get("/api/admin/teams").json() if t["id"] == rest)["no_leader"] is True
+
+
+def test_benutzer_auftragsliste_team_filter(app, admin):
+    L, M, F = _mk(app, admin, "bfleiter", "bfmitgl", "bfaussen")
+    tid = _team("Filter", {L.uid: "leiter", M.uid: "mitglied"})
+    tp = _project(L.uid, tid)
+    jl, jm = _job(L.uid, tp), _job(M.uid, tp)
+    jo = _job(M.uid, None)
+    rows = M.get(f"/api/jobs?team={tid}").json()
+    assert [(r["id"], r["username"]) for r in rows] == [(jm, M.username), (jl, L.username)]
+    assert F.get(f"/api/jobs?team={tid}").status_code == 404
+    assert [r["id"] for r in M.get("/api/jobs").json()] == [jo, jm]             # „Meine“ = selbst angelegt
+    for bad in ("9" * 20, "0"):                                               # Ueberlauf und Unsinn: 422
+        assert M.get(f"/api/jobs?team={bad}").status_code == 422
+
+
+def test_benutzer_auftragsliste_nach_austritt(app, admin):
+    """Nach dem Austritt listet „Meine Auftraege“ den eigenen Auftrag im Team-Projekt nicht mehr (Name, Status, Masse)."""
+    L, M = _mk(app, admin, "baleiter", "bamitgl")
+    tid = _team("Austritt Liste", {L.uid: "leiter", M.uid: "mitglied"})
+    jm = _job(M.uid, _project(L.uid, tid))
+    jo = _job(M.uid, None)
+    assert [j["id"] for j in M.get("/api/jobs").json()] == [jo, jm]
+    assert L.delete(f"/api/teams/{tid}/members/{M.uid}", headers=H).status_code == 200
+    assert [j["id"] for j in M.get("/api/jobs").json()] == [jo]
+    assert M.get(f"/api/jobs/{jm}").status_code == 404
+
+
+def test_benutzer_startup_raeumt_waisen(app, admin):
+    """Start: Auftraege ohne Ersteller und ohne Projekt sowie Fotoordner ohne Zeile werden entfernt (Lueckenfuellung 22)."""
+    import inspect
+
+    from app import config, db, main, projects
+    (L,) = _mk(app, admin, "bwaise")
+    waise, bleibt = _job(None, None), _job(L.uid, None)
+    ohne_zeile = config.DATA_DIR / "photos" / "987654321"
+    ohne_zeile.mkdir(parents=True, exist_ok=True)
+    (ohne_zeile / "thumb.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+    mit_zeile = _photo(_project(L.uid))
+    projects.sweep()
+    assert db.q1("SELECT id FROM jobs WHERE id=?", (waise,)) is None
+    assert not (config.DATA_DIR / "jobs" / str(waise)).exists()
+    assert db.q1("SELECT id FROM jobs WHERE id=?", (bleibt,))
+    assert not ohne_zeile.exists() and (config.DATA_DIR / "photos" / str(mit_zeile)).is_dir()
+    assert "projects.sweep()" in inspect.getsource(main._startup)

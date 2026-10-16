@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from . import access, auth, db
+from . import access, auth, db, projects
 
 router = APIRouter()
 ROLES = ("leiter", "mitglied", "lesend")
@@ -286,3 +286,153 @@ def team_member_remove(tid: int, uid: int, request: Request, u: dict = Depends(a
         else:
             _audit("team_member_removed", f"{team_text(t)}: {m['username']} entfernt", u, request)
     return {"ok": True, "team_deleted": False}
+
+
+# ------------------------------------------------------------------ Leere Teams, Leiter-Nachfolge (Spec §5)
+
+def _drop_if_empty(t: dict, u: dict, request: Request | None, why: str, gone: int | None = None) -> bool:
+    """Spec §5: ein Team ohne Mitglieder (gone zaehlt nicht mehr) und ohne Projekte wird geloescht, Audit team_deleted.
+    Laeuft in der Transaktion des Aufrufers. Ein Team ohne Mitglieder mit Projekten bleibt („ohne Leiter“)."""
+    left = db.q1("SELECT COUNT(*) n FROM team_members WHERE team_id=? AND user_id<>?",
+                 (t["id"], -1 if gone is None else gone))["n"]
+    if left or n_projects(t["id"]):
+        return False
+    db.ex("DELETE FROM teams WHERE id=?", (t["id"],))
+    _audit("team_deleted", f"{team_text(t)} gelöscht ({why}, 0 Projekte)", u, request)
+    return True
+
+
+def succeed_leaders(uid: int, actor: dict) -> None:
+    """In der Transaktion, die danach die Benutzerzeile loescht: offene Einladungen, die uid ausgesprochen hat, werden
+    zurueckgezogen; war uid letzter Leiter eines Teams mit weiteren Mitgliedern, wird das aelteste verbleibende
+    Mitglied (fruehestes joined_at, dann user_id) Leiter; war uid das letzte Mitglied eines Teams ohne Projekte, wird
+    das Team geloescht (_drop_if_empty)."""
+    gone = db.q1("SELECT username FROM users WHERE id=?", (uid,))
+    gname = gone["username"] if gone else str(uid)
+    db.ex("UPDATE team_invites SET status='zurueckgezogen', decided_at=? WHERE invited_by=? AND status='offen'",
+          (db.now(), uid))
+    for t in db.q("""SELECT t.* FROM teams t JOIN team_members m ON m.team_id=t.id AND m.user_id=? AND m.role='leiter'
+                     WHERE NOT EXISTS (SELECT 1 FROM team_members o WHERE o.team_id=t.id AND o.user_id<>?
+                                       AND o.role='leiter')""", (uid, uid)):
+        nxt = db.q1("""SELECT m.user_id, u.username FROM team_members m JOIN users u ON u.id=m.user_id
+                       WHERE m.team_id=? AND m.user_id<>? ORDER BY m.joined_at, m.user_id LIMIT 1""", (t["id"], uid))
+        if nxt:
+            db.ex("UPDATE team_members SET role='leiter' WHERE team_id=? AND user_id=?", (t["id"], nxt["user_id"]))
+            _audit("team_leader_auto", f"{team_text(t)}: {nxt['username']} ist jetzt Leiter (Nachfolge für {gname})",
+                   actor)
+    for t in db.q("SELECT t.* FROM teams t JOIN team_members m ON m.team_id=t.id AND m.user_id=?", (uid,)):
+        _drop_if_empty(t, actor, None, f"letztes Mitglied {gname} gelöscht", gone=uid)
+
+
+# ------------------------------------------------------------------ Admin-Reiter „Teams“ (Spec §5)
+
+TEAM_CHANGED = "Im Team hat sich gerade etwas geändert – bitte erneut löschen."
+
+
+def _team_or_404(tid: int) -> dict:
+    t = db.q1("SELECT * FROM teams WHERE id=?", (tid,))
+    if not t:
+        raise HTTPException(404, "Team nicht gefunden")
+    return t
+
+
+@router.get("/api/admin/teams")
+def admin_teams(a: dict = Depends(auth.require_admin)):
+    rows = db.q("""SELECT t.id, t.name, t.created_at,
+                   (SELECT COUNT(*) FROM team_members x WHERE x.team_id=t.id) n_members,
+                   (SELECT COUNT(*) FROM projects p WHERE p.team_id=t.id) n_projects
+                   FROM teams t ORDER BY t.name COLLATE NOCASE, t.id""")
+    for r in rows:
+        r["leaders"] = [x["username"] for x in db.q(
+            "SELECT u.username FROM team_members m JOIN users u ON u.id=m.user_id "
+            "WHERE m.team_id=? AND m.role='leiter' ORDER BY m.joined_at, m.user_id", (r["id"],))]
+        r["no_leader"] = not r["leaders"]
+    return rows
+
+
+@router.get("/api/admin/teams/{tid}")
+def admin_team_get(tid: int, a: dict = Depends(auth.require_admin)):
+    """Mitglieder, Rollen, Einladungen und Projektzahl – keine Inhalte der Team-Projekte."""
+    return detail(_team_or_404(tid), None, True)
+
+
+@router.patch("/api/admin/teams/{tid}/members/{uid}")
+def admin_team_role(tid: int, uid: int, body: RoleIn, request: Request, a: dict = Depends(auth.require_admin)):
+    """Rolle setzen, auch Leiter ernennen; ohne Pruefung des letzten Leiters (der Admin ist der Ausweg)."""
+    role = _role(body.role)
+    with db.atomic():
+        t = _team_or_404(tid)
+        m = _member(tid, uid)
+        if role != m["role"]:
+            db.ex("UPDATE team_members SET role=? WHERE team_id=? AND user_id=?", (role, tid, uid))
+            if role != "leiter":
+                _drop_invites_of(tid, uid)          # kein Leiter mehr: seine offenen Einladungen gelten nicht weiter
+            _audit("team_role", f"{team_text(t)}: {m['username']} → {ROLE_TEXT[role]} (Administrator)", a, request)
+    return detail(t, None, True)
+
+
+@router.post("/api/admin/teams/{tid}/members")
+def admin_team_member_add(tid: int, body: TeamInviteIn, request: Request, a: dict = Depends(auth.require_admin)):
+    """Benutzer ohne Einladung aufnehmen (Spec §5, Marc 16.10.2026), z. B. in ein Team ohne Mitglieder mit Projekten.
+    Benutzername wie beim Einladen (Gross/klein egal, aktiv); eine offene Einladung an ihn wird zurueckgezogen."""
+    role = _role(body.role)
+    name = body.username.strip()
+    with db.atomic():
+        t = _team_or_404(tid)
+        target = db.q1("SELECT * FROM users WHERE username=?", (name,)) if name else None   # Spalte COLLATE NOCASE
+        if not target or target["status"] != "active":
+            raise HTTPException(404, "Benutzer nicht gefunden")
+        if access.team_role(target["id"], tid):
+            raise HTTPException(409, "Ist bereits Mitglied dieses Teams.")
+        db.ex("INSERT INTO team_members(team_id,user_id,role,joined_at) VALUES (?,?,?,?)",
+              (tid, target["id"], role, db.now()))
+        db.ex("UPDATE team_invites SET status='zurueckgezogen', decided_at=? "
+              "WHERE team_id=? AND user_id=? AND status='offen'", (db.now(), tid, target["id"]))
+        _audit("team_member_added_admin",
+               f"{team_text(t)}: {target['username']} als {ROLE_TEXT[role]} aufgenommen (Administrator)", a, request)
+    return detail(t, None, True)
+
+
+@router.delete("/api/admin/teams/{tid}/members/{uid}")
+def admin_team_member_remove(tid: int, uid: int, request: Request, a: dict = Depends(auth.require_admin)):
+    """Mitglied entfernen, ohne Pruefung des letzten Leiters. War es das letzte Mitglied eines Teams ohne Projekte,
+    wird das Team geloescht (Spec §5); ein Team mit Projekten bleibt ohne Mitglieder (Ausweg: direkt aufnehmen)."""
+    with db.atomic():
+        t = _team_or_404(tid)
+        m = _member(tid, uid)
+        db.ex("DELETE FROM team_members WHERE team_id=? AND user_id=?", (tid, uid))
+        _drop_invites_of(tid, uid)                  # entfernt: seine offenen Einladungen zurueckziehen
+        _audit("team_member_removed", f"{team_text(t)}: {m['username']} entfernt (Administrator)", a, request)
+        if _drop_if_empty(t, a, request, "letztes Mitglied entfernt, Administrator"):
+            return {"ok": True, "team_deleted": True}
+    return {**detail(t, None, True), "team_deleted": False}
+
+
+@router.delete("/api/admin/teams/{tid}/invites/{iid}")
+def admin_team_invite_revoke(tid: int, iid: int, request: Request, a: dict = Depends(auth.require_admin)):
+    return _revoke(_team_or_404(tid), iid, a, request)
+
+
+@router.delete("/api/admin/teams/{tid}")
+def admin_team_delete(tid: int, request: Request, confirm: str = "", a: dict = Depends(auth.require_admin)):
+    """Team auch mit Projekten loeschen, nach Rueckfrage mit dem Teamnamen. Projekte wie beim Projekt-Loeschen:
+    Projektzeilen und Team in einer Transaktion, danach die Auftraege ohne Ersteller per jobs.delete (ausserhalb von
+    db.atomic) und die Fotoordner; alle anderen Auftraege bleiben bei ihren Erstellern ohne Projekt.
+    guard prueft in der Transaktion, dass die Projektliste noch dieselbe ist (Wettlauf mit Anlegen/Verschieben)."""
+    t = _team_or_404(tid)
+    pids = [r["id"] for r in db.q("SELECT id FROM projects WHERE team_id=?", (tid,))]
+    if pids and confirm.strip() != t["name"]:
+        raise HTTPException(409, f"Das Team hat noch {plural(len(pids), 'Projekt', 'Projekte')} – zur Bestätigung "
+                                 "den Teamnamen eingeben.")
+
+    def same():
+        _team_or_404(tid)
+        if {r["id"] for r in db.q("SELECT id FROM projects WHERE team_id=?", (tid,))} != set(pids):
+            raise HTTPException(409, TEAM_CHANGED)
+
+    def drop_team():
+        db.ex("DELETE FROM teams WHERE id=?", (tid,))
+        _audit("team_deleted", f"{team_text(t)} gelöscht ({plural(len(pids), 'Projekt', 'Projekte')}, Administrator)",
+               a, request)
+    projects.delete_projects(pids, then=drop_team, guard=same)
+    return {"ok": True, "projects": len(pids)}

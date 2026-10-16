@@ -44,3 +44,17 @@ def delete_projects(pids: list[int], then: Callable[[], None] | None = None,
             jobs.delete(j)
     for phid in photo_ids:
         shutil.rmtree(photo_dir(phid), ignore_errors=True)
+
+
+def sweep() -> None:
+    """Serverstart (Plan, Lueckenfuellung 22): Auftraege ohne Ersteller und ohne Projekt – Spec §2 schliesst sie aus,
+    ohne Ersteller haben sie keinen Empfaenger – per jobs.delete und Fotoordner photos/<id> ohne Zeile entfernen."""
+    for j in db.q("SELECT * FROM jobs WHERE user_id IS NULL AND project_id IS NULL"):
+        jobs.delete(j)
+    root = config.DATA_DIR / "photos"
+    if not root.is_dir():
+        return
+    known = {r["id"] for r in db.q("SELECT id FROM photos")}
+    for d in root.iterdir():
+        if d.is_dir() and d.name.isascii() and d.name.isdigit() and int(d.name) not in known:
+            shutil.rmtree(d, ignore_errors=True)

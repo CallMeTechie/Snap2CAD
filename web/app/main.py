@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Literal
 
 import cv2
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
@@ -43,6 +43,7 @@ def _startup():
     auth.ensure_admin()
     auth.purge_expired()
     jobs.startup()
+    projects.sweep()   # Auftraege ohne Ersteller und Projekt, Fotoordner ohne Zeile (Plan, Lueckenfuellung 22)
     ki = "Testmodus" if config.AI_FAKE else {"env": "an (Umgebung)", "db": "an", "none": "aus",
                                              "locked": "aus (Schlüssel nicht entschlüsselbar)"}[settings.api_key_source()]
     print(f"Snap2CAD {VERSION} · KI: {ki} · Modell {settings.model()} · Sandbox {config.SANDBOX_MODE}", flush=True)
@@ -450,7 +451,9 @@ def admin_users(a: dict = Depends(auth.require_admin)):
     for u in users:
         pu = auth.public_user(u)
         pu["usage"] = _usage(u)
-        pu["jobs"] = db.q1("SELECT COUNT(*) n FROM jobs WHERE user_id=?", (u["id"],))["n"]
+        pu["jobs"] = db.q1("SELECT COUNT(*) n FROM jobs WHERE user_id=?", (u["id"],))["n"]   # nur selbst angelegte, nur Zahl
+        pu["team_projects"] = db.q1("SELECT COUNT(*) n FROM projects WHERE user_id=? AND team_id IS NOT NULL",
+                                    (u["id"],))["n"]   # bleiben beim Loeschen im Team (Spec Teams §5)
         pu["pending_reset"] = bool(db.q1("SELECT id FROM resets WHERE user_id=? AND used_at IS NULL AND expires_at>?",
                                          (u["id"], db.now())))
         pu["sessions"] = db.q1("SELECT COUNT(*) n FROM sessions WHERE user_id=? AND expires_at>?", (u["id"], db.now()))["n"]
@@ -538,6 +541,9 @@ def admin_user_logout(uid: int, a: dict = Depends(auth.require_admin)):
 
 @app.delete("/api/admin/users/{uid}")
 def admin_user_delete(uid: int, request: Request, a: dict = Depends(auth.require_admin)):
+    """Spec Teams §5: Aufträge ohne Projekt und in privaten Projekten sowie die privaten Projekte samt Dateien weg;
+    Team-Projekte und deren Aufträge bleiben (Ersteller leer); Mitgliedschaften und Einladungen per Kaskade;
+    Leiter-Nachfolge in derselben Transaktion wie DELETE FROM users."""
     u = db.q1("SELECT * FROM users WHERE id=?", (uid,))
     if not u:
         raise HTTPException(404, "Benutzer nicht gefunden")
@@ -548,14 +554,20 @@ def admin_user_delete(uid: int, request: Request, a: dict = Depends(auth.require
             raise HTTPException(400, "Der letzte Administrator kann nicht gelöscht werden.")
         db.ex("UPDATE users SET status='disabled' WHERE id=?", (uid,))
     auth.end_sessions(uid)
-    for j in db.q("SELECT * FROM jobs WHERE user_id=?", (uid,)):
-        jobs.delete(j)
-    for p in db.q("SELECT id FROM projects WHERE user_id=?", (uid,)):
-        _delete_project_files(p["id"])
-    db.ex("DELETE FROM users WHERE id=?", (uid,))
-    db.audit("user_deleted", f"„{u['username']}“ mit allen Daten gelöscht", user_id=a["id"], actor=a["username"],
-             ip=auth.client_ip(request))
-    return {"ok": True}
+    for j in db.q("SELECT j.* FROM jobs j LEFT JOIN projects p ON p.id=j.project_id WHERE j.user_id=? AND p.team_id IS NULL",
+                  (uid,)):
+        jobs.delete(j)   # ohne Projekt oder in privaten Projekten; nie in db.atomic()
+    private = [r["id"] for r in db.q("SELECT id FROM projects WHERE user_id=? AND team_id IS NULL", (uid,))]
+    kept = db.q1("SELECT COUNT(*) n FROM projects WHERE user_id=? AND team_id IS NOT NULL", (uid,))["n"]
+
+    def drop_user():
+        teams.succeed_leaders(uid, a)
+        db.ex("DELETE FROM users WHERE id=?", (uid,))
+    projects.delete_projects(private, then=drop_user)
+    db.audit("user_deleted", f"„{u['username']}“ mit allen privaten Daten gelöscht, "
+                             f"{teams.plural(kept, 'Team-Projekt bleibt', 'Team-Projekte bleiben')}",
+             user_id=a["id"], actor=a["username"], ip=auth.client_ip(request))
+    return {"ok": True, "team_projects_kept": kept}
 
 
 @app.get("/api/admin/invites")
@@ -895,11 +907,6 @@ def project_patch(pid: int, body: ProjectPatch, u: dict = Depends(auth.require_u
     if _hints(p) != before and db.q1("SELECT 1 FROM photos WHERE project_id=? AND view='bottom'", (pid,)):
         _realign_project(pid)   # rechnet die Umrisse mit den neuen Hinweisen nach (nie in db.atomic())
     return _project_public(p, u, True)
-
-
-def _delete_project_files(pid: int):
-    for ph in db.q("SELECT id FROM photos WHERE project_id=?", (pid,)):
-        shutil.rmtree(_photo_dir(ph["id"]), ignore_errors=True)
 
 
 @app.delete("/api/projects/{pid}")
@@ -1784,12 +1791,24 @@ def job_create(body: JobIn, u: dict = Depends(auth.require_user)):
 
 
 @app.get("/api/jobs")
-def job_list(all: int = 0, u: dict = Depends(auth.require_user)):
-    if all and u["role"] == "admin":
-        rows = db.q("SELECT j.*, u.username FROM jobs j JOIN users u ON u.id=j.user_id ORDER BY j.id DESC LIMIT 500")
-    else:
-        rows = db.q("SELECT j.*, ? AS username FROM jobs j WHERE user_id=? ORDER BY id DESC LIMIT 500",
-                    (u["username"], u["id"]))
+def job_list(all: int = 0, team: int | None = Query(None, ge=1, le=2**63 - 1), u: dict = Depends(auth.require_user)):
+    """Meine (selbst angelegt und noch lesbar: ohne Projekt, eigenes privates Projekt – beim Admin jedes private –,
+    Team mit Mitgliedschaft), team=<id> (Mitglied: Aufträge der Team-Projekte), all=1 (Admin: ohne Projekt, privat,
+    Teams mit Mitgliedschaft). Ersteller per LEFT JOIN users: leer = gelöschter Benutzer (Spec Teams §2, §5)."""
+    if team is not None:
+        access.require_team(u, team, "lesend")
+        rows = db.q("SELECT j.*, us.username FROM jobs j JOIN projects p ON p.id=j.project_id "
+                    "LEFT JOIN users us ON us.id=j.user_id WHERE p.team_id=? ORDER BY j.id DESC LIMIT 500", (team,))
+    elif all and u["role"] == "admin":
+        rows = db.q("SELECT j.*, us.username FROM jobs j LEFT JOIN users us ON us.id=j.user_id "
+                    "LEFT JOIN projects p ON p.id=j.project_id WHERE p.id IS NULL OR p.team_id IS NULL "
+                    "OR p.team_id IN (SELECT team_id FROM team_members WHERE user_id=?) ORDER BY j.id DESC LIMIT 500",
+                    (u["id"],))
+    else:   # nach einem Austritt verschwinden eigene Auftraege in Team-Projekten (Name, Status, Masse)
+        rows = db.q("SELECT j.*, ? AS username FROM jobs j LEFT JOIN projects p ON p.id=j.project_id WHERE j.user_id=? "
+                    "AND (p.id IS NULL OR (p.team_id IS NULL AND (p.user_id=? OR ?)) "
+                    "OR p.team_id IN (SELECT team_id FROM team_members WHERE user_id=?)) ORDER BY j.id DESC LIMIT 500",
+                    (u["username"], u["id"], u["id"], int(u["role"] == "admin"), u["id"]))
     return [{**jobs.job_public(r), "username": r["username"]} for r in rows]
 
 
