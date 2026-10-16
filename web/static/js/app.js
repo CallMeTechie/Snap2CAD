@@ -273,11 +273,19 @@ export function projectPicker(onChange) {
     clear(sel, groupProjects(list).map(g => h("optgroup", { label: g.label }, g.items.map(opt))),
       h("option", { value: "new" }, "+ Neues Projekt …"), h("option", { value: "rename", disabled: !S.project?.rights?.write }, "Projekt umbenennen …"));
   };
-  const load = () => api("/api/projects?scope=all");
-  load().then(fill).catch(fail);
+  // nur die juengste Antwort fuellt die Liste; scheitert das Laden, zeigt die Auswahl wieder das offene Projekt
+  // (statt „Neues Projekt …“ oder eines Projekts, das nicht geoeffnet wurde)
+  let loadSeq = 0;
+  const reload = onErr => {
+    const n = ++loadSeq;
+    return api("/api/projects?scope=all")
+      .then(list => { if (n === loadSeq) fill(list); })
+      .catch(e => { if (n === loadSeq) sel.value = String(S.project?.id ?? ""); onErr(e); });
+  };
+  reload(fail);
   // data-ro="ok": bleibt in der Rolle Lesend bedienbar (Projekt wechseln)
   const wrap = h("label", { class: "field", style: { gap: "4px" }, "data-ro": "ok" }, h("span", { class: "label" }, "Projekt"), sel);
-  wrap.refresh = () => load().then(fill).catch(() => {});
+  wrap.refresh = () => reload(() => {});
   sel.addEventListener("change", async () => {
     const v = sel.value;
     try {
@@ -297,7 +305,7 @@ export function projectPicker(onChange) {
       }
       onChange();
     } catch (e) { fail(e); }
-    fill(await load());
+    reload(fail);
   });
   return wrap;
 }
