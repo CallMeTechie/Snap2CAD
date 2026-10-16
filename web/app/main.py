@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from . import ai, auth, check, config, db, geom, jobs, parts, preview, sandbox, settings
+from . import access, ai, auth, check, config, db, geom, jobs, parts, preview, sandbox, settings
 
 sys.path.insert(0, str(config.ROOT))
 from core import edges, matgen, vision  # noqa: E402
@@ -161,32 +161,21 @@ def _disposition(filename: str) -> str:
     return f"attachment; filename=\"{ascii_fn}\"; filename*=UTF-8''{quote(filename)}"
 
 
-def _own_project(pid: int, user: dict) -> dict:
-    p = db.q1("SELECT * FROM projects WHERE id=?", (pid,))
-    if not p or (p["user_id"] != user["id"] and user["role"] != "admin"):
-        raise HTTPException(404, "Projekt nicht gefunden")
-    return p
+def _own_project(pid: int, user: dict, need: str = "write") -> dict:
+    """Spec Teams §2: Rechte ueber access (need read | write | delete | move | copy); Standard write."""
+    return access.require_project(user, pid, need)
 
 
-def _own_photo(phid: int, user: dict) -> tuple[dict, dict]:
-    ph = db.q1("SELECT * FROM photos WHERE id=?", (phid,))
-    if not ph:
-        raise HTTPException(404, "Foto nicht gefunden")
-    return ph, _own_project(ph["project_id"], user)
+def _own_photo(phid: int, user: dict, need: str = "write") -> tuple[dict, dict]:
+    return access.require_photo(user, phid, need)
 
 
-def _own_meas(mid: int, user: dict) -> tuple[dict, dict]:
-    m = db.q1("SELECT * FROM measurements WHERE id=?", (mid,))
-    if not m:
-        raise HTTPException(404, "Maß nicht gefunden")
-    return m, _own_project(m["project_id"], user)
+def _own_meas(mid: int, user: dict, need: str = "write") -> tuple[dict, dict]:
+    return access.require_meas(user, mid, need)
 
 
-def _own_part(part_id: int, user: dict) -> tuple[dict, dict]:
-    t = db.q1("SELECT * FROM parts WHERE id=?", (part_id,))
-    if not t:
-        raise HTTPException(404, "Teil nicht gefunden")
-    return t, _own_project(t["project_id"], user)
+def _own_part(part_id: int, user: dict, need: str = "write") -> tuple[dict, dict]:
+    return access.require_part(user, part_id, need)
 
 
 def _refresh(p: dict):
@@ -194,11 +183,9 @@ def _refresh(p: dict):
         parts.refresh(p, *_factors(p))
 
 
-def _own_job(jid: int, user: dict) -> dict:
-    j = db.q1("SELECT * FROM jobs WHERE id=?", (jid,))
-    if not j or (j["user_id"] != user["id"] and user["role"] != "admin"):
-        raise HTTPException(404, "Auftrag nicht gefunden")
-    return j
+def _own_job(jid: int, user: dict, need: str = "write") -> dict:
+    """Auftraege folgen ihrem Projekt (access.require_job); need read | write | delete. Vor jobs.delete aufrufen."""
+    return access.require_job(user, jid, need)
 
 
 def _photo_dir(phid: int) -> Path:
@@ -814,7 +801,7 @@ def project_current(u: dict = Depends(auth.require_user)):
 
 @app.get("/api/projects/{pid}")
 def project_get(pid: int, u: dict = Depends(auth.require_user)):
-    return _project_public(_own_project(pid, u), True)
+    return _project_public(_own_project(pid, u, "read"), True)
 
 
 LIGHT_COLORS = {"weiß", "weiss", "silber", "hellgrau", "beige", "natur"}
@@ -888,7 +875,7 @@ def _delete_project_files(pid: int):
 
 @app.delete("/api/projects/{pid}")
 def project_delete(pid: int, u: dict = Depends(auth.require_user)):
-    _own_project(pid, u)
+    _own_project(pid, u, "delete")
     _delete_project_files(pid)
     db.ex("DELETE FROM projects WHERE id=?", (pid,))
     return {"ok": True}
@@ -1131,7 +1118,7 @@ def photo_delete(phid: int, u: dict = Depends(auth.require_user)):
 
 @app.get("/api/photos/{phid}/align.jpg")
 def photo_align_jpg(phid: int, u: dict = Depends(auth.require_user)):
-    ph, p = _own_photo(phid, u)
+    ph, p = _own_photo(phid, u, "read")
     a = db.jload(ph["analysis"], {}) or {}
     tid = (a.get("bottom_align") or {}).get("top_photo_id")
     top = db.q1("SELECT * FROM photos WHERE id=?", (tid,)) if tid else parts.reference_top(p["id"])
@@ -1147,7 +1134,7 @@ def photo_align_jpg(phid: int, u: dict = Depends(auth.require_user)):
 
 @app.get("/api/photos/{phid}/{kind}.jpg")
 def photo_file(phid: int, kind: str, u: dict = Depends(auth.require_user)):
-    _own_photo(phid, u)
+    _own_photo(phid, u, "read")
     if kind not in ("orig", "overlay", "rect", "gauge", "thumb"):
         raise HTTPException(404, "Unbekannte Datei")
     p = _photo_dir(phid) / f"{kind}.jpg"
@@ -1224,7 +1211,7 @@ def photo_edges(phid: int, body: EdgesIn, request: Request, u: dict = Depends(au
 
 @app.get("/api/photos/{phid}/edges.json")
 def photo_edges_get(phid: int, u: dict = Depends(auth.require_user)):
-    _own_photo(phid, u)
+    _own_photo(phid, u, "read")
     f = _photo_dir(phid) / "edges.json"
     if not f.is_file():
         raise HTTPException(404, "Noch keine Kanten erkannt")
@@ -1297,7 +1284,7 @@ def meas_create(pid: int, body: MeasIn, u: dict = Depends(auth.require_user)):
         raise HTTPException(400, "Unbekannte Messart")
     photo = None
     if body.photo_id is not None:
-        photo, pp = _own_photo(body.photo_id, u)
+        photo, pp = _own_photo(body.photo_id, u, "read")
         if pp["id"] != pid:
             raise HTTPException(400, "Foto gehört zu einem anderen Projekt")
     pts = _points(body.points) or []
@@ -1478,7 +1465,7 @@ def _polygon(pts: list, photo: dict) -> list:
 @app.post("/api/projects/{pid}/parts")
 def part_create(pid: int, body: PartIn, u: dict = Depends(auth.require_user)):
     p = _own_project(pid, u)
-    ph, pp = _own_photo(body.photo_id, u)
+    ph, pp = _own_photo(body.photo_id, u, "read")
     if pp["id"] != pid:
         raise HTTPException(400, "Foto gehört zu einem anderen Projekt")
     poly = _polygon(body.polygon, ph)
@@ -1662,7 +1649,7 @@ def _csv(pid: int) -> str:
 
 @app.get("/api/projects/{pid}/measurements.csv")
 def meas_csv(pid: int, u: dict = Depends(auth.require_user)):
-    p = _own_project(pid, u)
+    p = _own_project(pid, u, "read")
     safe = _ascii_name(p["name"], "Projekt")
     return Response(_csv(pid), media_type="text/csv; charset=utf-8",
                     headers={"Content-Disposition": _disposition(f"{safe}_Masse.csv")})
@@ -1728,7 +1715,7 @@ def job_list(all: int = 0, u: dict = Depends(auth.require_user)):
 
 @app.get("/api/jobs/{jid}")
 def job_get(jid: int, u: dict = Depends(auth.require_user)):
-    return jobs.job_public(_own_job(jid, u), True)
+    return jobs.job_public(_own_job(jid, u, "read"), True)
 
 
 class IterIn(BaseModel):
@@ -1758,7 +1745,7 @@ class ParamIn(BaseModel):
 @app.post("/api/jobs/{jid}/param")
 def job_param(jid: int, body: ParamIn, u: dict = Depends(auth.require_user)):
     """Spec Stufe B §2: Messschieberwerte in die Konstanten einsetzen, neue Version ohne KI."""
-    j = _own_job(jid, u)                        # zuerst Besitz: ein fremder Auftrag ist 404, gleich welche Werte
+    j = _own_job(jid, u)   # zuerst Rechte (write): ein fremder Auftrag ist 404, gleich welche Werte
     for v in body.values:
         if not 0 < v.value <= 5000:            # faengt auch NaN und Unendlich ab
             raise HTTPException(422, f"Maß {v.id}: Der Wert muss größer als 0 und höchstens 5000 mm sein.")
@@ -1774,7 +1761,7 @@ def job_cancel(jid: int, u: dict = Depends(auth.require_user)):
 
 @app.delete("/api/jobs/{jid}")
 def job_delete(jid: int, u: dict = Depends(auth.require_user)):
-    jobs.delete(_own_job(jid, u))
+    jobs.delete(_own_job(jid, u, "delete"))   # Rechte vor jobs.delete (prueft selbst nicht)
     return {"ok": True}
 
 
@@ -1788,7 +1775,7 @@ def _file_base(j: dict) -> str:
 
 @app.get("/api/jobs/{jid}/v/{ver}/preview.png")
 def job_preview(jid: int, ver: int, u: dict = Depends(auth.require_user)):
-    _own_job(jid, u)
+    _own_job(jid, u, "read")
     v = db.q1("SELECT status FROM job_versions WHERE job_id=? AND version=?", (jid, ver))
     d = jobs.version_dir(jid, ver)
     stl = d / "model.stl"
@@ -1799,7 +1786,7 @@ def job_preview(jid: int, ver: int, u: dict = Depends(auth.require_user)):
 
 @app.get("/api/jobs/{jid}/v/{ver}/{name}")
 def job_file(jid: int, ver: int, name: str, download: int = 0, u: dict = Depends(auth.require_user)):
-    j = _own_job(jid, u)
+    j = _own_job(jid, u, "read")
     if name == "bundle.zip":
         return _bundle(j, ver)
     if name not in FILE_TYPES:

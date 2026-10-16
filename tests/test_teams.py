@@ -1,10 +1,14 @@
 """Teams mit gemeinsamen Bibliotheken (Spec 2026-10-16, T1–T8)."""
+import itertools
 import sqlite3
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+from conftest import H
 
 FIXTURE = Path(__file__).parent / "fixtures" / "schema_c408b93.sql"
 TS = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -254,3 +258,257 @@ def test_migration_abbruch_behaelt_ursache(tmp_path):
     with pytest.raises(RuntimeError, match="Migration abgebrochen: Testfehler beim Umbenennen"):
         db._open(p, factory=_BoomCleanup)
     assert _dump(p) == vor                                                      # Schliessen verwirft die Transaktion
+
+
+# ------------------------------------------------------------------ Hilfen
+
+_seq = itertools.count(1)
+POLY = [[0, 0], [10, 0], [10, 10]]
+CODE = "BLOCK_L = 40.0\npart = Box(BLOCK_L, BLOCK_L, 10)\n"
+META = {"dimensions": [{"id": "D1", "label": "Länge", "group": "aussen", "var": "BLOCK_L", "value": 40.0,
+                        "assumed": False, "editable": True}]}
+
+
+def _client(app, admin, name):
+    """Neuer Benutzer per Einladung, angemeldet; .username, .uid und .display (Anzeigename) gesetzt."""
+    from fastapi.testclient import TestClient
+
+    from app import db
+    tok = admin.post("/api/admin/invites", json={"role": "user", "days": 1}, headers=H).json()["link"].rsplit("/", 1)[1]
+    c = TestClient(app)
+    username = f"tm{next(_seq)}{name}"[:32]
+    r = c.post(f"/api/invite/{tok}", json={"username": username, "display_name": name.title(),
+                                           "password": "Schieblehre-Messing-7"}, headers=H)
+    assert r.status_code == 200, r.text
+    c.username, c.display = username, name.title()
+    c.uid = db.q1("SELECT id FROM users WHERE username=?", (username,))["id"]
+    return c
+
+
+def _mk(app, admin, *names):
+    return [_client(app, admin, n) for n in names]
+
+
+def _team(name, members):
+    """Team direkt in der Datenbank; members = {uid: rolle} in Beitrittsreihenfolge (joined_at aufsteigend)."""
+    from app import db
+    tid = db.ex("INSERT INTO teams(name,created_by,created_at) VALUES (?,?,?)", (name, next(iter(members)), db.now()))
+    for i, (uid, role) in enumerate(members.items()):
+        db.ex("INSERT INTO team_members(team_id,user_id,role,joined_at) VALUES (?,?,?,?)",
+              (tid, uid, role, f"2026-10-16T10:{i // 60:02d}:{i % 60:02d}+00:00"))
+    return tid
+
+
+def _project(uid, team_id=None, name="P"):
+    from app import db
+    return db.ex("INSERT INTO projects(user_id,team_id,name,created_at) VALUES (?,?,?,?)", (uid, team_id, name, db.now()))
+
+
+def _photo(pid):
+    """Foto ohne Entzerrung, mit thumb.jpg und edges.json im Ordner."""
+    from app import config, db
+    phid = db.ex("INSERT INTO photos(project_id,filename,view,status,created_at) VALUES (?,?,?,?,?)",
+                 (pid, "f.jpg", "top", "gut", db.now()))
+    d = config.DATA_DIR / "photos" / str(phid)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "thumb.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+    (d / "edges.json").write_text('{"segments": []}', encoding="utf-8")
+    return phid
+
+
+def _meas(pid, photo_id=None):
+    from app import db
+    seq = db.q1("SELECT COALESCE(MAX(seq),0)+1 s FROM measurements WHERE project_id=?", (pid,))["s"]
+    return db.ex("INSERT INTO measurements(project_id,photo_id,seq,label,kind,value,unit,data,source,created_at) "
+                 "VALUES (?,?,?,?,?,?,?,?,?,?)", (pid, photo_id, seq, "M", "length", 5.0, "mm", "{}", "manual", db.now()))
+
+
+def _job(uid, pid, version_status="ok", stl=False):
+    """Auftrag mit Version 1 (Trigger create, Ausloeser = Ersteller) direkt in der Datenbank; model.py im Versionsordner."""
+    from app import config, db
+    jid = db.ex("INSERT INTO jobs(user_id,project_id,name,request,status,messages,current_version,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)", (uid, pid, "Teil", "{}", "done", "[]", 1, db.now(), db.now()))
+    db.ex("INSERT INTO job_versions(job_id,version,trigger,request_text,code,claude_text,meta,status,result,checks,usage,"
+          "created_at,user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          (jid, 1, "create", "", CODE, "", db.jdump(META), version_status, "{}", "[]", "{}", db.now(), uid))
+    d = config.DATA_DIR / "jobs" / str(jid) / "v1"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "model.py").write_text(CODE, encoding="utf-8")
+    if stl:
+        from test_library import _cube_tris, _write_bin
+        _write_bin(d / "model.stl", _cube_tris())
+    return jid
+
+
+@pytest.fixture(scope="module")
+def welt(app, admin):
+    """L, M, R im Team tid (Leiter, Mitglied, Lesend); F aussen und Leiter von t2; X, Y fuer Team-Routen; A = Admin."""
+    from app import db
+    L, M, R, F, X, Y = _mk(app, admin, "leiter", "mitglied", "lesend", "aussen", "extra", "gast")
+    admin.uid = db.q1("SELECT id FROM users WHERE username='admin'")["id"]
+    w = SimpleNamespace(L=L, M=M, R=R, F=F, X=X, Y=Y, A=admin)
+    w.tid = _team("Rechte", {L.uid: "leiter", M.uid: "mitglied", R.uid: "lesend"})
+    w.t2 = _team("Eigenes", {F.uid: "leiter"})
+    return w
+
+
+# ------------------------------------------------------------------ T2: Rechte
+
+# Jede Route unter diesen Praefixen hat genau einen Eintrag in RIGHTS (Spec §10 T2)
+PREFIXES = ("/api/projects", "/api/photos", "/api/measurements", "/api/parts", "/api/jobs", "/api/teams",
+            "/api/team-invites")
+# Route -> (need, Body, Status mit Recht, Teiltext der Antwort mit Recht). Body: dict, Funktion(o) oder "UPLOAD".
+# Status mit Recht ist 200, wo die Route mit wenig Aufbau gelingt; sonst ein Fehler nach der Rechtepruefung (400/404/422).
+MATRIX = {
+    ("GET", "/api/projects/{pid}"): ("read", None, 200, None),
+    ("PATCH", "/api/projects/{pid}"): ("write", {"name": "neu"}, 200, None),
+    ("DELETE", "/api/projects/{pid}"): ("delete", None, 200, None),
+    ("DELETE", "/api/projects/{pid}/model-dims/{mid}"): ("write", None, 200, None),
+    ("POST", "/api/projects/{pid}/photos"): ("write", "UPLOAD", 400, "Bild konnte nicht gelesen werden"),
+    ("POST", "/api/projects/{pid}/measurements"): ("write", {"kind": "length", "value": 5, "label": "x"}, 200, None),
+    ("POST", "/api/projects/{pid}/measurements/accept-all"): ("write", None, 200, None),
+    ("POST", "/api/projects/{pid}/measurements/discard-suggestions"): ("write", None, 200, None),
+    ("POST", "/api/projects/{pid}/parts"): ("write", lambda o: {"photo_id": o["phid"], "polygon": POLY}, 400,
+                                            "keine entzerrte Draufsicht"),
+    ("POST", "/api/projects/{pid}/cad-check"): ("write", {"part_id": 999999}, 400, "Teil gehört nicht"),
+    ("POST", "/api/projects/{pid}/suggest"): ("write", {}, 400, "Kein auswertbares Foto"),
+    ("GET", "/api/projects/{pid}/measurements.csv"): ("read", None, 200, None),
+    ("PATCH", "/api/photos/{phid}"): ("write", {}, 200, None),
+    ("DELETE", "/api/photos/{phid}"): ("write", None, 200, None),
+    ("GET", "/api/photos/{phid}/align.jpg"): ("read", None, 404, "Keine Ausrichtung"),
+    ("GET", "/api/photos/{phid}/{kind}.jpg"): ("read", None, 200, None),
+    ("POST", "/api/photos/{phid}/edges"): ("write", {"use_ai": False}, 400, "keine entzerrte Draufsicht"),
+    ("GET", "/api/photos/{phid}/edges.json"): ("read", None, 200, None),
+    ("PATCH", "/api/measurements/{mid}"): ("write", {"label": "y"}, 200, None),
+    ("DELETE", "/api/measurements/{mid}"): ("write", None, 200, None),
+    ("PATCH", "/api/parts/{part_id}"): ("write", {"polygon": [[0, 0], [1, 0], [1, 1]]}, 400, "keine entzerrte Draufsicht"),
+    ("DELETE", "/api/parts/{part_id}"): ("write", None, 200, None),
+    ("POST", "/api/jobs"): ("write", lambda o: {"project_id": o["pid"], "request": "x", "part_id": 999999}, 400,
+                            "Teil gehört nicht"),
+    ("GET", "/api/jobs/{jid}"): ("read", None, 200, None),
+    ("POST", "/api/jobs/{jid}/iterate"): ("write", {"text": " "}, 400, "Änderungswunsch"),
+    ("POST", "/api/jobs/{jid}/param"): ("write", {"values": [{"id": "D1", "value": 0.0}]}, 422, "größer als 0"),
+    ("POST", "/api/jobs/{jid}/cancel"): ("write", None, 200, None),
+    ("DELETE", "/api/jobs/{jid}"): ("job_delete", None, 200, None),
+    ("GET", "/api/jobs/{jid}/v/{ver}/preview.png"): ("read", None, 404, "Kein Modellbild"),
+    ("GET", "/api/jobs/{jid}/v/{ver}/{name}"): ("read", None, 200, None),
+}
+# Routen ohne einzelnes Projekt: eigene Tests (Bereiche, Anlegen, current, Auftragslisten)
+OTHER = {
+    ("GET", "/api/projects"): "liste",
+    ("POST", "/api/projects"): "anlegen",
+    ("GET", "/api/projects/current"): "privat",
+    ("GET", "/api/jobs"): "liste",
+}
+RIGHTS = {**{k: v[0] for k, v in MATRIX.items()}, **OTHER}
+# Fall -> (Akteur, Ersteller des Projekts und Auftrags, Team-Projekt?)
+CASES = {
+    "besitzer": ("F", "F", False), "admin": ("A", "F", False), "leiter": ("L", "M", True),
+    "mitglied_selbst": ("M", "M", True), "mitglied_fremd": ("M", "L", True), "lesend": ("R", "L", True),
+    "aussen": ("F", "L", True), "admin_team": ("A", "L", True),
+}
+EXPECT = {   # need -> Faelle mit Recht (Spec §2); ohne Lesen 404, sonst 403
+    "read": {"besitzer", "admin", "leiter", "mitglied_selbst", "mitglied_fremd", "lesend"},
+    "write": {"besitzer", "admin", "leiter", "mitglied_selbst", "mitglied_fremd"},
+    "delete": {"besitzer", "admin", "leiter", "mitglied_selbst"},
+    "move": {"besitzer", "leiter", "mitglied_selbst"},
+    "copy": {"besitzer", "leiter", "mitglied_selbst", "mitglied_fremd"},
+    "job_delete": {"besitzer", "admin", "leiter", "mitglied_selbst"},
+}
+NO_READ = {"aussen", "admin_team"}
+
+
+def _call(w, key, case):
+    """Frisches Projekt (und Foto, Teil, Mass, Wert, Auftrag nach Bedarf) fuer den Fall anlegen und die Route aufrufen."""
+    from app import db, parts
+    _, body, _, _ = MATRIX[key]
+    actor, creator, in_team = CASES[case]
+    cu = getattr(w, creator).uid
+    pid = _project(cu, w.tid if in_team else None)
+    o = {"pid": pid, "target": None if in_team else w.t2, "kind": "thumb", "ver": 1, "name": "model.py"}
+    method, path = key
+    if "{phid}" in path or "{part_id}" in path or path == "/api/projects/{pid}/parts":
+        o["phid"] = _photo(pid)
+    if "{part_id}" in path:
+        o["part_id"] = parts.create_part(pid, o["phid"], "T", "body", POLY)
+    if path.startswith("/api/measurements/"):
+        o["mid"] = _meas(pid)
+    if "/model-dims/" in path:
+        o["mid"] = db.ex("INSERT INTO model_dims(project_id,label,label_norm,grp,value,created_at) VALUES (?,?,?,?,?,?)",
+                         (pid, "Höhe", "höhe", "aussen", 45.0, db.now()))
+    if "{jid}" in path:
+        o["jid"] = _job(cu, pid)
+    kw = {"headers": H}
+    if body == "UPLOAD":
+        kw["files"] = {"file": ("x.jpg", b"kein bild", "image/jpeg")}
+    elif callable(body):
+        kw["json"] = body(o)
+    elif body is not None:
+        kw["json"] = body
+    return getattr(w, actor).request(method, path.format(**o), **kw)
+
+
+def _routes(app):
+    """(Methode, Pfad) aller Routen, auch aus include_router (FastAPI 0.143 fasst sie als _IncludedRouter zusammen)."""
+    out, todo = set(), [("", r) for r in app.routes]
+    while todo:
+        pre, r = todo.pop()
+        sub = getattr(r, "original_router", None)
+        if sub is not None:
+            p = pre + (getattr(getattr(r, "include_context", None), "prefix", "") or "")
+            todo += [(p, x) for x in sub.routes]
+        elif getattr(r, "methods", None) and hasattr(r, "path"):
+            out |= {(m, pre + r.path) for m in r.methods if m != "HEAD"}
+    return out
+
+
+def test_rechte_vollstaendig(app):
+    """Jede Route unter PREFIXES hat genau einen Eintrag; eine neue Route ohne Eintrag laesst den Test fehlschlagen."""
+    have = {(m, path) for m, path in _routes(app) if path.startswith(PREFIXES)}
+    assert have == set(RIGHTS), (sorted(have - set(RIGHTS)), sorted(set(RIGHTS) - have))
+
+
+@pytest.mark.parametrize("case", list(CASES))
+@pytest.mark.parametrize("key", list(MATRIX), ids=lambda k: f"{k[0]} {k[1]}")
+def test_rechte_matrix(welt, key, case):
+    from app import access
+    need, _, ok, ok_text = MATRIX[key]
+    r = _call(welt, key, case)
+    if case in EXPECT[need]:
+        assert r.status_code == ok, r.text
+        if ok_text:
+            assert ok_text in r.text, r.text
+    elif case in NO_READ:
+        assert r.status_code == 404 and "nicht gefunden" in r.json()["detail"], r.text
+    else:
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == (access.DENY_WRITE if case == "lesend" else access.DENY_OWNER)
+
+
+def test_rechte_admin_als_mitglied(welt):
+    """Ist der Admin Mitglied, gilt seine Team-Rolle; "admin" nur fuer private Projekte anderer."""
+    from app import access, db
+    w = welt
+    pid = _project(w.L.uid, w.tid)
+    assert w.A.get(f"/api/projects/{pid}").status_code == 404
+    db.ex("INSERT INTO team_members(team_id,user_id,role,joined_at) VALUES (?,?,?,?)", (w.tid, w.A.uid, "lesend", db.now()))
+    try:
+        assert w.A.get(f"/api/projects/{pid}").status_code == 200
+        r = w.A.patch(f"/api/projects/{pid}", json={"name": "x"}, headers=H)
+        assert r.status_code == 403 and r.json()["detail"] == access.DENY_WRITE
+        me = db.q1("SELECT * FROM users WHERE id=?", (w.A.uid,))
+        assert access.project_role(me, db.q1("SELECT * FROM projects WHERE id=?", (pid,))) == "lesend"
+        assert access.project_role(me, {"team_id": None, "user_id": w.F.uid}) == "admin"
+    finally:
+        db.ex("DELETE FROM team_members WHERE team_id=? AND user_id=?", (w.tid, w.A.uid))
+
+
+def test_rechte_auftrag_ohne_projekt(welt):
+    """Auftraege ohne Projekt gehoeren nur dem Ersteller und dem Admin."""
+    w = welt
+    jid = _job(w.M.uid, None)
+    assert w.M.get(f"/api/jobs/{jid}").status_code == 200
+    assert w.A.get(f"/api/jobs/{jid}").status_code == 200
+    assert w.L.get(f"/api/jobs/{jid}").status_code == 404
+    assert w.L.delete(f"/api/jobs/{jid}", headers=H).status_code == 404
+    assert w.A.delete(f"/api/jobs/{jid}", headers=H).status_code == 200
