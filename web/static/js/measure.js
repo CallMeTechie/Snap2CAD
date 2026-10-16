@@ -443,6 +443,7 @@ export default async function (main) {
   }
   async function click(e) {
     if (!img || !cursor) return;
+    if (isReadOnly(S.project) && tool !== "pan") return;   // Lesend: nur auswählen (Werkzeug-Wechsel noch nicht erfolgt)
     if (tool === "edges") { layer.click(...evPos(e)); return; }
     if (tool === "pan") { const m = hit(...evPos(e)); select(m ? m.id : null); return; }
     pts.push(cursor.mm);

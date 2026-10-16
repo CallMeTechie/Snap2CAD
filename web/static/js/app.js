@@ -1,7 +1,7 @@
 // Snap2CAD – Einstieg, Router, Kopfzeile, Anmeldung, Konto, Verwaltung
 import { api, h, clear, icon, LOGO, toast, fail, dialog, confirmDlg, dt, until, initials, num, debounce, strength,
   STRENGTH_TEXT, parseNum, copyText } from "./lib.js";
-import { groupProjects, isReadOnly, readOnlyText } from "./rights.js";
+import { groupProjects, isReadOnly, notFoundConcerns, readOnlyText } from "./rights.js";
 
 export const S = { me: null, project: null, leave: [] };
 const app = document.getElementById("app");
@@ -65,19 +65,30 @@ document.addEventListener("keydown", ev => {
 
 api.onUnauthorized = () => { S.me = null; if (!location.pathname.startsWith("/login")) go("/login", true); };
 api.onMustChange = () => { if (S.me) S.me.must_change_pw = 1; go("/passwort", true); };
-// Spec Teams §8: Zugriff auf das offene Projekt verloren (z. B. aus dem Team entfernt) -> zur Bibliothek, auf der
-// Auftragsseite zu „Meine Aufträge“; die Meldung zeigt der Aufrufer (fail). In der Bibliothek lädt die Liste neu.
-api.onNotFound = msg => {
-  if (msg !== "Projekt nicht gefunden" || !S.project || location.pathname === "/") return;
-  S.project = null;
-  forgetProject();
-  go(location.pathname.startsWith("/cad/") ? "/auftraege" : "/");
+const openJobId = () => { const m = location.pathname.match(/^\/cad\/(\d+)$/); return m ? Number(m[1]) : null; };
+// Spec Teams §8: Zugriff auf das offene Projekt bzw. den offenen Auftrag verloren (z. B. aus dem Team entfernt) -> zur
+// Bibliothek, auf der Auftragsseite zu „Meine Aufträge“. Nur für den offenen Gegenstand (Pfad der Anfrage), nicht für ein
+// 404 beim Wechsel auf ein anderes Projekt. Zeigt die Meldung selbst und meldet true (dann kein zweiter Toast in fail).
+api.onNotFound = (msg, path) => {
+  if (location.pathname === "/" || (msg !== "Projekt nicht gefunden" && msg !== "Auftrag nicht gefunden")) return false;
+  const what = notFoundConcerns(path, S.project?.id ?? null, openJobId());
+  if (!what) return false;
+  if (what === "project") { S.project = null; forgetProject(); }   // das offene Projekt selbst ist weg
+  toast(msg, "err");
+  go(openJobId() != null ? "/auftraege" : "/");
+  return true;
 };
-// Rolle inzwischen Lesend (z. B. vom Leiter herabgestuft): Projekt neu laden und die Seite neu zeichnen, damit der
-// Lesend-Modus greift; die Meldung zeigt der Aufrufer (fail). Nur beim Wechsel zu Lesend, daher keine Schleife.
+// Rolle inzwischen Lesend (z. B. vom Leiter herabgestuft): Seite einmal neu zeichnen, damit der Lesend-Modus greift
+// (Projektseiten: Projekt neu laden; Auftragsseite: render() lädt das Auftrag-JSON mit my_role). Je Seite höchstens einmal
+// (roDone; render() setzt es zurück, außer das Neuzeichnen kommt von hier). Die Meldung zeigt der Aufrufer (fail).
+let roDone = false, roRedraw = false;
 api.onReadOnly = () => {
-  if (!S.project || isReadOnly(S.project)) return;
-  reloadProject().then(p => { if (isReadOnly(p)) render(); }).catch(() => {});
+  const job = openJobId() != null;
+  if (roDone || (!job && !S.project)) return;
+  roDone = true;
+  const redraw = () => { roRedraw = true; render(); };
+  if (job) redraw();
+  else reloadProject().then(p => { if (isReadOnly(p)) redraw(); }).catch(() => {});
 };
 
 export async function refreshMe() {
@@ -90,6 +101,8 @@ export async function refreshMe() {
 let renderGen = 0;   // nur das juengste Rendern darf scrollen
 async function render() {
   const gen = ++renderGen;
+  if (!roRedraw) roDone = false;   // neue Seite: Lesend-Neuzeichnen wieder frei (Hook api.onReadOnly)
+  roRedraw = false;
   for (const fn of S.leave.splice(0)) { try { fn(); } catch (e) { console.error(e); } }
   const path = location.pathname;
   shownPath = path + location.search;
@@ -189,6 +202,7 @@ export async function ensureProject(force = false) {
 let reloadSeq = 0;
 export async function reloadProject() {
   // nur die juengste Antwort uebernehmen: mehrere Aenderungen kurz hintereinander laden parallel neu
+  if (!S.project) throw Object.assign(new Error("Projekt nicht gefunden"), { handled: true });   // Zugriff inzwischen verloren
   const n = ++reloadSeq, id = S.project.id;
   const p = await api(`/api/projects/${id}`);
   if (n === reloadSeq && S.project?.id === id) S.project = p;
@@ -245,6 +259,7 @@ export function projectPicker(onChange) {
   const sel = h("select", { class: "input", "aria-label": "Projekt", style: { minWidth: "220px", maxWidth: "320px" } });
   // gruppiert nach „Privat“ und je Team (Spec Teams §7), Projekte aus scope=all
   const fill = list => {
+    if (!S.project) return;   // Zugriff auf das offene Projekt verloren: die Seite wird verlassen
     const opt = p => h("option", { value: p.id, selected: p.id === S.project.id },
       `${p.name}${p.archived ? " (archiviert)" : ""} · ${p.n_photos} Fotos · ${p.n_measurements} Maße`);
     clear(sel, groupProjects(list).map(g => h("optgroup", { label: g.label }, g.items.map(opt))),

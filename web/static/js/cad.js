@@ -249,7 +249,7 @@ export async function job(main, id) {
     let j = null, err = null;
     try { j = await api(`/api/jobs/${id}`); } catch (e) { err = e; } finally { inflight = false; }
     if (gone) return;
-    if (err?.status === 404) { go("/auftraege"); return; }
+    if (err?.status === 404) { if (!err.handled) go("/auftraege"); return; }   // der Hook zeigt die Meldung und navigiert
     if (err) { if (++fails === 3) fail(err); }  // Netz oder Server: weiter versuchen, nach dem dritten Fehlschlag einmal melden
     else {
       fails = 0;

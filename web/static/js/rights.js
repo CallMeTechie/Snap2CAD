@@ -48,3 +48,13 @@ export function groupProjects(list) {
 // Rolle „Lesend“: Fotos, Messen und CAD nur ansehen (Spec Teams §7)
 export const isReadOnly = p => p?.my_role === "lesend";
 export const readOnlyText = p => `Nur ansehen – Rolle Lesend im Team ${p?.team_name || ""}`.trim();
+
+// Betrifft eine 404-Antwort auf `path` das offene Projekt (projectId) bzw. den offenen Auftrag (jobId)? Nur dann ist der
+// Zugriff darauf verloren; ein 404 auf ein anderes Projekt (Projektwahl, veraltete Merkung) darf die Seite nicht verlassen.
+export function notFoundConcerns(path, projectId, jobId) {
+  const p = String(path || "").split("?")[0];
+  const under = base => p === base || p.startsWith(`${base}/`);
+  if (jobId != null && under(`/api/jobs/${jobId}`)) return "job";
+  if (projectId != null && under(`/api/projects/${projectId}`)) return "project";
+  return null;
+}

@@ -1,8 +1,8 @@
 // Rechte und Bereiche der Bibliothek (web/static/js/rights.js) – Aufruf: node --test tests/js/*.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ROLE_TEXT, SCOPE_KEY, creatorText, groupProjects, isReadOnly, loadScope, projectRights, readOnlyText, saveScope, teamIdOf, validScope } from "../../web/static/js/rights.js";
-import { api, plural } from "../../web/static/js/lib.js";
+import { ROLE_TEXT, SCOPE_KEY, creatorText, groupProjects, isReadOnly, loadScope, notFoundConcerns, projectRights, readOnlyText, saveScope, teamIdOf, validScope } from "../../web/static/js/rights.js";
+import { api, plural, upload } from "../../web/static/js/lib.js";
 
 test("projectRights reicht p.rights des Servers durch (eine Quelle: access.allowed)", () => {
   const none = { write: false, delete: false, move: false, copy: false };
@@ -95,4 +95,49 @@ test("isReadOnly und readOnlyText: nur die Rolle Lesend", () => {
   assert.equal(isReadOnly(null), false);
   assert.equal(readOnlyText({ team_name: "Werkstatt" }), "Nur ansehen – Rolle Lesend im Team Werkstatt");
   assert.equal(readOnlyText({}), "Nur ansehen – Rolle Lesend im Team");
+});
+
+test("notFoundConcerns: nur Pfade des offenen Projekts bzw. Auftrags (nicht das 404 eines anderen Projekts)", () => {
+  assert.equal(notFoundConcerns("/api/projects/7", 7, null), "project");
+  assert.equal(notFoundConcerns("/api/projects/7/photos", 7, null), "project");
+  assert.equal(notFoundConcerns("/api/projects/7?x=1", 7, null), "project");
+  assert.equal(notFoundConcerns("/api/projects/8", 7, null), null);       // Projektwahl auf ein gelöschtes Projekt
+  assert.equal(notFoundConcerns("/api/projects/70", 7, null), null);      // Präfix ist kein Treffer
+  assert.equal(notFoundConcerns("/api/projects/7", null, null), null);
+  assert.equal(notFoundConcerns("/api/jobs/12", 7, 12), "job");
+  assert.equal(notFoundConcerns("/api/jobs/12/param", 7, 12), "job");
+  assert.equal(notFoundConcerns("/api/jobs/13", 7, 12), null);
+  assert.equal(notFoundConcerns("/api/jobs/12", 7, null), null);
+  assert.equal(notFoundConcerns(undefined, 7, 12), null);
+});
+
+test("api: onNotFound bekommt den Pfad; true markiert den Fehler als gemeldet (kein zweiter Toast)", async () => {
+  const old = globalThis.fetch, seen = [];
+  globalThis.fetch = async () => new Response(JSON.stringify({ detail: "Projekt nicht gefunden" }),
+    { status: 404, headers: { "content-type": "application/json" } });
+  api.onNotFound = (m, p) => { seen.push([m, p]); return true; };
+  try { await assert.rejects(api("/api/projects/7/photos"), e => e.handled === true); }
+  finally { globalThis.fetch = old; api.onNotFound = null; }
+  assert.deepEqual(seen, [["Projekt nicht gefunden", "/api/projects/7/photos"]]);
+});
+
+test("upload meldet 404 und 403 „Nur lesender Zugriff“ an dieselben Hooks wie api", async () => {
+  const old = globalThis.XMLHttpRequest;
+  let status = 404, text = "";
+  globalThis.XMLHttpRequest = class {
+    constructor() { this.upload = {}; }
+    open() {} setRequestHeader() {}
+    send() { this.status = status; this.responseText = text; this.onload(); }
+  };
+  const seen = []; let ro = 0;
+  api.onNotFound = (m, p) => { seen.push([m, p]); return true; };
+  api.onReadOnly = () => { ro++; };
+  try {
+    text = JSON.stringify({ detail: "Projekt nicht gefunden" });
+    await assert.rejects(upload("/api/projects/7/photos", {}), e => e.status === 404 && e.handled === true);
+    status = 403; text = JSON.stringify({ detail: "Nur lesender Zugriff" });
+    await assert.rejects(upload("/api/projects/7/photos", {}), e => e.status === 403 && !e.handled);
+  } finally { globalThis.XMLHttpRequest = old; api.onNotFound = null; api.onReadOnly = null; }
+  assert.deepEqual(seen, [["Projekt nicht gefunden", "/api/projects/7/photos"]]);
+  assert.equal(ro, 1);
 });
