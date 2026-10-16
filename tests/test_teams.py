@@ -1188,3 +1188,53 @@ def test_benutzer_loeschen_projekt_inzwischen_verschoben(app, admin, monkeypatch
     assert r.status_code == 404 and r.json()["detail"] == "Projekt nicht gefunden", r.text
     assert db.q1("SELECT team_id, user_id FROM projects WHERE id=?", (pid,)) == {"team_id": None, "user_id": L.uid}
     assert db.q1("SELECT id FROM jobs WHERE id=?", (jx,)) is not None
+
+
+def test_verschieben_auftrag_anlegen_waehrend_verschieben(app, admin, monkeypatch):
+    """Review Minor 1: verschiebt der Leiter das Projekt nach privat, waehrend das Mitglied einen Auftrag anlegt
+    (nach der ersten Rechtepruefung), landet kein fremder Auftrag im privaten Projekt (F-1); das Mitglied bekommt 404."""
+    from app import db, jobs
+    L, M = _mk(app, admin, "valeiter", "vamitgl")
+    tid = _team("Anlegen dazwischen", {L.uid: "leiter", M.uid: "mitglied"})
+    db.ex("UPDATE users SET cad_quota=-1 WHERE id=?", (M.uid,))
+    pid = _project(L.uid, tid)
+    real, calls = jobs.build_initial_message, []
+
+    def build(project, request_text, options):
+        if not calls:                                       # nach der ersten Pruefung: Leiter verschiebt nach privat
+            calls.append(1)
+            assert L.post(f"/api/projects/{pid}/move", json={"team_id": None}, headers=H).status_code == 200
+        return real(project, request_text, options)
+    monkeypatch.setattr(jobs, "build_initial_message", build)
+    monkeypatch.setattr(jobs, "_submit", lambda *a: None)
+    r = M.post("/api/jobs", json={"project_id": pid, "name": "dazwischen", "request": "Platte"}, headers=H)
+    assert r.status_code == 404 and r.json()["detail"] == "Projekt nicht gefunden", r.text
+    assert calls == [1]
+    assert db.q1("SELECT COUNT(*) n FROM jobs WHERE project_id=?", (pid,))["n"] == 0
+    assert db.q1("SELECT team_id, user_id FROM projects WHERE id=?", (pid,)) == {"team_id": None, "user_id": L.uid}
+
+
+def test_benutzer_loeschen_nicht_in_transaktion(app, admin):
+    """Review Minor 2: delete_projects innerhalb von db.atomic -> RuntimeError, nichts geloescht."""
+    from app import db, projects
+    (L,) = _mk(app, admin, "ntleiter")
+    pid = _project(L.uid)
+    with db.atomic():
+        with pytest.raises(RuntimeError, match="nicht innerhalb von db.atomic"):
+            projects.delete_projects([pid])
+    assert db.q1("SELECT id FROM projects WHERE id=?", (pid,)) is not None
+
+
+def test_rechte_bereich_all_ohne_fremde(app, admin):
+    """Review Minor 4: scope=all eines Nicht-Mitglieds (auch des Admins) enthaelt keine fremden Team- und keine
+    fremden privaten Projekte; team:<id> fuer den Admin ohne Mitgliedschaft -> 404."""
+    L, F = _mk(app, admin, "baleiter", "baaussen")
+    tid = _team("Fremd fuer alle", {L.uid: "leiter"})
+    tp = L.post("/api/projects", json={"name": "Team", "team_id": tid}, headers=H).json()["id"]
+    priv = L.post("/api/projects", json={"name": "Privat"}, headers=H).json()["id"]
+    own = F.post("/api/projects", json={"name": "Eigen"}, headers=H).json()["id"]
+    assert _ids(F, "all") == [own]
+    a_all = set(_ids(admin, "all"))
+    assert not a_all & {tp, priv, own}
+    r = admin.get(f"/api/projects?scope=team:{tid}")
+    assert r.status_code == 404 and r.json()["detail"] == "Team nicht gefunden"

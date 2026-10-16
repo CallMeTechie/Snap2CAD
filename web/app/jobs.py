@@ -15,7 +15,7 @@ from pathlib import Path
 import cv2
 from fastapi import HTTPException
 
-from . import ai, auth, config, db, sandbox, settings
+from . import access, ai, auth, config, db, sandbox, settings
 from .parts import cad_text, reference_top, to_top
 
 _pool = ThreadPoolExecutor(max_workers=max(1, config.MAX_CONCURRENT_JOBS), thread_name_prefix="job")
@@ -501,10 +501,15 @@ def create(user: dict, project: dict | None, name: str, request_text: str, optio
         options = {**options, "name": name}
         msgs = build_initial_message(project, request_text, options) if project else \
             [{"role": "user", "content": [{"type": "text", "text": request_text}]}]
-        jid = db.ex("""INSERT INTO jobs(user_id,project_id,name,request,status,messages,created_at,updated_at,run_by)
-                       VALUES (?,?,?,?, 'queued', ?, ?, ?, ?)""",
-                    (user["id"], project["id"] if project else None, name[:120], db.jdump(options | {"text": request_text}),
-                     db.jdump(msgs), db.now(), db.now(), user["id"]))
+        # Recht und INSERT in einer Transaktion (Sperrreihenfolge _lock -> db._lock): ein gleichzeitiges Verschieben
+        # nach privat oder ein Austritt nach der ersten Pruefung in job_create laesst keinen fremden Auftrag zurueck (F-1)
+        with db.atomic():
+            if project:
+                access.require_project(user, project["id"], "write")
+            jid = db.ex("""INSERT INTO jobs(user_id,project_id,name,request,status,messages,created_at,updated_at,run_by)
+                           VALUES (?,?,?,?, 'queued', ?, ?, ?, ?)""",
+                        (user["id"], project["id"] if project else None, name[:120],
+                         db.jdump(options | {"text": request_text}), db.jdump(msgs), db.now(), db.now(), user["id"]))
     log(jid, "Auftrag angelegt")
     db.audit("cad_create", f"Auftrag {jid} „{name[:60]}“", user_id=user["id"], actor=user["username"])
     _submit(jid, "create", request_text)

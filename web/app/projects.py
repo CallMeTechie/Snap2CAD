@@ -20,7 +20,11 @@ def delete_projects(pids: list[int], then: Callable[[], None] | None = None,
     Auftraege ohne Ersteller und die Foto-ids sammeln, Projektzeilen loeschen und then() (z. B. Team oder Benutzer
     loeschen). Alle anderen Auftraege bleiben bei ihren Erstellern ohne Projekt (ON DELETE SET NULL). (2) Nach dem
     COMMIT die gesammelten Auftraege ohne Ersteller per jobs.delete – ausserhalb von db.atomic, weil jobs.delete
-    jobs._lock nimmt (Sperrreihenfolge jobs._lock -> db._lock) – und die Fotoordner entfernen."""
+    jobs._lock nimmt (Sperrreihenfolge jobs._lock -> db._lock) – und die Fotoordner entfernen. Deshalb nie innerhalb
+    eines aeusseren db.atomic aufrufen (dort gaebe es kein eigenes COMMIT): RuntimeError."""
+    with db._lock:   # die Verbindung ist geteilt: in_transaction nur unter db._lock eindeutig dem eigenen Thread zuzuordnen
+        if db.conn().in_transaction:
+            raise RuntimeError("delete_projects nicht innerhalb von db.atomic aufrufen")
     marks = ",".join("?" * len(pids))
     photo_ids: list[int] = []
     orphans: list[int] = []
