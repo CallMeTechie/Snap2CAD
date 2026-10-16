@@ -210,10 +210,12 @@ export async function ensureProject(force = false) {
 let reloadSeq = 0;
 export async function reloadProject() {
   // nur die juengste Antwort uebernehmen: mehrere Aenderungen kurz hintereinander laden parallel neu
-  if (!S.project) throw Object.assign(new Error("Projekt nicht gefunden"), { handled: true });   // Zugriff inzwischen verloren
+  const lost = () => Object.assign(new Error("Projekt nicht gefunden"), { handled: true });   // Zugriff inzwischen verloren
+  if (!S.project) throw lost();
   const n = ++reloadSeq, id = S.project.id;
   const p = await api(`/api/projects/${id}`);
-  if (n === reloadSeq && S.project?.id === id) S.project = p;
+  if (!S.project) throw lost();   // waehrend des Ladens verloren (Hook api.onNotFound): Aufrufer zeichnen nicht weiter
+  if (n === reloadSeq && S.project.id === id) S.project = p;
   return S.project;
 }
 // zuletzt geoeffnetes Projekt je Benutzer im Browser

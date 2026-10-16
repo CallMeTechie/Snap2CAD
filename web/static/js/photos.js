@@ -96,6 +96,7 @@ export default async function (main) {
     const max = (S.status?.max_upload_mb || 25) * 1048576;
     const view = viewSel.value;   // gilt fuer den ganzen Stapel, auch wenn die Auswahl waehrenddessen wechselt
     for (const f of files) {
+      if (!main.isConnected || !S.project) return;   // Seite verlassen oder Zugriff auf das Projekt verloren (Hook)
       if (f.size > max) { toast(`${f.name}: zu groß`, "err"); continue; }
       const item = { name: f.name, progress: 0 };
       pending.push(item); drawList();
@@ -108,11 +109,13 @@ export default async function (main) {
         if (ph.status === "nicht_auswertbar") toast(`${f.name}: zu wenige Marker erkannt`, "err");
       } catch (e) { fail(e); }
       pending.splice(pending.indexOf(item), 1);
+      if (!main.isConnected || !S.project) return;
       draw();
     }
   }
 
   function drawList() {
+    if (!S.project) return;   // Zugriff verloren: die Seite wird gerade verlassen
     const ps = S.project.photos;
     clear(list, ps.map(p => {
       const bad = p.status === "nicht_auswertbar";
@@ -140,6 +143,7 @@ export default async function (main) {
   }
 
   function draw() {
+    if (!S.project) return;
     if (!S.project.photos.some(p => p.id === selected)) selected = (S.project.photos.find(p => p.status !== "nicht_auswertbar") || S.project.photos[0])?.id ?? null;
     ws.update();
     drawList();
