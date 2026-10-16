@@ -140,6 +140,8 @@ export function parseNum(s) {
   const v = Number(t);
   return Number.isFinite(v) ? v : NaN;
 }
+// „1 Foto“ / „3 Fotos“ – eine Stelle für Bibliothek, Teams und Verwaltung
+export const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 export function dt(iso, withTime = true) {
   if (!iso) return "–";
   const d = new Date(iso), now = new Date();

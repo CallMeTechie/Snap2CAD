@@ -1,6 +1,7 @@
 // Snap2CAD – Einstieg, Router, Kopfzeile, Anmeldung, Konto, Verwaltung
 import { api, h, clear, icon, LOGO, toast, fail, dialog, confirmDlg, dt, until, initials, num, debounce, strength,
   STRENGTH_TEXT, parseNum, copyText } from "./lib.js";
+import { groupProjects } from "./rights.js";
 
 export const S = { me: null, project: null, leave: [] };
 const app = document.getElementById("app");
@@ -193,14 +194,18 @@ export function forgetProject() {
 
 export function projectPicker(onChange) {
   const sel = h("select", { class: "input", "aria-label": "Projekt", style: { minWidth: "220px", maxWidth: "320px" } });
+  // gruppiert nach „Privat“ und je Team (Spec Teams §7), Projekte aus scope=all
   const fill = list => {
-    clear(sel, list.map(p => h("option", { value: p.id, selected: p.id === S.project.id },
-      `${p.name}${p.archived ? " (archiviert)" : ""} · ${p.n_photos} Fotos · ${p.n_measurements} Maße`)),
+    const opt = p => h("option", { value: p.id, selected: p.id === S.project.id },
+      `${p.name}${p.archived ? " (archiviert)" : ""} · ${p.n_photos} Fotos · ${p.n_measurements} Maße`);
+    clear(sel, groupProjects(list).map(g => h("optgroup", { label: g.label }, g.items.map(opt))),
       h("option", { value: "new" }, "+ Neues Projekt …"), h("option", { value: "rename" }, "Projekt umbenennen …"));
   };
-  api("/api/projects").then(fill).catch(fail);
-  const wrap = h("label", { class: "field", style: { gap: "4px" } }, h("span", { class: "label" }, "Projekt"), sel);
-  wrap.refresh = () => api("/api/projects").then(fill).catch(() => {});
+  const load = () => api("/api/projects?scope=all");
+  load().then(fill).catch(fail);
+  // data-ro="ok": bleibt in der Rolle Lesend bedienbar (Projekt wechseln)
+  const wrap = h("label", { class: "field", style: { gap: "4px" }, "data-ro": "ok" }, h("span", { class: "label" }, "Projekt"), sel);
+  wrap.refresh = () => load().then(fill).catch(() => {});
   sel.addEventListener("change", async () => {
     const v = sel.value;
     try {
@@ -220,7 +225,7 @@ export function projectPicker(onChange) {
       }
       onChange();
     } catch (e) { fail(e); }
-    fill(await api("/api/projects"));
+    fill(await load());
   });
   return wrap;
 }

@@ -432,3 +432,6 @@ dialog.keysdlg{max-width:min(760px,calc(100vw - 32px));max-height:calc(100vh - 4
   .auth-card{padding:24px 20px}
   .card{padding:18px}
 }
+/* Teams (Spec Teams §7): gewählter Bereich, gewählter Filter */
+.chip[aria-pressed=true],.chip[aria-current=page]{background:var(--accent-bg);color:var(--accent);border-color:var(--accent);font-weight:600}
+.libscope{gap:8px}
