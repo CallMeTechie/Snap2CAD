@@ -1448,9 +1448,12 @@ def test_benutzer_loeschen_private_weg_team_bleibt(app, admin):
 
 def test_benutzer_leiter_nachfolge(app, admin):
     from app import db
-    L, A1, A2, B = _mk(app, admin, "blleiter", "blaelt", "bljung", "blzweit")
+    L, A1, A2, B, N = _mk(app, admin, "blleiter", "blaelt", "bljung", "blzweit", "blneu")
     erbe = _team("Erbe", {L.uid: "leiter", A1.uid: "mitglied", A2.uid: "lesend"})
     zwei = _team("Zwei Leiter", {L.uid: "leiter", B.uid: "leiter", A1.uid: "mitglied"})
+    r = L.post(f"/api/teams/{zwei}/invites", json={"username": N.username, "role": "mitglied"}, headers=H)
+    assert r.status_code == 200, r.text
+    inv = r.json()["id"]                                                       # offene Einladung des Geloeschten
     solo = _team("Allein", {L.uid: "leiter"})                                  # ohne Projekte: wird mit geloescht
     rest = _team("Allein mit Projekt", {L.uid: "leiter"})
     _project(L.uid, rest)
@@ -1467,6 +1470,9 @@ def test_benutzer_leiter_nachfolge(app, admin):
         == f"Team {solo} „Allein“ gelöscht (letztes Mitglied {L.username} gelöscht, 0 Projekte)"
     assert db.q1("SELECT id FROM teams WHERE id=?", (rest,))                   # ohne Mitglieder, mit Projekt: bleibt
     assert next(t for t in admin.get("/api/admin/teams").json() if t["id"] == rest)["no_leader"] is True
+    assert db.q1("SELECT status, invited_by FROM team_invites WHERE id=?", (inv,)) == \
+        {"status": "zurueckgezogen", "invited_by": None}
+    assert N.post(f"/api/team-invites/{inv}/accept", headers=H).status_code == 409
 
 
 def test_benutzer_auftragsliste_team_filter(app, admin):
