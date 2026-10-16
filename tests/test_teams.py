@@ -512,3 +512,97 @@ def test_rechte_auftrag_ohne_projekt(welt):
     assert w.L.get(f"/api/jobs/{jid}").status_code == 404
     assert w.L.delete(f"/api/jobs/{jid}", headers=H).status_code == 404
     assert w.A.delete(f"/api/jobs/{jid}", headers=H).status_code == 200
+
+
+# ------------------------------------------------------------------ T6: Kontingent und Grenzen beim Ausloeser
+
+def test_kontingent_beim_ausloeser(app, admin, monkeypatch):
+    from app import auth, db, jobs
+    L, M = _mk(app, admin, "kleiter", "kmitglied")
+    tid = _team("Kontingent", {L.uid: "leiter", M.uid: "mitglied"})
+    jid = _job(L.uid, _project(L.uid, tid))
+    monkeypatch.setattr(jobs, "_submit", lambda *a: None)      # kein Lauf; die Version legt sonst _run per _new_version an
+    before = auth.usage_this_month(L.uid), auth.usage_this_month(M.uid)
+    r = M.post(f"/api/jobs/{jid}/iterate", json={"text": "Dicke 8 mm"}, headers=H)
+    assert r.status_code == 200, r.text
+    assert db.q1("SELECT run_by, status FROM jobs WHERE id=?", (jid,)) == {"run_by": M.uid, "status": "queued"}
+    v = jobs._new_version(jid, "iterate", "Dicke 8 mm", "", {})
+    assert db.q1("SELECT user_id FROM job_versions WHERE job_id=? AND version=?", (jid, v))["user_id"] == M.uid
+    assert (auth.usage_this_month(L.uid), auth.usage_this_month(M.uid)) == (before[0], before[1] + 1)
+    v2 = jobs._new_version(jid, "autofix", "", "", {})                  # Autofix-Version desselben Laufs
+    assert db.q1("SELECT user_id FROM job_versions WHERE job_id=? AND version=?", (jid, v2))["user_id"] == M.uid
+    v3 = jobs._new_version(jid, "autofix", "", "", {}, by=L.uid)        # ausdruecklicher Ausloeser geht vor
+    assert db.q1("SELECT user_id FROM job_versions WHERE job_id=? AND version=?", (jid, v3))["user_id"] == L.uid
+    db.ex("UPDATE jobs SET status='done' WHERE id=?", (jid,))
+
+
+def test_kontingent_altversionen_beim_ersteller(tmp_path):
+    """Nach der Migration zaehlen die Altversionen beim Ersteller (job_versions.user_id = jobs.user_id)."""
+    from app import auth, db
+    p = tmp_path / "alt.db"
+    _legacy_db(p)
+    db._open(p).close()
+    c = _plain(p)
+    try:
+        n = {uid: c.execute(auth.USAGE_SQL, (uid, TS[:7])).fetchone()[0] for uid in (1, 2)}
+    finally:
+        c.close()
+    assert n == {1: 2, 2: 1}          # alice: create + iterate an Auftrag 1, bob: create an Auftrag 2
+
+
+def test_kontingent_laufende_beim_ausloeser(app, admin, monkeypatch):
+    """Mitglied laesst drei Auftraege des Leiters aendern: der Leiter kann trotzdem neu anlegen, das Mitglied nicht."""
+    from app import db, jobs
+    L, M = _mk(app, admin, "klauf", "klaufm")
+    tid = _team("Laufend", {L.uid: "leiter", M.uid: "mitglied"})
+    db.ex("UPDATE users SET cad_quota=-1 WHERE id IN (?,?)", (L.uid, M.uid))
+    pid = _project(L.uid, tid)
+    jids = [_job(L.uid, pid) for _ in range(3)]
+    monkeypatch.setattr(jobs, "_submit", lambda *a: None)
+    try:
+        for j in jids:
+            assert M.post(f"/api/jobs/{j}/iterate", json={"text": "anders"}, headers=H).status_code == 200
+        r = L.post("/api/jobs", json={"project_id": pid, "name": "neu", "request": "Platte"}, headers=H)
+        assert r.status_code == 200, r.text
+        jids.append(r.json()["id"])
+        r = M.post("/api/jobs", json={"project_id": pid, "name": "vier", "request": "Platte"}, headers=H)
+        assert r.status_code == 429 and r.json()["detail"] == "Es laufen bereits drei Aufträge. Bitte warten."
+    finally:
+        db.ex(f"UPDATE jobs SET status='failed' WHERE id IN ({','.join('?' * len(jids))})", tuple(jids))
+
+
+def test_kontingent_geloeschter_ausloeser(app, admin, monkeypatch):
+    """Wird ein Mitglied geloescht, das am Auftrag des Leiters Versionen ausgeloest hat, bleibt die Zaehlung des Leiters."""
+    from app import auth, db, jobs
+    L, M = _mk(app, admin, "kgel", "kgelm")
+    tid = _team("Weg", {L.uid: "leiter", M.uid: "mitglied"})
+    jid = _job(L.uid, _project(L.uid, tid))
+    monkeypatch.setattr(jobs, "_submit", lambda *a: None)
+    assert M.post(f"/api/jobs/{jid}/iterate", json={"text": "x 7 mm"}, headers=H).status_code == 200
+    jobs._new_version(jid, "iterate", "x 7 mm", "", {})
+    db.ex("UPDATE jobs SET status='done' WHERE id=?", (jid,))
+    before = auth.usage_this_month(L.uid)
+    assert admin.delete(f"/api/admin/users/{M.uid}", headers=H).status_code == 200
+    assert auth.usage_this_month(L.uid) == before
+    assert db.q1("SELECT COUNT(*) n FROM job_versions WHERE job_id=? AND user_id IS NULL", (jid,))["n"] == 1
+    assert db.q1("SELECT run_by FROM jobs WHERE id=?", (jid,))["run_by"] is None
+
+
+def test_kontingent_param_grenzen_beim_ausloeser(app, admin, monkeypatch):
+    from app import config, db, jobs
+    L, M = _mk(app, admin, "kpar", "kparm")
+    tid = _team("Param", {L.uid: "leiter", M.uid: "mitglied"})
+    pid = _project(L.uid, tid)
+    j1, j2, j3 = (_job(L.uid, pid) for _ in range(3))
+    monkeypatch.setattr(jobs, "_submit", lambda *a: None)       # Param-Version bleibt running, Auftrag queued
+    monkeypatch.setattr(config, "PARAM_PER_HOUR", 1)
+    body = {"values": [{"id": "D1", "value": 41.0}]}
+    try:
+        assert M.post(f"/api/jobs/{j1}/param", json=body, headers=H).status_code == 200
+        assert db.q1("SELECT user_id FROM job_versions WHERE job_id=? AND trigger='param'", (j1,))["user_id"] == M.uid
+        assert db.q1("SELECT run_by FROM jobs WHERE id=?", (j1,))["run_by"] == M.uid
+        assert M.post(f"/api/jobs/{j2}/param", json=body, headers=H).status_code == 429     # Grenze beim Ausloeser
+        assert L.post(f"/api/jobs/{j3}/param", json=body, headers=H).status_code == 200      # der Leiter ist frei
+    finally:
+        db.ex("UPDATE jobs SET status='done' WHERE id IN (?,?,?)", (j1, j2, j3))
+        db.ex("UPDATE job_versions SET status='cancelled' WHERE job_id IN (?,?,?) AND status='running'", (j1, j2, j3))

@@ -119,11 +119,14 @@ def quota_of(u: dict) -> int | None:
         return 20
 
 
+# Spec Teams §6: CAD-Laeufe zaehlen beim Ausloeser der Version, ohne Rueckgriff auf jobs.user_id
+USAGE_SQL = ("SELECT COUNT(*) n FROM job_versions v WHERE v.user_id=? AND v.trigger IN ('create','iterate') "
+             "AND substr(v.created_at,1,7)=?")
+
+
 def usage_this_month(user_id: int) -> int:
     month = datetime.now(timezone.utc).strftime("%Y-%m")
-    r = db.q1("""SELECT COUNT(*) n FROM job_versions v JOIN jobs j ON j.id=v.job_id
-                 WHERE j.user_id=? AND v.trigger IN ('create','iterate') AND substr(v.created_at,1,7)=?""",
-              (user_id, month))
+    r = db.q1(USAGE_SQL, (user_id, month))
     return r["n"] if r else 0
 
 
