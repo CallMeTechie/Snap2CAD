@@ -88,7 +88,8 @@ export default async function (main) {
     if (stale()) return;
     teams = t.teams;
     shownScope = sc;
-    if (sc !== scope) { scope = sc; if (teamsOk) saveScope(sc); }   // gemerkter Bereich bleibt, wenn nur die Liste fehlte
+    scope = sc;
+    if (teamsOk) saveScope(sc);   // gemerkt wird nur ein geladener Bereich; er bleibt, wenn nur die Teams-Liste fehlte
     menuClose?.();
     list = l;
     drawScopes();
@@ -97,11 +98,12 @@ export default async function (main) {
     lower = new Map(list.map(p => [p.id, p.name.toLowerCase()]));
     draw();
   }
-  const reload = () => load().catch(fail);
+  // gescheitert: wieder der angezeigte Bereich, damit derselbe Chip erneut klickbar ist
+  const reload = () => load().catch(e => { scope = shownScope; fail(e); });
 
   function drawScopes() {
     const chip = (sc, label) => h("button", { class: "chip", type: "button", "aria-pressed": String(sc === shownScope),
-      onclick: () => { if (sc === scope) return; scope = sc; saveScope(sc); reload(); } }, label);
+      onclick: () => { if (sc === scope) return; scope = sc; reload(); } }, label);
     const hadFocus = scopeBar.contains(document.activeElement);
     clear(scopeBar, chip("private", "Privat"), teams.map(t => chip(`team:${t.id}`, t.name)));
     scopeBar.hidden = !teams.length;   // ohne Team wie bisher nur die private Bibliothek
