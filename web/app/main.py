@@ -969,6 +969,29 @@ def project_move(pid: int, body: MoveIn, request: Request, u: dict = Depends(aut
     return _project_public(db.q1("SELECT * FROM projects WHERE id=?", (pid,)), u, True)
 
 
+class CopyIn(BaseModel):
+    team_id: int | None = Field(default=None, ge=1, le=2**63 - 1)
+    name: str = Field(default="", max_length=120)
+
+
+@app.post("/api/projects/{pid}/copy")
+def project_copy(pid: int, body: CopyIn, request: Request, u: dict = Depends(auth.require_user)):
+    """Spec Teams §4: Kopie mit allen Bestandteilen und der aktuellen gültigen Version jedes CAD-Auftrags; Recht
+    „Kopieren“ an der Quelle, Leiter/Mitglied im Ziel-Team bzw. eigener privater Bereich. Kein KI-Aufruf, kein Kontingent."""
+
+    def guard():   # vor dem Kopieren und erneut in der Transaktion (Wettlauf mit einem Austritt, Lückenfüllung 20)
+        p = _own_project(pid, u, "copy")
+        if body.team_id is not None and p["team_id"] is not None:
+            raise HTTPException(400, TEAM_TO_TEAM)
+        if body.team_id is not None:
+            access.require_team(u, body.team_id, "mitglied")
+    guard()
+    new = projcopy.copy_project(u, pid, body.team_id, body.name, guard)
+    db.audit("project_copy", f"Projekt {pid} → Projekt {new} ({_area(body.team_id)})", user_id=u["id"], actor=u["username"],
+             ip=auth.client_ip(request))
+    return _project_public(db.q1("SELECT * FROM projects WHERE id=?", (new,)), u, True)
+
+
 @app.delete("/api/projects/{pid}/model-dims/{mid}")
 def model_dim_delete(pid: int, mid: int, u: dict = Depends(auth.require_user)):
     """Spec Stufe B §4: gelernten Messschieberwert loeschen (die Pruefung wird damit veraltet)."""

@@ -366,6 +366,7 @@ MATRIX = {
     ("PATCH", "/api/projects/{pid}"): ("write", {"name": "neu"}, 200, None),
     ("DELETE", "/api/projects/{pid}"): ("delete", None, 200, None),
     ("POST", "/api/projects/{pid}/move"): ("move", lambda o: {"team_id": o["target"]}, 200, None),
+    ("POST", "/api/projects/{pid}/copy"): ("copy", {"team_id": None}, 200, None),
     ("DELETE", "/api/projects/{pid}/model-dims/{mid}"): ("write", None, 200, None),
     ("POST", "/api/projects/{pid}/photos"): ("write", "UPLOAD", 400, "Bild konnte nicht gelesen werden"),
     ("POST", "/api/projects/{pid}/measurements"): ("write", {"kind": "length", "value": 5, "label": "x"}, 200, None),
@@ -1916,3 +1917,65 @@ def test_kopieren_startup_raeumt_tmp():
     projcopy.cleanup_tmp()
     assert not d.exists() and (config.DATA_DIR / "tmp" / "anderes").exists()
     assert "projcopy.cleanup_tmp()" in inspect.getsource(main._startup)
+
+
+def test_kopieren_route_team_und_privat(app, admin):
+    from app import access, db
+    L, M, R = _mk(app, admin, "krleiter", "krmitgl", "krlesend")
+    tid = _team("Route", {L.uid: "leiter", M.uid: "mitglied", R.uid: "lesend"})
+    tp = _project(M.uid, tid, "Halter")
+    _job(M.uid, tp, stl=True)
+    assert L.post(f"/api/projects/{tp}/move", json={"team_id": None}, headers=H).status_code == 409   # F-1 ...
+    r = L.post(f"/api/projects/{tp}/copy", json={"team_id": None}, headers=H)                           # ... Ersatzweg
+    assert r.status_code == 200, r.text
+    k = r.json()
+    assert (k["team_id"], k["user_id"], k["name"], k["my_role"]) == (None, L.uid, "Halter (Kopie)", "besitzer")
+    assert db.q1("SELECT user_id FROM jobs WHERE project_id=?", (k["id"],))["user_id"] == L.uid
+    assert _last_audit("project_copy")["detail"] == f"Projekt {tp} → Projekt {k['id']} (privat)"
+    priv = _project(M.uid, name="Eigen")
+    r = M.post(f"/api/projects/{priv}/copy", json={"team_id": tid, "name": "Für alle"}, headers=H)
+    assert r.status_code == 200, r.text
+    assert (r.json()["team_id"], r.json()["name"], r.json()["creator"]["id"]) == (tid, "Für alle", M.uid)
+    assert _last_audit("project_copy")["detail"] == f"Projekt {priv} → Projekt {r.json()['id']} (Team {tid} „Route“)"
+    assert R.post(f"/api/projects/{tp}/copy", json={"team_id": None}, headers=H).status_code == 403    # Lesend kopiert nicht
+    r = R.post(f"/api/projects/{_project(R.uid)}/copy", json={"team_id": tid}, headers=H)
+    assert r.status_code == 403 and r.json()["detail"] == access.DENY_WRITE                            # Ziel nur lesend
+    t2 = _team("Zweites", {L.uid: "leiter"})
+    r = L.post(f"/api/projects/{tp}/copy", json={"team_id": t2}, headers=H)
+    assert r.status_code == 400 and "In privat kopieren" in r.json()["detail"]                         # Team -> Team
+    assert M.post(f"/api/projects/{priv}/copy", json={"team_id": 10**20}, headers=H).status_code == 422  # Ueberlauf
+
+
+def test_kopieren_ausgetreten_waehrend_staging(app, admin, monkeypatch):
+    """Rechte in der Transaktion wiederholt (guard): tritt der Kopierende waehrend des Kopierens der Ordner aus,
+    entsteht nichts (404), und tmp/copy-* ist weg."""
+    import shutil
+
+    from app import db
+    L, M = _mk(app, admin, "kaleiter", "kamitgl")
+    tid = _team("Staging", {L.uid: "leiter", M.uid: "mitglied"})
+    src = _copy_source(L.uid, tid)
+    real, done = shutil.copytree, []
+
+    def copytree(s, d, **kw):
+        out = real(s, d, **kw)
+        if not done:                                        # nach dem ersten kopierten Ordner: Austritt dazwischen
+            done.append(1)
+            db.ex("DELETE FROM team_members WHERE team_id=? AND user_id=?", (tid, M.uid))
+        return out
+    monkeypatch.setattr(shutil, "copytree", copytree)
+    before = _counts()
+    r = M.post(f"/api/projects/{src['pid']}/copy", json={"team_id": None}, headers=H)
+    assert r.status_code == 404 and r.json()["detail"] == "Projekt nicht gefunden", r.text
+    assert _counts() == before
+    assert _tmp_left() == []
+
+
+def test_kopieren_route_name_zu_lang(app, admin):
+    """Review Focus 5: eigener Name ueber 120 Zeichen -> 422, nichts angelegt."""
+    from app import db
+    (L,) = _mk(app, admin, "krlang")
+    pid = _project(L.uid)
+    n = db.q1("SELECT COUNT(*) n FROM projects")["n"]
+    assert L.post(f"/api/projects/{pid}/copy", json={"team_id": None, "name": "x" * 121}, headers=H).status_code == 422
+    assert db.q1("SELECT COUNT(*) n FROM projects")["n"] == n

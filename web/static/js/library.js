@@ -181,6 +181,8 @@ export default async function (main) {
       r.write ? item(p.archived ? "Wiederherstellen" : "Archivieren", () => archive(p)) : null,
       r.move && p.team_id == null && targets.length ? item("In Team verschieben …", () => moveToTeam(p)) : null,
       r.move && p.team_id != null ? item("In privat verschieben", () => moveToPrivate(p)) : null,
+      r.copy && p.team_id == null && targets.length ? item("In Team kopieren …", () => copyToTeam(p)) : null,
+      r.copy && p.team_id != null ? item("In privat kopieren", () => copyToPrivate(p)) : null,
       r.delete ? h("div", { class: "sep" }) : null,
       r.delete ? item("Löschen …", () => remove(p), "danger") : null,
     ];
@@ -287,6 +289,24 @@ export default async function (main) {
     if (S.project?.id === p.id) S.project = r;
     toast("In die private Bibliothek verschoben", "ok");
     await reload();
+  }
+  // Kopieren (Spec Teams §4): danach zeigt die Bibliothek den Zielbereich mit der Kopie
+  async function copyTo(p, teamId) {
+    const r = await api(`/api/projects/${p.id}/copy`, { method: "POST", body: { team_id: teamId } });
+    scope = teamId ? `team:${teamId}` : "private";
+    saveScope(scope);
+    toast(`Kopie „${r.name}“ ${teamId ? `in „${r.team_name}“` : "in der privaten Bibliothek"} angelegt – mit Fotos, Maßen und der gültigen Version jedes CAD-Auftrags`, "ok");
+    await reload();
+  }
+  async function copyToTeam(p) {
+    const tid = await pickTeam(`„${p.name}“ in ein Team kopieren`, "Kopieren");
+    if (tid) await copyTo(p, tid);
+  }
+  async function copyToPrivate(p) {
+    if (!await confirmDlg(`„${p.name}“ in privat kopieren?`,
+      "Die Kopie enthält Fotos, Messungen, Teile, gemerkte Werte und von jedem CAD-Auftrag die aktuelle gültige Version; sie gehört dir. Das Original bleibt im Team.",
+      "In privat kopieren")) return;
+    await copyTo(p, null);
   }
   async function remove(p) {
     const who = p.team_id != null ? `für alle Mitglieder von „${p.team_name}“ ` : "";
