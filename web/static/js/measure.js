@@ -4,13 +4,16 @@ import { S, ensureProject, reloadProject, projectPicker, onLeave } from "./app.j
 import { VIEW_LABEL } from "./photos.js";
 import { createPartsLayer, partsPanel, partColor } from "./edges.js";
 import { groupText, r3, segDist } from "./geom.js";
+import { TOOL_KEYS } from "./help.js";
 
 const KIND = { length: "Strecke", height: "Höhe", diameter: "Durchmesser", radius: "Radius", angle: "Winkel", point: "Punkt" };
 const NEED = { length: 2, height: 2, diameter: 3, radius: 3, angle: 3, point: 1 };
+// Taste je Werkzeug aus help.js (TOOL_KEYS), damit Anleitung, Kurzhilfe und Verhalten nicht auseinanderlaufen
+const KEY_OF = Object.fromEntries(Object.entries(TOOL_KEYS).map(([k, t]) => [t, k.toUpperCase()]));
 const TOOLS = [
-  ["pan", "Verschieben", "V", "pan"], ["length", "Strecke", "L", "line"], ["circle", "Kreis aus 3 Punkten", "C", "circle"],
-  ["point", "Punkt mit Koordinate", "P", "point"], ["angle", "Winkel", "A", "angle"], ["edges", "Kanten", "E", "edges"],
-];
+  ["pan", "Verschieben", "pan"], ["length", "Strecke", "line"], ["circle", "Kreis aus 3 Punkten", "circle"],
+  ["point", "Punkt mit Koordinate", "point"], ["angle", "Winkel", "angle"], ["edges", "Kanten", "edges"],
+].map(([k, t, ic]) => [k, t, KEY_OF[k], ic]);
 const BLUE = "#1F6FB2", ORANGE = "#C2410C", DARK = "#17212B";
 const planar = v => v === "top" || v === "bottom";
 
@@ -327,7 +330,7 @@ export default async function (main) {
     if (k !== "edges") layer.cancel();
     tool = k; pts = []; hint.hidden = false;
     for (const [t, b] of Object.entries(toolBtns)) b.setAttribute("aria-pressed", String(t === k));
-    hint.textContent = HINTS[k === "length" && src?.view === "gauge" ? "height" : k];
+    hint.textContent = HINTS[k === "length" && src?.view === "gauge" ? "height" : k] + " · ? = alle Tastenkürzel";
     stage.style.cursor = k === "pan" ? "grab" : "crosshair";
     dirty = true; upStatus();
   }
@@ -463,8 +466,7 @@ export default async function (main) {
       if (layer.key(e)) { e.preventDefault(); return; }
       if (k === "delete" || k === "backspace" || k === "enter") return;
     }
-    const map = { v: "pan", l: "length", c: "circle", p: "point", a: "angle", e: "edges" };
-    if (map[k]) { setTool(map[k]); e.preventDefault(); }
+    if (Object.hasOwn(TOOL_KEYS, k)) { setTool(TOOL_KEYS[k]); e.preventDefault(); }
     else if (k === "escape") { pts = []; dirty = true; }
     else if (k === "backspace" && pts.length) { pts.pop(); dirty = true; e.preventDefault(); }
     else if (k === "+" || k === "=") zoomAt(1.25);

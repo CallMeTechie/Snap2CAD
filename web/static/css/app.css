@@ -329,6 +329,10 @@ table.t .num{font-family:var(--mono);text-align:right;white-space:nowrap}
 .empty{padding:32px;text-align:center;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:10px}
 .pager{display:flex;justify-content:space-between;align-items:center;gap:10px}
 
+/* Kopf: Hilfe */
+.helpbtn{width:44px;height:44px;border-radius:999px;border-color:var(--line);text-decoration:none}
+.helpbtn:hover{color:var(--accent)}
+
 /* Projektbibliothek */
 .libtools{display:flex;flex-wrap:wrap;align-items:center;gap:10px 20px}
 .libsearch{position:relative;flex:1 1 260px;max-width:420px;display:flex;align-items:center}
@@ -355,11 +359,51 @@ table.t .num{font-family:var(--mono);text-align:right;white-space:nowrap}
 .pacts .menu{min-width:200px}
 .libstart{grid-template-columns:repeat(3,minmax(0,1fr))}
 
+/* Anleitung */
+.guide-layout{display:grid;grid-template-columns:220px minmax(0,1fr);gap:32px;align-items:start}
+.gtoc{position:sticky;top:90px;display:flex;flex-direction:column;gap:8px}
+.gtoc ol{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:2px}
+.gtoc a{display:block;padding:6px 10px;border-radius:var(--r);color:var(--text2);text-decoration:none;font-size:14px}
+.gtoc a:hover{background:var(--well);color:var(--text)}
+.gmain{display:flex;flex-direction:column;gap:40px;min-width:0}
+.gsec{display:flex;flex-direction:column;gap:14px;scroll-margin-top:90px}
+.gsec>h2{font-size:21px}
+.gtext{gap:14px;max-width:none}
+.gtext p,.gtext .ul{max-width:820px}
+.gtext h3{margin-top:6px}
+.gsteps{margin:0;padding:0;list-style:none;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 28px}
+.gsteps li{display:flex;gap:12px}
+.gsteps .num{flex:none;display:inline-flex;width:26px;height:26px;border-radius:13px;background:var(--accent);color:#fff;font-size:13px;font-weight:600;align-items:center;justify-content:center}
+.formula{font-family:var(--mono);background:var(--well);border-radius:var(--r);padding:10px 14px;align-self:flex-start}
+.swatches{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:8px 24px;font-size:14px}
+.swatches li{display:flex;align-items:center;gap:8px}
+.swatch{width:28px;height:0;border-top:3px solid;display:inline-block}
+.swatch.dash{border-top-style:dashed}
+.faq{display:flex;flex-direction:column;gap:4px}
+.matgen{display:flex;flex-direction:column;gap:24px}
+.matlink{display:flex;align-items:center;gap:6px;margin:0}
+.keytable{display:flex;flex-direction:column;gap:6px}
+.keytable+.keytable{margin-top:10px}
+table.keys td{vertical-align:top}
+table.keys .kc{width:34%;white-space:normal}
+table.keys .mouse{font-weight:500;color:var(--text)}
+kbd{display:inline-block;min-width:1.7em;padding:1px 6px;font-family:var(--mono);font-size:12.5px;line-height:1.5;text-align:center;color:var(--text);background:var(--surface);border:1px solid var(--line2);border-bottom-width:2px;border-radius:4px;white-space:nowrap}
+
+/* Kurzhilfe */
+dialog.keysdlg{max-width:min(760px,calc(100vw - 32px));max-height:calc(100vh - 48px);overflow:auto}
+.kh{padding:24px;display:flex;flex-direction:column;gap:14px}
+.kh .card-head{align-items:center}
+.kh table.keys td{padding:6px 10px}
+
 @media (max-width:1100px){
   .measure-layout{grid-template-columns:minmax(0,1fr);height:auto}
   .mcanvas{height:70vh;border-right:0;border-bottom:1px solid var(--line)}
   .cad-layout,.admin-layout{grid-template-columns:minmax(0,1fr)}
   .nextsteps{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .guide-layout{grid-template-columns:minmax(0,1fr);gap:20px}
+  .gtoc{position:static}
+  .gtoc ol{flex-direction:row;flex-wrap:wrap;gap:4px}
+  .gtoc a{border:1px solid var(--line);background:var(--surface);padding:4px 10px;font-size:13px}
 }
 @media (max-width:820px){
   .stage .hintbar{font-size:12px;padding:4px 8px}
@@ -378,11 +422,13 @@ table.t .num{font-family:var(--mono);text-align:right;white-space:nowrap}
   .step .lbl{display:none}
   .step[aria-current=page] .lbl{display:inline}
   .top-right .pill{display:none}
+  .gsec{scroll-margin-top:140px}
   .userbtn .uname,.userbtn .tag{display:none}
 }
 @media (max-width:560px){
   .grid2,.grid3,.ctrl{grid-template-columns:minmax(0,1fr)}
-  .nextsteps,.libstart{grid-template-columns:minmax(0,1fr)}
+  .nextsteps,.gsteps,.libstart{grid-template-columns:minmax(0,1fr)}
+  table.keys .kc{width:42%}
   .auth-card{padding:24px 20px}
   .card{padding:18px}
 }

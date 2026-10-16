@@ -1,11 +1,12 @@
-// Schritt 1: Messunterlage erzeugen
+// Messunterlage erzeugen: Generator als Baustein der Anleitung (/anleitung#unterlage)
 import { api, h, clear, icon, num, debounce, fail } from "./lib.js";
 import { onLeave } from "./app.js";
 
 const PAGE_NAMES = { mat: "Messunterlage", gauge: "Höhenlehre zum Aufstellen", guide: "Anleitung" };
 const CAPTIONS = ["Messunterlage", "Höhenlehre", "Anleitung"];
 
-export default async function (main) {
+// Optionen, Vorschau, PDF-Knopf und „Nach dem Drucken“ in container; räumt beim Seitenwechsel per onLeave auf
+export function matGenerator(container) {
   let fmt = "A4";
   try { fmt = localStorage.getItem("mu.fmt") || "A4"; } catch { /* */ }
   const pages = { mat: true, gauge: true, guide: true };
@@ -23,9 +24,7 @@ export default async function (main) {
   });
   const facts = h("dl", { class: "facts" });
 
-  main.append(
-    h("div", { class: "head" }, h("div", { class: "t" }, h("h1", {}, "Messunterlage erzeugen"),
-      h("p", { class: "lead" }, "Druckfertiges PDF mit 1-mm-Raster und acht ArUco-Markern. Ein Ausdruck reicht für beliebig viele Messungen."))),
+  container.append(
     h("div", { class: "row" },
       h("section", { class: "card", style: { flex: "1 1 380px", maxWidth: "460px", gap: "22px" }, "aria-labelledby": "opt-h" },
         h("h2", { id: "opt-h" }, "Optionen"),

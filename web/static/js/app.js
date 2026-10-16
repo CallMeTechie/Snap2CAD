@@ -16,14 +16,38 @@ export function go(path, replace = false) {
 }
 export function onLeave(fn) { S.leave.push(fn); }
 
-window.addEventListener("popstate", () => render());
+// Sprungmarke (#abschnitt) der aktuellen Seite anspringen; false = keine passende Stelle
+function jumpToHash() {
+  let id = "";
+  try { id = decodeURIComponent(location.hash.slice(1)); } catch { /* kaputte Kodierung */ }
+  const el = id ? document.getElementById(id) : null;
+  if (el) el.scrollIntoView({ block: "start" });
+  return !!el;
+}
+let shownPath = null;   // Pfad und Suche der gezeigten Seite: Zurueck zwischen Sprungmarken baut die Seite nicht neu auf
+window.addEventListener("popstate", () => { if (location.pathname + location.search === shownPath) jumpToHash(); else render(); });
 document.addEventListener("click", ev => {
   const a = ev.target.closest("a");
   if (!a || a.target || a.hasAttribute("download") || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button !== 0) return;
   const url = new URL(a.href, location.href);
   if (url.origin !== location.origin || url.pathname.startsWith("/api/") || url.pathname.startsWith("/static/")) return;
   ev.preventDefault();
-  go(url.pathname + url.search);
+  if (url.hash && url.pathname + url.search === shownPath) {   // Sprungmarke auf derselben Seite
+    if (url.hash !== location.hash) history.pushState({}, "", url.hash);
+    jumpToHash();
+    return;
+  }
+  go(url.pathname + url.search + url.hash);
+});
+
+// Kurzhilfe: ? oder F1 auf jeder angemeldeten Seite mit Kopfzeile, nicht in Eingabefeldern
+document.addEventListener("keydown", ev => {
+  if (ev.key !== "?" && ev.key !== "F1") return;
+  if (ev.ctrlKey || ev.metaKey || ev.altKey || !S.me || !document.querySelector("header.top")) return;
+  if (ev.target instanceof Element && ev.target.closest("input,textarea,select,[contenteditable]")) return;
+  if (document.querySelector("dialog[open]")) return;   // anderer Dialog offen (die Kurzhilfe schliesst sich selbst)
+  ev.preventDefault();
+  import("./kurzhilfe.js").then(m => m.toggleShortcuts(location.pathname)).catch(fail);
 });
 
 api.onUnauthorized = () => { S.me = null; if (!location.pathname.startsWith("/login")) go("/login", true); };
@@ -39,6 +63,7 @@ export async function refreshMe() {
 async function render() {
   for (const fn of S.leave.splice(0)) { try { fn(); } catch (e) { console.error(e); } }
   const path = location.pathname;
+  shownPath = path + location.search;
   let m, r;
   for (r of routes) { m = path.match(r.re); if (m) break; m = null; }
   if (!m) { r = routes.find(x => x.notFound); m = []; }
@@ -56,7 +81,7 @@ async function render() {
   } catch (e) {
     fail(e);
   }
-  window.scrollTo(0, 0);
+  if (!jumpToHash()) window.scrollTo(0, 0);
 }
 
 // ------------------------------------------------------------------ Kopfzeile
@@ -99,6 +124,7 @@ function header(step) {
         h("br"), us ? `CAD diesen Monat: ${us.used} / ${us.quota ?? "∞"}` : ""),
       h("div", { class: "sep" }),
       locked ? null : h("a", { href: "/auftraege", role: "menuitem" }, icon("list"), "Meine Aufträge"),
+      locked ? null : h("a", { href: "/anleitung", role: "menuitem" }, icon("help"), "Anleitung"),
       locked ? null : h("a", { href: "/konto", role: "menuitem" }, icon("key"), "Konto und Passwort"),
       !locked && u.role === "admin" ? h("a", { href: "/admin", role: "menuitem" }, icon("users"), "Benutzerverwaltung") : null,
       h("div", { class: "sep" }),
@@ -107,7 +133,9 @@ function header(step) {
   const hdr = h("header", { class: "top" },
     h("a", { class: "brand", href: "/" }, LOGO(), "Snap2CAD"),
     nav,
-    h("div", { class: "top-right" }, statusPill(), h("div", { class: "usermenu" }, btn, menu)));
+    h("div", { class: "top-right" }, statusPill(),
+      locked ? null : h("a", { class: "iconbtn helpbtn", href: "/anleitung", title: "Anleitung (Taste ?)", "aria-label": "Anleitung (Taste ?)" }, icon("help", 20)),
+      h("div", { class: "usermenu" }, btn, menu)));
   return hdr;
 }
 
@@ -766,6 +794,7 @@ async function showLink(title, link, text) {
 
 // ------------------------------------------------------------------ Arbeitsschritte (Module)
 route(/^\/$/, async main => (await import("./library.js")).default(main), { step: 1 });
+route(/^\/anleitung$/, async main => (await import("./guide.js")).default(main));
 route(/^\/fotos$/, async main => (await import("./photos.js")).default(main), { step: 2 });
 route(/^\/messen$/, async (main) => (await import("./measure.js")).default(main), { step: 3, bare: false });
 route(/^\/cad$/, async main => (await import("./cad.js")).form(main), { step: 4 });
