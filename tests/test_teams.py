@@ -649,3 +649,283 @@ def test_kontingent_lauf_uebernimmt_ausloeser_in_autofix(app, admin, monkeypatch
     assert [r["trigger"] for r in rows] == ["iterate", "autofix"]
     assert [r["user_id"] for r in rows] == [M.uid, M.uid]
     assert (auth.usage_this_month(L.uid), auth.usage_this_month(M.uid)) == (before[0], before[1] + 1)
+
+
+# ------------------------------------------------------------------ T3: Teams verwalten
+
+def _join(leader, member, tid, role="mitglied"):
+    """Einladen und annehmen ueber die API."""
+    r = leader.post(f"/api/teams/{tid}/invites", json={"username": member.username, "role": role}, headers=H)
+    assert r.status_code == 200, r.text
+    r = member.post(f"/api/team-invites/{r.json()['id']}/accept", headers=H)
+    assert r.status_code == 200, r.text
+
+
+def _new_team(c, name="Team"):
+    r = c.post("/api/teams", json={"name": name}, headers=H)
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
+def _last_audit(action):
+    from app import db
+    return db.q1("SELECT * FROM audit WHERE action=? ORDER BY id DESC LIMIT 1", (action,))
+
+
+TEAM_MATRIX = {
+    ("GET", "/api/teams"): ("angemeldet", None),
+    ("POST", "/api/teams"): ("angemeldet", {"name": "Neu"}),
+    ("GET", "/api/teams/{tid}"): ("team:lesend", None),
+    ("PATCH", "/api/teams/{tid}"): ("team:leiter", {"name": "Umbenannt"}),
+    ("DELETE", "/api/teams/{tid}"): ("team:leiter", None),
+    ("POST", "/api/teams/{tid}/invites"): ("team:leiter", "EINLADEN"),
+    ("DELETE", "/api/teams/{tid}/invites/{iid}"): ("team:leiter", None),
+    ("PATCH", "/api/teams/{tid}/members/{uid}"): ("team:leiter", {"role": "lesend"}),
+    ("DELETE", "/api/teams/{tid}/members/{uid}"): ("team:leiter", None),   # andere entfernen; Austritt: eigener Test
+    ("POST", "/api/team-invites/{iid}/accept"): ("einladung", None),
+    ("POST", "/api/team-invites/{iid}/decline"): ("einladung", None),
+}
+RIGHTS.update({k: v[0] for k, v in TEAM_MATRIX.items()})
+TEAM_CASES = {"leiter": "L", "mitglied": "M", "lesend": "R", "aussen": "F", "admin": "A", "eingeladen": "Y"}
+TEAM_EXPECT = {"angemeldet": set(TEAM_CASES), "team:lesend": {"leiter", "mitglied", "lesend"}, "team:leiter": {"leiter"},
+               "einladung": {"eingeladen"}}
+
+
+@pytest.mark.parametrize("case", list(TEAM_CASES))
+@pytest.mark.parametrize("key", list(TEAM_MATRIX), ids=lambda k: f"{k[0]} {k[1]}")
+def test_rechte_team_routen(welt, key, case):
+    """Frisches Team je Aufruf: L Leiter, M Mitglied, R Lesend, X Mitglied (Ziel), offene Einladung an Y."""
+    from app import db
+    w = welt
+    need, body = TEAM_MATRIX[key]
+    tid = _team("Matrix", {w.L.uid: "leiter", w.M.uid: "mitglied", w.R.uid: "lesend", w.X.uid: "mitglied"})
+    iid = None
+    if "{iid}" in key[1]:
+        iid = db.ex("INSERT INTO team_invites(team_id,user_id,role,invited_by,created_at) VALUES (?,?,?,?,?)",
+                    (tid, w.Y.uid, "mitglied", w.L.uid, db.now()))
+    kw = {"headers": H}
+    if body == "EINLADEN":
+        kw["json"] = {"username": w.Y.username, "role": "mitglied"}
+    elif body is not None:
+        kw["json"] = body
+    r = getattr(w, TEAM_CASES[case]).request(key[0], key[1].format(tid=tid, iid=iid, uid=w.X.uid), **kw)
+    if case in TEAM_EXPECT[need]:
+        assert r.status_code == 200, r.text
+    elif need == "einladung" or case in ("aussen", "admin", "eingeladen"):
+        assert r.status_code == 404, r.text
+    else:
+        assert r.status_code == 403 and r.json()["detail"] == "Nur ein Team-Leiter darf das", r.text
+
+
+def test_verwaltung_anlegen_und_liste(app, admin):
+    (L,) = _mk(app, admin, "vgruender")
+    r = L.post("/api/teams", json={"name": "  Werkstatt  "}, headers=H)
+    assert r.status_code == 200, r.text
+    t = r.json()
+    assert (t["name"], t["my_role"], t["n_projects"]) == ("Werkstatt", "leiter", 0)
+    assert [(m["user_id"], m["role"]) for m in t["members"]] == [(L.uid, "leiter")]
+    assert set(t["members"][0]) == {"user_id", "username", "display_name", "role", "joined_at"}
+    lst = L.get("/api/teams").json()
+    assert [(x["id"], x["my_role"], x["n_members"], x["n_projects"]) for x in lst["teams"]] == [(t["id"], "leiter", 1, 0)]
+    assert lst["invites"] == []
+    a = _last_audit("team_created")
+    assert a["detail"] == f"Team {t['id']} „Werkstatt“ gegründet" and a["actor"] == L.username
+
+
+def test_verwaltung_teamname_grenzen(app, admin):
+    (L,) = _mk(app, admin, "vname")
+    assert L.post("/api/teams", json={"name": "   "}, headers=H).status_code == 400
+    assert L.post("/api/teams", json={"name": "x" * 81}, headers=H).status_code == 400
+    tid = _new_team(L, "y" * 80)
+    assert L.patch(f"/api/teams/{tid}", json={"name": " "}, headers=H).status_code == 400
+    r = L.patch(f"/api/teams/{tid}", json={"name": " Halle 2 "}, headers=H)
+    assert r.status_code == 200 and r.json()["name"] == "Halle 2"
+    assert _last_audit("team_renamed")["detail"] == f"Team {tid}: „{'y' * 80}“ → „Halle 2“"
+    for bad in ("A\x07B", "Zeile\nzwei", "Null\x00"):                               # Steuerzeichen
+        r = L.post("/api/teams", json={"name": bad}, headers=H)
+        assert r.status_code == 400 and r.json()["detail"] == "Der Teamname enthält unzulässige Zeichen.", bad
+    assert L.patch(f"/api/teams/{tid}", json={"name": "Tab\tname"}, headers=H).status_code == 400
+
+
+def test_verwaltung_einladen_annehmen(app, admin):
+    from app import db
+    L, M = _mk(app, admin, "veinl", "veing")
+    tid = _new_team(L, "Halle")
+    r = L.post(f"/api/teams/{tid}/invites", json={"username": M.username, "role": "lesend"}, headers=H)
+    assert r.status_code == 200 and r.json()["status"] == "offen"
+    assert M.get(f"/api/teams/{tid}").status_code == 404                 # Mitglieder erst nach der Annahme sichtbar
+    inv = M.get("/api/teams").json()["invites"]
+    assert [(i["team_id"], i["team_name"], i["role"], i["invited_by_name"]) for i in inv] == [(tid, "Halle", "lesend",
+                                                                                                L.username)]
+    assert set(inv[0]) == {"id", "team_id", "team_name", "role", "invited_by_name", "created_at"}
+    assert M.get("/api/me").json()["team_invites"] == 1
+    assert [i["username"] for i in L.get(f"/api/teams/{tid}").json()["invites"]] == [M.username]
+    r = M.post(f"/api/team-invites/{inv[0]['id']}/accept", headers=H)
+    assert r.status_code == 200 and r.json()["my_role"] == "lesend" and r.json()["invites"] == []
+    r = M.post(f"/api/team-invites/{inv[0]['id']}/accept", headers=H)
+    assert r.status_code == 409 and r.json()["detail"] == "Einladung nicht mehr offen"
+    assert M.get("/api/me").json()["team_invites"] == 0
+    acts = [x["action"] for x in db.q("SELECT action FROM audit WHERE detail LIKE ? ORDER BY id", (f"Team {tid} %",))]
+    assert acts == ["team_created", "team_invite", "team_invite_accepted"]
+
+
+def test_verwaltung_einladen_fehler(app, admin):
+    from app import db
+    L, M, D = _mk(app, admin, "vfehl", "vfmit", "vfaus")
+    tid = _new_team(L, "Fehler")
+    db.ex("UPDATE users SET status='disabled' WHERE id=?", (D.uid,))
+
+    def inv(name):
+        return L.post(f"/api/teams/{tid}/invites", json={"username": name, "role": "mitglied"}, headers=H)
+    r1, r2 = inv("gibtesnicht"), inv(D.username)
+    assert r1.status_code == r2.status_code == 404 and r1.json() == r2.json() == {"detail": "Benutzer nicht gefunden"}
+    assert inv(L.username).status_code == 400
+    ok = inv(M.username)
+    assert ok.status_code == 200
+    r = inv(M.username)
+    assert r.status_code == 409 and "offene Einladung" in r.json()["detail"]
+    assert M.post(f"/api/team-invites/{ok.json()['id']}/accept", headers=H).status_code == 200
+    r = inv(M.username)
+    assert r.status_code == 409 and "bereits Mitglied" in r.json()["detail"]
+    assert inv(M.username.upper()).status_code == 409
+    rows = db.q("SELECT detail FROM audit WHERE action='team_invite_failed' AND user_id=? ORDER BY id", (L.uid,))
+    assert [x["detail"].rsplit(" – ", 1)[1] for x in rows] == ["unbekannt", "deaktiviert", "sich selbst", "doppelt",
+                                                               "schon Mitglied", "schon Mitglied"]
+    assert L.post(f"/api/teams/{tid}/invites", json={"username": M.username, "role": "chef"}, headers=H).status_code == 400
+
+
+def test_verwaltung_einladen_schreibweise(app, admin):
+    """Review Focus 1: Gross/klein egal, Leerzeichen am Rand werden entfernt."""
+    L, M = _mk(app, admin, "vschr", "vschrb")
+    tid = _new_team(L, "Schreibweise")
+    r = L.post(f"/api/teams/{tid}/invites", json={"username": f"  {M.username.upper()} ", "role": "mitglied"}, headers=H)
+    assert r.status_code == 200, r.text
+    assert (r.json()["user_id"], r.json()["username"]) == (M.uid, M.username)
+
+
+def test_verwaltung_erneut_einladen(app, admin):
+    """Review Focus 2: nach Ablehnen und nach Zurueckziehen entsteht eine neue Einladung."""
+    from app import db
+    L, M = _mk(app, admin, "verneut", "verneutm")
+    tid = _new_team(L, "Nochmal")
+    first = L.post(f"/api/teams/{tid}/invites", json={"username": M.username}, headers=H).json()["id"]
+    assert M.post(f"/api/team-invites/{first}/decline", headers=H).json() == {"ok": True}
+    assert db.q1("SELECT status FROM team_invites WHERE id=?", (first,))["status"] == "abgelehnt"
+    second = L.post(f"/api/teams/{tid}/invites", json={"username": M.username}, headers=H)
+    assert second.status_code == 200 and second.json()["id"] != first
+    assert L.delete(f"/api/teams/{tid}/invites/{second.json()['id']}", headers=H).json() == {"ok": True}
+    third = L.post(f"/api/teams/{tid}/invites", json={"username": M.username}, headers=H)
+    assert third.status_code == 200
+    assert [i["id"] for i in M.get("/api/teams").json()["invites"]] == [third.json()["id"]]
+    assert [a["action"] for a in db.q("SELECT action FROM audit WHERE action LIKE 'team_invite_%' AND detail LIKE ? "
+                                      "ORDER BY id", (f"Team {tid} %",))] == ["team_invite_declined", "team_invite_revoked"]
+
+
+def test_verwaltung_zurueckziehen_und_fremde_einladung(app, admin):
+    L, M, F = _mk(app, admin, "vzur", "vzurm", "vzuro")
+    tid = _new_team(L, "Zurueck")
+    iid = L.post(f"/api/teams/{tid}/invites", json={"username": M.username}, headers=H).json()["id"]
+    assert F.post(f"/api/team-invites/{iid}/accept", headers=H).status_code == 404       # fremde Einladung
+    assert F.post(f"/api/team-invites/{iid}/decline", headers=H).status_code == 404
+    assert L.delete(f"/api/teams/{tid}/invites/{iid}", headers=H).status_code == 200
+    r = L.delete(f"/api/teams/{tid}/invites/{iid}", headers=H)
+    assert r.status_code == 409 and r.json()["detail"] == "Einladung nicht mehr offen"
+    assert M.post(f"/api/team-invites/{iid}/accept", headers=H).status_code == 409
+    assert M.get("/api/teams").json()["invites"] == []
+    assert _last_audit("team_invite_revoked")["detail"] == f"Team {tid} „Zurueck“: Einladung an {M.username} zurückgezogen"
+
+
+def test_verwaltung_einladen_grenze(app, admin):
+    """Hoechstens 20 Versuche je Stunde ueber alle Teams; abgewiesene Versuche zaehlen mit."""
+    from app import db
+    (L,) = _mk(app, admin, "vgrenz")
+    t1, t2 = _new_team(L, "A"), _new_team(L, "B")
+    for i in range(10):
+        assert L.post(f"/api/teams/{t1}/invites", json={"username": f"niemand{i}"}, headers=H).status_code == 404
+        assert L.post(f"/api/teams/{t2}/invites", json={"username": f"keiner{i}"}, headers=H).status_code == 404
+    r = L.post(f"/api/teams/{t1}/invites", json={"username": "niemand99"}, headers=H)
+    assert r.status_code == 429 and "20 je Stunde" in r.json()["detail"]
+    assert db.q1("SELECT COUNT(*) n FROM audit WHERE user_id=? AND action='team_invite_failed'", (L.uid,))["n"] == 20
+
+
+def test_verwaltung_rollen_letzter_leiter(app, admin):
+    L, M = _mk(app, admin, "vrolle", "vrollem")
+    tid = _new_team(L, "Rollen")
+    _join(L, M, tid)
+    r = L.patch(f"/api/teams/{tid}/members/{L.uid}", json={"role": "mitglied"}, headers=H)
+    assert r.status_code == 409 and r.json()["detail"] == "Erst einen anderen Leiter bestimmen"
+    assert L.patch(f"/api/teams/{tid}/members/{M.uid}", json={"role": "leiter"}, headers=H).status_code == 200
+    r = L.patch(f"/api/teams/{tid}/members/{L.uid}", json={"role": "mitglied"}, headers=H)
+    assert r.status_code == 200 and r.json()["my_role"] == "mitglied"
+    assert L.patch(f"/api/teams/{tid}/members/{M.uid}", json={"role": "lesend"}, headers=H).status_code == 403
+    assert M.patch(f"/api/teams/{tid}/members/{L.uid}", json={"role": "chef"}, headers=H).status_code == 400
+    assert M.patch(f"/api/teams/{tid}/members/999999", json={"role": "lesend"}, headers=H).status_code == 404
+    assert _last_audit("team_role")["detail"] == f"Team {tid} „Rollen“: {L.username} → Mitglied"
+
+
+def test_verwaltung_entfernen_und_austreten(app, admin):
+    L, M, R = _mk(app, admin, "vent", "ventm", "ventr")
+    tid = _new_team(L, "Raus")
+    _join(L, M, tid)
+    _join(L, R, tid, "lesend")
+    assert M.delete(f"/api/teams/{tid}/members/{R.uid}", headers=H).status_code == 403
+    assert L.delete(f"/api/teams/{tid}/members/{R.uid}", headers=H).json() == {"ok": True, "team_deleted": False}
+    assert R.get(f"/api/teams/{tid}").status_code == 404
+    assert _last_audit("team_member_removed")["detail"] == f"Team {tid} „Raus“: {R.username} entfernt"
+    assert M.delete(f"/api/teams/{tid}/members/{M.uid}", headers=H).json() == {"ok": True, "team_deleted": False}
+    assert _last_audit("team_left")["detail"] == f"Team {tid} „Raus“: {M.username} ausgetreten"
+    assert L.delete(f"/api/teams/{tid}/members/999999", headers=H).status_code == 404
+
+
+def test_verwaltung_einladungen_ehemaliger_leiter(app, admin):
+    """Offene Einladungen eines Leiters, der herabgestuft oder entfernt wird, werden zurueckgezogen."""
+    from app import db
+    L, B, Y, Z = _mk(app, admin, "veleiter", "vezweit", "vegast", "vegastz")
+    tid = _new_team(L, "Einladende")
+    _join(L, B, tid, "leiter")
+    i1 = L.post(f"/api/teams/{tid}/invites", json={"username": Y.username}, headers=H).json()["id"]
+    i2 = B.post(f"/api/teams/{tid}/invites", json={"username": Z.username}, headers=H).json()["id"]
+    assert B.patch(f"/api/teams/{tid}/members/{L.uid}", json={"role": "mitglied"}, headers=H).status_code == 200
+    assert db.q1("SELECT status FROM team_invites WHERE id=?", (i1,))["status"] == "zurueckgezogen"
+    assert db.q1("SELECT status FROM team_invites WHERE id=?", (i2,))["status"] == "offen"
+    r = Y.post(f"/api/team-invites/{i1}/accept", headers=H)
+    assert r.status_code == 409 and r.json()["detail"] == "Einladung nicht mehr offen"
+    assert B.patch(f"/api/teams/{tid}/members/{L.uid}", json={"role": "leiter"}, headers=H).status_code == 200
+    assert L.delete(f"/api/teams/{tid}/members/{B.uid}", headers=H).status_code == 200                # B entfernt
+    assert db.q1("SELECT status FROM team_invites WHERE id=?", (i2,))["status"] == "zurueckgezogen"
+    assert Z.get("/api/teams").json()["invites"] == []
+
+
+def test_verwaltung_letzter_leiter_austritt(app, admin):
+    from app import db
+    L, M = _mk(app, admin, "vletzt", "vletztm")
+    tid = _new_team(L, "Letzter")
+    _join(L, M, tid)
+    r = L.delete(f"/api/teams/{tid}/members/{L.uid}", headers=H)
+    assert r.status_code == 409 and r.json()["detail"] == "Erst einen anderen Leiter bestimmen"
+    assert M.delete(f"/api/teams/{tid}/members/{M.uid}", headers=H).status_code == 200
+    pid = _project(L.uid, tid)
+    r = L.delete(f"/api/teams/{tid}/members/{L.uid}", headers=H)
+    assert r.status_code == 409 and r.json()["detail"].startswith("Das Team hat noch 1 Projekt")
+    db.ex("DELETE FROM projects WHERE id=?", (pid,))
+    assert L.delete(f"/api/teams/{tid}/members/{L.uid}", headers=H).json() == {"ok": True, "team_deleted": True}
+    assert db.q1("SELECT id FROM teams WHERE id=?", (tid,)) is None
+    assert _last_audit("team_deleted")["detail"].startswith(f"Team {tid} „Letzter“ gelöscht")
+
+
+def test_verwaltung_loeschen_leer_und_nicht_leer(app, admin):
+    from app import db
+    L, M = _mk(app, admin, "vloe", "vloem")
+    tid = _new_team(L, "Loeschen")
+    _join(L, M, tid)
+    assert M.delete(f"/api/teams/{tid}", headers=H).status_code == 403
+    p1 = _project(L.uid, tid)
+    r = L.delete(f"/api/teams/{tid}", headers=H)
+    assert r.status_code == 409 and r.json()["detail"] == "Das Team hat noch 1 Projekt"
+    p2 = _project(M.uid, tid)
+    assert L.delete(f"/api/teams/{tid}", headers=H).json()["detail"] == "Das Team hat noch 2 Projekte"
+    db.ex("DELETE FROM projects WHERE id IN (?,?)", (p1, p2))
+    assert L.delete(f"/api/teams/{tid}", headers=H).json() == {"ok": True}
+    assert db.q1("SELECT COUNT(*) n FROM team_members WHERE team_id=?", (tid,))["n"] == 0
+    assert L.get("/api/teams").json()["teams"] == []
+    assert _last_audit("team_deleted")["detail"] == f"Team {tid} „Loeschen“ gelöscht (0 Projekte)"

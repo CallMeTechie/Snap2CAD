@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from . import access, ai, auth, check, config, db, geom, jobs, parts, preview, sandbox, settings
+from . import access, ai, auth, check, config, db, geom, jobs, parts, preview, sandbox, settings, teams
 
 sys.path.insert(0, str(config.ROOT))
 from core import edges, matgen, vision  # noqa: E402
@@ -64,6 +64,7 @@ async def lifespan(_app):
 
 
 app = FastAPI(title="Snap2CAD", version=VERSION, docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+app.include_router(teams.router)   # Teams (Spec Teams §3, §5)
 
 
 # ------------------------------------------------------------------ Middleware
@@ -268,6 +269,8 @@ def me(request: Request):
                       "sandbox_mode": config.SANDBOX_MODE}}
     out["user"] = auth.public_user(u)
     out["usage"] = _usage(u)
+    out["team_invites"] = db.q1("SELECT COUNT(*) n FROM team_invites WHERE user_id=? AND status='offen'",
+                                (u["id"],))["n"]
     return out
 
 
