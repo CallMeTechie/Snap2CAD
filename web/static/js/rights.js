@@ -44,3 +44,7 @@ export function groupProjects(list) {
   const teams = [...byTeam.values()].sort((a, b) => a.label.localeCompare(b.label, "de") || a.key.localeCompare(b.key));
   return [priv, ...teams].filter(g => g.items.length);
 }
+
+// Rolle „Lesend“: Fotos, Messen und CAD nur ansehen (Spec Teams §7)
+export const isReadOnly = p => p?.my_role === "lesend";
+export const readOnlyText = p => `Nur ansehen – Rolle Lesend im Team ${p?.team_name || ""}`.trim();

@@ -1,6 +1,7 @@
 // Schritt 2: Fotos pruefen
 import { api, upload, h, clear, icon, num, parseNum, toast, fail, dialog, confirmDlg } from "./lib.js";
-import { S, ensureProject, reloadProject, projectPicker, go, onLeave } from "./app.js";
+import { S, ensureProject, reloadProject, projectPicker, go, onLeave, readOnlyMode } from "./app.js";
+import { isReadOnly } from "./rights.js";
 
 export const VIEW_LABEL = { top: "Draufsicht", bottom: "Von unten", tilted: "Gekippt (Höhe)", gauge: "Höhenlehre", overview: "Übersicht" };
 export const STATUS = {
@@ -60,18 +61,20 @@ export default async function (main) {
   const ws = werkstueck();
   const detail = h("section", { class: "card", "aria-labelledby": "det-h" });
   const pending = [];
+  const roSlot = h("div");   // Hinweis „Nur ansehen“ (Rolle Lesend)
 
   main.append(
     h("div", { class: "head" }, h("div", { class: "t" }, h("h1", {}, "Fotos prüfen"),
       h("p", { class: "lead" }, "Marker werden erkannt, das Foto wird auf die Tischebene entzerrt. Nur Fotos mit grünem oder gelbem Status gehen in die Messung.")),
-    h("div", { class: "chips", style: { alignItems: "flex-end" } }, projectPicker(() => { selected = null; draw(); }),
+    h("div", { class: "chips", style: { alignItems: "flex-end" } }, projectPicker(() => { selected = null; draw(); roRefresh(); }),
       h("label", { class: "field", style: { gap: "4px" } }, h("span", { class: "label" }, "Unterlage"), fmtSel),
       h("label", { class: "field", style: { gap: "4px" } }, h("span", { class: "label" }, "Ansicht"), viewSel))),
+    roSlot,
     h("div", { class: "photos-layout" },
       h("aside", { "aria-label": "Hochgeladene Fotos", style: { display: "flex", flexDirection: "column", gap: "12px" } },
         h("p", { class: "small muted matlink" }, icon("printer", 16), "Noch keine Messunterlage? ", h("a", { href: "/anleitung#unterlage" }, "Messunterlage drucken")),
         drop, ws, list,
-        h("button", { class: "btn ghost sm", style: { alignSelf: "flex-start" }, onclick: tipsDialog }, icon("info", 16), "Fototipps")),
+        h("button", { class: "btn ghost sm", style: { alignSelf: "flex-start" }, onclick: tipsDialog, "data-ro": "ok" }, icon("info", 16), "Fototipps")),
       detail));
 
   ["dragenter", "dragover"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add("over"); }));
@@ -83,10 +86,12 @@ export default async function (main) {
   const onPaste = e => { const f = [...(e.clipboardData?.files || [])].filter(x => x.type.startsWith("image/")); if (f.length) send(f); };
   document.addEventListener("paste", onPaste);
   onLeave(() => document.removeEventListener("paste", onPaste));
+  const roRefresh = readOnlyMode(main, roSlot);   // Rolle Lesend (Spec Teams §7)
 
   const cur = () => S.project.photos.find(p => p.id === selected);
 
   async function send(files) {
+    if (isReadOnly(S.project)) { toast("Nur lesender Zugriff – Hochladen ist gesperrt.", "err"); return; }
     files = files.filter(f => f.type.startsWith("image/") || /\.(heic|heif)$/i.test(f.name));
     const max = (S.status?.max_upload_mb || 25) * 1048576;
     const view = viewSel.value;   // gilt fuer den ganzen Stapel, auch wenn die Auswahl waehrenddessen wechselt
@@ -122,7 +127,7 @@ export default async function (main) {
           h("span", { class: "nm", title: p.filename }, p.filename), bad ? null : sel, photoStatusLine(p),
           p.gauge ? h("span", { class: "xs muted" }, `Höhenlehre ${p.gauge.strip} · ${p.gauge.ids.length}/3 Marker`) : null,
           bad ? h("span", { class: "xs", style: { color: "var(--err)" } }, `Mindestens 4 Marker nötig. ${missing.length ? `Marker ID ${missing.join(", ")} verdeckt oder unscharf.` : ""}`) : null,
-          bad ? h("div", { class: "acts" }, h("button", { class: "btn sm", onclick: e => { e.stopPropagation(); tipsDialog(); } }, "Fototipps"),
+          bad ? h("div", { class: "acts" }, h("button", { class: "btn sm", "data-ro": "ok", onclick: e => { e.stopPropagation(); tipsDialog(); } }, "Fototipps"),
             h("button", { class: "btn sm danger", onclick: e => { e.stopPropagation(); del(p); } }, "Entfernen")) : null));
     }), pending.map(it => h("li", { class: "pitem", "aria-busy": "true" }, h("div", { class: "ph" }, h("span", { class: "spin" })),
       h("div", {}, h("span", { class: "nm" }, it.name), h("br"),
@@ -205,7 +210,7 @@ export default async function (main) {
     const hasRect = p.files.includes("rect"), hasGauge = p.files.includes("gauge");
     if (mode === "gauge" && !hasGauge) mode = "both";
     if ((mode === "rect" || mode === "both") && !hasRect) mode = hasGauge ? "gauge" : "orig";
-    const segBtn = (k, t) => h("button", { "aria-pressed": String(mode === k), onclick: () => { mode = k; drawDetail(); } }, t);
+    const segBtn = (k, t) => h("button", { "aria-pressed": String(mode === k), "data-ro": "ok", onclick: () => { mode = k; drawDetail(); } }, t);
     const figs = [];
     const fig = (src, alt, cap) => h("figure", {}, h("a", { href: src, target: "_blank", rel: "noopener" }, h("img", { src, alt })), h("figcaption", {}, cap));
     if (mode === "orig" || mode === "both") figs.push(fig(`/api/photos/${p.id}/overlay.jpg`, "Originalfoto mit erkannten Markern",

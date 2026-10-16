@@ -1,8 +1,8 @@
 // Rechte und Bereiche der Bibliothek (web/static/js/rights.js) – Aufruf: node --test tests/js/*.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ROLE_TEXT, SCOPE_KEY, creatorText, groupProjects, loadScope, projectRights, saveScope, teamIdOf, validScope } from "../../web/static/js/rights.js";
-import { plural } from "../../web/static/js/lib.js";
+import { ROLE_TEXT, SCOPE_KEY, creatorText, groupProjects, isReadOnly, loadScope, projectRights, readOnlyText, saveScope, teamIdOf, validScope } from "../../web/static/js/rights.js";
+import { api, plural } from "../../web/static/js/lib.js";
 
 test("projectRights reicht p.rights des Servers durch (eine Quelle: access.allowed)", () => {
   const none = { write: false, delete: false, move: false, copy: false };
@@ -63,4 +63,36 @@ test("Rollentexte vollständig und ohne Markennamen", () => {
 test("teamIdOf: Bereich zur Team-ID, privat und Ungültiges = null", () => {
   assert.equal(teamIdOf("team:12"), 12);
   for (const bad of ["private", "", null, undefined, "team:", "team:0", "team:x", "all"]) assert.equal(teamIdOf(bad), null, String(bad));
+});
+
+test("api meldet 404 an onNotFound (Spec §8: Zugriff verloren -> Bibliothek)", async () => {
+  const seen = [], old = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ detail: "Projekt nicht gefunden" }),
+    { status: 404, headers: { "content-type": "application/json" } });
+  api.onNotFound = m => seen.push(m);
+  try { await assert.rejects(api("/api/projects/7"), e => e.status === 404 && e.message === "Projekt nicht gefunden"); }
+  finally { globalThis.fetch = old; api.onNotFound = null; }
+  assert.deepEqual(seen, ["Projekt nicht gefunden"]);
+});
+
+test("api meldet 403 „Nur lesender Zugriff“ an onReadOnly (Rolle inzwischen Lesend)", async () => {
+  let n = 0;
+  const old = globalThis.fetch;
+  const answer = detail => async () => new Response(JSON.stringify({ detail }), { status: 403, headers: { "content-type": "application/json" } });
+  api.onReadOnly = () => { n++; };
+  try {
+    globalThis.fetch = answer("Nur lesender Zugriff");
+    await assert.rejects(api("/api/projects/7", { method: "PATCH", body: { name: "x" } }), e => e.status === 403);
+    globalThis.fetch = answer("Nur der Ersteller oder ein Team-Leiter darf das");   // anderes 403: kein Neuzeichnen
+    await assert.rejects(api("/api/projects/7", { method: "DELETE" }), e => e.status === 403);
+  } finally { globalThis.fetch = old; api.onReadOnly = null; }
+  assert.equal(n, 1);
+});
+
+test("isReadOnly und readOnlyText: nur die Rolle Lesend", () => {
+  assert.equal(isReadOnly({ my_role: "lesend" }), true);
+  for (const r of ["besitzer", "admin", "leiter", "mitglied", null]) assert.equal(isReadOnly({ my_role: r }), false, String(r));
+  assert.equal(isReadOnly(null), false);
+  assert.equal(readOnlyText({ team_name: "Werkstatt" }), "Nur ansehen – Rolle Lesend im Team Werkstatt");
+  assert.equal(readOnlyText({}), "Nur ansehen – Rolle Lesend im Team");
 });

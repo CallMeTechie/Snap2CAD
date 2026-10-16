@@ -1,7 +1,7 @@
 // Snap2CAD – Einstieg, Router, Kopfzeile, Anmeldung, Konto, Verwaltung
 import { api, h, clear, icon, LOGO, toast, fail, dialog, confirmDlg, dt, until, initials, num, debounce, strength,
   STRENGTH_TEXT, parseNum, copyText } from "./lib.js";
-import { groupProjects } from "./rights.js";
+import { groupProjects, isReadOnly, readOnlyText } from "./rights.js";
 
 export const S = { me: null, project: null, leave: [] };
 const app = document.getElementById("app");
@@ -65,6 +65,20 @@ document.addEventListener("keydown", ev => {
 
 api.onUnauthorized = () => { S.me = null; if (!location.pathname.startsWith("/login")) go("/login", true); };
 api.onMustChange = () => { if (S.me) S.me.must_change_pw = 1; go("/passwort", true); };
+// Spec Teams §8: Zugriff auf das offene Projekt verloren (z. B. aus dem Team entfernt) -> zur Bibliothek, auf der
+// Auftragsseite zu „Meine Aufträge“; die Meldung zeigt der Aufrufer (fail). In der Bibliothek lädt die Liste neu.
+api.onNotFound = msg => {
+  if (msg !== "Projekt nicht gefunden" || !S.project || location.pathname === "/") return;
+  S.project = null;
+  forgetProject();
+  go(location.pathname.startsWith("/cad/") ? "/auftraege" : "/");
+};
+// Rolle inzwischen Lesend (z. B. vom Leiter herabgestuft): Projekt neu laden und die Seite neu zeichnen, damit der
+// Lesend-Modus greift; die Meldung zeigt der Aufrufer (fail). Nur beim Wechsel zu Lesend, daher keine Schleife.
+api.onReadOnly = () => {
+  if (!S.project || isReadOnly(S.project)) return;
+  reloadProject().then(p => { if (isReadOnly(p)) render(); }).catch(() => {});
+};
 
 export async function refreshMe() {
   const r = await api("/api/me");
@@ -190,6 +204,41 @@ export function rememberedProjectId() {
 }
 export function forgetProject() {
   try { localStorage.removeItem(projectKey()); } catch { /* */ }
+}
+
+// ------------------------------------------------------------------ Rolle „Lesend“ (Spec Teams §7)
+export function readOnlyNote(p) {
+  return h("div", { class: "note info ro-note", role: "status" }, icon("lock"), h("span", {}, readOnlyText(p)));
+}
+// Sperrt in root alle Knöpfe und Eingaben außer in [data-ro="ok"] (Ansicht, Zoom, Projektwahl), solange S.project die
+// Rolle Lesend hat, und zeigt den Hinweis in slot. Nachgezeichnete Elemente sperrt ein MutationObserver (einmal je Frame).
+// Rückgabe: nach einem Projektwechsel aufrufen. Nur Komfort – der Server lehnt jede Änderung mit 403 ab.
+export function readOnlyMode(root, slot) {
+  let mo = null, shown;
+  const lockAll = on => {
+    for (const x of root.querySelectorAll("button, input, select, textarea")) {
+      if (x.closest('[data-ro="ok"]')) continue;
+      if (on && !x.disabled) { x.disabled = true; x.dataset.roLocked = "1"; }
+      else if (!on && x.dataset.roLocked) { x.disabled = false; delete x.dataset.roLocked; }
+    }
+  };
+  const run = () => {
+    const on = isReadOnly(S.project), key = on ? S.project.id : null;
+    if (key !== shown) { shown = key; clear(slot, on ? readOnlyNote(S.project) : null); }
+    lockAll(on);
+    if (on && !mo) {
+      let queued = false;
+      mo = new MutationObserver(() => {
+        if (queued) return;
+        queued = true;
+        requestAnimationFrame(() => { queued = false; if (mo) lockAll(true); });
+      });
+      mo.observe(root, { childList: true, subtree: true });
+    } else if (!on && mo) { mo.disconnect(); mo = null; }
+  };
+  onLeave(() => { mo?.disconnect(); mo = null; });
+  run();
+  return run;
 }
 
 export function projectPicker(onChange) {

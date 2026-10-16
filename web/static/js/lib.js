@@ -24,6 +24,8 @@ export async function api(path, { method = "GET", body, form, signal } = {}) {
     const err = new ApiError(r.status, detailText(data && data.detail !== undefined ? data.detail : data));
     if (r.status === 401 && !path.startsWith("/api/auth/") && api.onUnauthorized) api.onUnauthorized();
     if (r.status === 403 && err.message.startsWith("Passwort muss") && api.onMustChange) api.onMustChange();
+    if (r.status === 404 && api.onNotFound) api.onNotFound(err.message);   // Spec Teams §8: Zugriff verloren
+    if (r.status === 403 && err.message === "Nur lesender Zugriff" && api.onReadOnly) api.onReadOnly();   // Rolle Lesend
     throw err;
   }
   return data;
