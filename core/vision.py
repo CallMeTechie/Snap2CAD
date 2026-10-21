@@ -17,10 +17,10 @@ except Exception:  # pragma: no cover
 
 from .matgen import FORMATS, layout
 
-PX_PER_MM = 10.0
+PX_PER_MM = 10.0   # A4/A3; je Format: px_per_mm(fmt) (Mini: 20, feineres Raster)
 Image.init()  # alle Format-Plugins registrieren, damit die Auswahl unten aufgeloest werden kann
 UPLOAD_FORMATS = tuple(f for f in ("JPEG", "MPO", "PNG", "WEBP", "HEIF", "AVIF") if f in Image.OPEN)
-GAUGE_MARKER_MM = 18.0
+GAUGE_MARKER_MM = 18.0                               # A4/A3; je Format: spec(fmt)["height_gauge"]
 GAUGE_STRIPS = {"A": (10, 11, 14), "B": (12, 13, 15)}
 GAUGE_X_RANGE = (-100.0, 100.0)
 
@@ -33,9 +33,18 @@ def _detector():
     return cv2.aruco.ArucoDetector(_DICT, p)
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=8)
 def spec(fmt: str) -> dict:
     return layout(fmt)
+
+
+def px_per_mm(fmt: str | None) -> float:
+    """Aufloesung der entzerrten Draufsicht: 10 px/mm (A4/A3), 20 px/mm (Mini)."""
+    return float(spec(fmt)["px_per_mm"]) if fmt in FORMATS else PX_PER_MM
+
+
+def mat_ids(fmt: str) -> list[int]:
+    return [int(i) for i in spec(fmt)["ids"]]
 
 
 def load_image(data: bytes) -> np.ndarray:
@@ -67,8 +76,10 @@ def mat_object_points(fmt: str) -> dict[int, np.ndarray]:
 
 
 def gauge_object_points(fmt: str, strip: str) -> dict[int, np.ndarray]:
-    ys = spec(fmt)["height_gauge"]["centers_above_fold_mm"]
-    return {i: _square(0.0, float(ys[i] if i in ys else ys[str(i)]), GAUGE_MARKER_MM) for i in GAUGE_STRIPS[strip]}
+    hg = spec(fmt)["height_gauge"]
+    ys = hg["centers_above_fold_mm"]
+    return {i: _square(0.0, float(ys[i] if i in ys else ys[str(i)]), float(hg["marker_size_mm"]))
+            for i in hg["strips"][strip]}
 
 
 def _fit(found: dict, obj: dict, ids: list[int]):
@@ -98,75 +109,89 @@ def _loo(found, obj, ids) -> dict[int, float]:
     return out
 
 
-def verdict(n_markers: int, max_err: float | None) -> str:
+def verdict(n_markers: int, max_err: float | None, fmt: str | None = None) -> str:
     if n_markers < 4 or max_err is None:
         return "nicht_auswertbar"
-    if max_err <= 0.5:
+    good, ok = spec(fmt)["verdict_mm"] if fmt in FORMATS else (0.5, 1.0)
+    if max_err <= good:
         return "gut"
-    if max_err <= 1.0:
+    if max_err <= ok:
         return "brauchbar"
     return "unsicher"
 
 
 def analyze(img: np.ndarray, fmt: str | None = None) -> dict:
-    """Komplette Auswertung eines Fotos. fmt=None -> A4/A3 automatisch."""
+    """Komplette Auswertung eines Fotos. fmt=None -> Format automatisch (A4, A3 oder Mini).
+
+    A4 und A3 tragen dieselben Marker-IDs und werden ueber den Passfehler unterschieden, Mini hat eigene IDs."""
     found = detect(img)
     h, w = img.shape[:2]
     res: dict = {"width": w, "height": h, "found_ids": sorted(found)}
-    mat_ids = sorted(i for i in found if 0 <= i <= 7)
-    res["mat_ids"] = mat_ids
-    res["missing_ids"] = [i for i in range(8) if i not in found]
-
-    if len(mat_ids) >= 4:
-        cands = [fmt] if fmt in FORMATS else list(FORMATS)
-        scored = []
-        for f in cands:
+    cands = [fmt] if fmt in FORMATS else list(FORMATS)
+    # Bezugsformat fuer die Anzeige (gefundene/fehlende Marker): das mit den meisten gefundenen IDs
+    ref = max(cands, key=lambda f: sum(i in found for i in mat_ids(f)))
+    scored = []
+    for f in cands:
+        ids = sorted(i for i in found if i in mat_ids(f))
+        if len(ids) >= 4:
             obj = mat_object_points(f)
-            H = _fit(found, obj, mat_ids)
-            scored.append((_rms(H, found, obj, mat_ids), f, H, obj))
-        rms, f, H, obj = min(scored, key=lambda t: t[0])
-        loo = _loo(found, obj, mat_ids)
+            H = _fit(found, obj, ids)
+            scored.append((-len(ids), _rms(H, found, obj, ids), f, H, obj, ids))
+    if scored:
+        _, rms, f, H, obj, ids = min(scored, key=lambda t: (t[0], t[1]))
+        ref = f
+        loo = _loo(found, obj, ids)
         max_err = max(loo.values()) if loo else rms
         res.update(format=f, format_auto=fmt not in FORMATS, homography=H.tolist(), rms_mm=round(rms, 3),
                    loo_mm={str(k): round(v, 3) for k, v in loo.items()}, max_err_mm=round(max_err, 3))
     else:
         res.update(format=fmt if fmt in FORMATS else None, homography=None, rms_mm=None, loo_mm={}, max_err_mm=None)
-    res["status"] = verdict(len(mat_ids), res["max_err_mm"])
+    res["mat_ids"] = sorted(i for i in found if i in mat_ids(ref))
+    res["missing_ids"] = [i for i in mat_ids(ref) if i not in found]
+    res["status"] = verdict(len(res["mat_ids"]), res["max_err_mm"], res["format"])
 
-    # Hoehenlehre
+    # Hoehenlehre: zuerst die zum Unterlagenformat passende, sonst die erste mit erkannten Markern
     g = None
-    f = res["format"] or "A4"
-    for strip, ids in GAUGE_STRIPS.items():
-        have = [i for i in ids if i in found]
-        if have and (g is None or len(have) > len(g["ids"])):
-            g = {"strip": strip, "ids": have}
+    order = ([res["format"]] if res["format"] else []) + [f for f in FORMATS if f != res["format"]]
+    for f in order:
+        for strip, ids in spec(f)["height_gauge"]["strips"].items():
+            have = [i for i in ids if i in found]
+            if have and (g is None or len(have) > len(g["ids"])):
+                g = {"strip": strip, "ids": have, "format": f}
     if g:
-        obj = gauge_object_points(f, g["strip"])
+        obj = gauge_object_points(g["format"], g["strip"])
         Hg = _fit(found, obj, g["ids"])
         g["homography"] = Hg.tolist()
         g["rms_mm"] = round(_rms(Hg, found, obj, g["ids"]), 3)
-        g["vlen_mm"] = spec(f)["height_gauge"]["vlen_mm"]
+        g["vlen_mm"] = spec(g["format"])["height_gauge"]["vlen_mm"]
     res["gauge"] = g
     return res
 
 
 def _px_matrix(pxmm: float, h_mm: float) -> np.ndarray:
-    """mm (y nach oben) -> Pixel (y nach unten), wie rectify_mat."""
-    return np.array([[pxmm, 0, 0], [0, -pxmm, h_mm * pxmm], [0, 0, 1]], np.float64)
+    """mm (y nach oben) -> Pixel (y nach unten), wie rectify_mat.
+
+    Pixel i deckt [i/pxmm, (i+1)/pxmm) mm ab; seine Mitte (OpenCV-Koordinate i) liegt also bei (i + 0,5)/pxmm.
+    So rechnen auch die Kantenerkennung und die Messansicht im Browser (mm = Bildkoordinate / pxmm)."""
+    return np.array([[pxmm, 0, -0.5], [0, -pxmm, h_mm * pxmm - 0.5], [0, 0, 1]], np.float64)
 
 
-def rectify_mat(img: np.ndarray, H, fmt: str, pxmm: float = PX_PER_MM) -> np.ndarray:
+def rectify_mat(img: np.ndarray, H, fmt: str, pxmm: float | None = None) -> np.ndarray:
+    pxmm = pxmm or px_per_mm(fmt)
     gw, gh = spec(fmt)["grid_mm"]
     to_px = _px_matrix(pxmm, gh)
     return cv2.warpPerspective(img, to_px @ np.asarray(H), (int(gw * pxmm), int(gh * pxmm)),
                                flags=cv2.INTER_CUBIC, borderValue=(235, 236, 236))
 
 
-def rectify_gauge(img: np.ndarray, gauge: dict, pxmm: float = PX_PER_MM):
-    """Senkrechte Ebene der Hoehenlehre. Rueckgabe (Bild, Bereich in mm: x0, x1, y0, y1)."""
-    x0, x1 = GAUGE_X_RANGE
-    y0, y1 = -10.0, gauge["vlen_mm"] + 10.0
-    to_px = np.array([[pxmm, 0, -x0 * pxmm], [0, -pxmm, y1 * pxmm], [0, 0, 1]], np.float64)
+def rectify_gauge(img: np.ndarray, gauge: dict, pxmm: float | None = None):
+    """Senkrechte Ebene der Hoehenlehre. Rueckgabe (Bild, Bereich in mm: x0, x1, y0, y1).
+    Bereich und Aufloesung haengen vom Format der Lehre ab (Mini: kleiner und feiner)."""
+    hg = spec(gauge.get("format") or "A4")["height_gauge"]
+    pxmm = pxmm or float(hg["px_per_mm"])
+    x0, x1 = hg["x_range_mm"]
+    y0, y1 = -hg["y_margin_mm"], gauge["vlen_mm"] + hg["y_margin_mm"]
+    to_px = np.array([[pxmm, 0, -x0 * pxmm - 0.5], [0, -pxmm, y1 * pxmm - 0.5], [0, 0, 1]], np.float64)
     size = (int((x1 - x0) * pxmm), int((y1 - y0) * pxmm))
     out = cv2.warpPerspective(img, to_px @ np.asarray(gauge["homography"]), size,
                               flags=cv2.INTER_CUBIC, borderValue=(235, 236, 236))

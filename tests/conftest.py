@@ -81,8 +81,9 @@ def user(app, admin):
     return c
 
 
-def _render_page(fmt: str, page: int, px_per_mm: float = 6.0):
-    """PDF-Seite der Messunterlage als BGR-Bild rendern."""
+def _render_page(fmt: str, page: int, px_per_mm: float = 6.0, crop_mm=None):
+    """PDF-Seite der Messunterlage als BGR-Bild rendern. crop_mm = (x0, y0, x1, y1) in mm der Seite
+    (y von unten): nur diesen Ausschnitt rendern (Mini: die Karte, wie aus der Naehe fotografiert)."""
     import cv2
     import numpy as np
     import pypdfium2 as pdfium
@@ -91,9 +92,29 @@ def _render_page(fmt: str, page: int, px_per_mm: float = 6.0):
     buf = io.BytesIO()
     matgen.build(buf, fmt)
     pdf = pdfium.PdfDocument(buf.getvalue())
-    img = pdf[page].render(scale=px_per_mm * 25.4 / 72).to_pil().convert("RGB")
+    pt = 72 / 25.4
+    crop = (0, 0, 0, 0)
+    if crop_mm:
+        W, H = (v / pt for v in pdf[page].get_size())
+        x0, y0, x1, y1 = crop_mm
+        crop = (x0 * pt, y0 * pt, (W - x1) * pt, (H - y1) * pt)
+    img = pdf[page].render(scale=px_per_mm / pt, crop=crop).to_pil().convert("RGB")
     pdf.close()
     return cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
+
+
+MINI_PX = 28.0   # Mini-Fotos: Karte aus ca. 25 cm mit Zoom
+
+
+def _mini_crop(page: int):
+    """Ausschnitt der Mini-Seite in mm (x0, y0, x1, y1), y von unten: Karte bzw. Hoehenlehren."""
+    from core import matgen
+    sp = matgen.layout("Mini")
+    if page == 0:
+        gx, gy = sp["grid_origin_on_page_mm"]
+        gw, gh = sp["grid_mm"]
+        return (gx - 12, gy - 14, gx + gw + 12, gy + gh + 12)
+    return (60.0, 175.0, 150.0, 272.0)
 
 
 def synthetic_photo(fmt: str = "A4", page: int = 0, tilt: float = 0.06, blur: bool = True,
@@ -109,17 +130,22 @@ def synthetic_photo(fmt: str = "A4", page: int = 0, tilt: float = 0.06, blur: bo
     import numpy as np
 
     from core import matgen
-    px = 6.0
-    sheet = _render_page(fmt, page, px)
+    mini = matgen.FORMATS[fmt]["kind"] == "mini"
+    px = MINI_PX if mini else 6.0
+    crop = _mini_crop(page) if mini else None
+    sheet = _render_page(fmt, page, px, crop)
     h, w = sheet.shape[:2]
-    if page == 0 and objects is None:  # ein dunkles "Bauteil" mittig auflegen
+    if page == 0 and objects is None and not mini:  # ein dunkles "Bauteil" mittig auflegen
         cv2.rectangle(sheet, (int(w * 0.35), int(h * 0.42)), (int(w * 0.65), int(h * 0.56)), (40, 42, 45), -1)
     elif page == 0:
+        if objects is None:  # Mini: kleines dunkles Teil mittig
+            objects = [{"rect": [32.0, 26.0, 16.0, 8.0], "gray": 40}]
         ox, oy = matgen.layout(fmt)["grid_origin_on_page_mm"]
-        page_h = h / px
+        # Bezug oben links: Bildzeile 0 ist die Oberkante des Ausschnitts (die Hoehe wird auf Pixel gerundet)
+        cx0, top = (crop[0], crop[3]) if crop else (0.0, h / px)
 
         def P(x, y):
-            return int(round((x + ox) * px)), int(round((page_h - (y + oy)) * px))
+            return int(round((x + ox - cx0) * px)), int(round((top - (y + oy)) * px))
         for o in objects if shadow else []:  # Schatten zuerst zeichnen, das Objekt ueberdeckt ihn
             if "rect" in o:
                 x, y, rw, rh = o["rect"]

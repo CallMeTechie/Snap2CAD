@@ -203,13 +203,12 @@ def _rect_top(ph: dict, top: dict | None) -> Path | None:
     ref = db.q1("SELECT analysis FROM photos WHERE id=?", (tid,)) if tid else None
     at = db.jload(ref["analysis"], {}) if ref else None   # Referenz aus der Ausrichtung; sonst nur gespiegelt
     out = pdir / "rect_top.jpg"
-    _write_atomic(out, vision.encode_jpg(vision.bottom_warp(img, a, at), 90))
+    _write_atomic(out, vision.encode_jpg(vision.bottom_warp(img, a, at, ai.rect_pxmm(a)), 90))
     return out
 
 
 def pick_images(project_id: int, photo_ids: list[int] | None) -> list[dict]:
     """Bilder fuer die KI (Spec §2.2): Draufsicht, Unteransicht, Hoehenlehre, Schraegfotos; hoechstens 6."""
-    from core import vision  # spaet: siehe oben
     photos = [p for p in db.q("SELECT * FROM photos WHERE project_id=? ORDER BY id", (project_id,))
               if photo_ids is None or p["id"] in photo_ids]
     top = reference_top(project_id)
@@ -219,14 +218,14 @@ def pick_images(project_id: int, photo_ids: list[int] | None) -> list[dict]:
         a = db.jload(p["analysis"], {}) or {}
         if p["view"] == "top" and (pdir / "rect.jpg").is_file():
             cap = ai.scaled_caption(pdir / "rect.jpg", f"Foto {p['id']} (Draufsicht), entzerrt auf die Unterlage",
-                                    vision.PX_PER_MM)
+                                    ai.rect_pxmm(a))
             groups["top"].append({"photo_id": p["id"], "kind": "top", "path": pdir / "rect.jpg", "caption": cap})
         elif p["view"] == "bottom" and a.get("rect"):
             path = _rect_top(p, top)
             if path:
                 tag = ("entzerrt und gespiegelt auf Draufsicht-Koordinaten – Bohrungen von unten und oben liegen übereinander"
                        if a.get("bottom_align") else "entzerrt, nicht ausgerichtet, links-rechts gespiegelt")
-                cap = ai.scaled_caption(path, f"Foto {p['id']} (von unten), {tag}", vision.PX_PER_MM)
+                cap = ai.scaled_caption(path, f"Foto {p['id']} (von unten), {tag}", ai.rect_pxmm(a))
                 groups["bottom"].append({"photo_id": p["id"], "kind": "bottom", "path": path, "caption": cap})
         elif p["view"] in ("tilted", "overview"):
             path = _small(pdir)
@@ -235,8 +234,8 @@ def pick_images(project_id: int, photo_ids: list[int] | None) -> list[dict]:
                        "nur für Form, Seitenflächen und Höhenverhältnis.")
                 groups["tilted"].append({"photo_id": p["id"], "kind": "tilted", "path": path, "caption": cap})
         if (pdir / "gauge.jpg").is_file():
-            cap = ai.scaled_caption(pdir / "gauge.jpg", f"Foto {p['id']}, entzerrte Höhenlehre (x −100…100 mm, y ab −10 mm)",
-                                    vision.PX_PER_MM)
+            cap = ai.scaled_caption(pdir / "gauge.jpg", f"Foto {p['id']}, entzerrte Höhenlehre ({ai.gauge_range_text(a)})",
+                                    ai.gauge_pxmm(a))
             groups["gauge"].append({"photo_id": p["id"], "kind": "gauge", "path": pdir / "gauge.jpg", "caption": cap})
     return (groups["top"] + groups["bottom"] + groups["gauge"] + groups["tilted"])[:6]
 

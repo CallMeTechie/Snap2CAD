@@ -722,7 +722,7 @@ def _pages(pages: str) -> list[str]:
 @app.get("/api/mat.pdf")
 def mat_pdf(format: str = "A4", pages: str = "", header: str = "", u: dict = Depends(auth.require_user)):
     if format not in matgen.FORMATS:
-        raise HTTPException(400, "Format muss A4 oder A3 sein")
+        raise HTTPException(400, "Format muss A4, A3 oder Mini sein")
     data = _pdf_bytes(format, _pages(pages), header[:60])
     return Response(data, media_type="application/pdf",
                     headers={"Content-Disposition": f'attachment; filename="Messunterlage_{format}.pdf"'})
@@ -756,7 +756,7 @@ def mat_preview(format: str = "A4", page: int = 0, header: str = "", u: dict = D
 @app.get("/api/mat/layout")
 def mat_layout(format: str = "A4", u: dict = Depends(auth.require_user)):
     if format not in matgen.FORMATS:
-        raise HTTPException(400, "Format muss A4 oder A3 sein")
+        raise HTTPException(400, "Format muss A4, A3 oder Mini sein")
     return vision.spec(format)
 
 
@@ -1040,11 +1040,11 @@ def _analyze_store(phid: int, img, fmt: str | None, view: str, hints: dict | Non
         rect = vision.rectify_mat(img, a["homography"], a["format"])
         (d / "rect.jpg").write_bytes(vision.encode_jpg(rect, 90))
         gw, gh = vision.spec(a["format"])["grid_mm"]
-        a["rect"] = {"pxmm": vision.PX_PER_MM, "w_mm": gw, "h_mm": gh, "w": rect.shape[1], "h": rect.shape[0]}
+        a["rect"] = {"pxmm": vision.px_per_mm(a["format"]), "w_mm": gw, "h_mm": gh, "w": rect.shape[1], "h": rect.shape[0]}
     if a.get("gauge") and len(a["gauge"]["ids"]) >= 2:
         g, (x0, x1, y0, y1) = vision.rectify_gauge(img, a["gauge"])
         (d / "gauge.jpg").write_bytes(vision.encode_jpg(g, 90))
-        a["gauge_rect"] = {"pxmm": vision.PX_PER_MM, "x0": x0, "x1": x1, "y0": y0, "y1": y1,
+        a["gauge_rect"] = {"pxmm": round(g.shape[1] / (x1 - x0), 6), "x0": x0, "x1": x1, "y0": y0, "y1": y1,
                            "w": g.shape[1], "h": g.shape[0]}
     if a.get("rect") and view in PLANAR and _detect_lock.acquire(timeout=DETECT_WAIT_S):
         try:
@@ -1699,15 +1699,16 @@ def meas_suggest(pid: int, body: SuggestIn, request: Request, u: dict = Depends(
     n_img = 0
     for ph in photos:
         d = _photo_dir(ph["id"])
+        a = db.jload(ph["analysis"], {}) or {}
         if used_photo is None and ph["view"] == "top" and (d / "rect.jpg").is_file():
             used_photo = ph
             content += ai.image_ref(d / "rect.jpg", ai.scaled_caption(
-                d / "rect.jpg", f"Draufsicht (Foto {ph['id']}), Ansicht \"top\"", vision.PX_PER_MM))
+                d / "rect.jpg", f"Draufsicht (Foto {ph['id']}), Ansicht \"top\"", ai.rect_pxmm(a)))
             n_img += 1
         if (d / "gauge.jpg").is_file() and n_img < 3:
             content += ai.image_ref(d / "gauge.jpg", ai.scaled_caption(
-                d / "gauge.jpg", f"Höhenlehre (Foto {ph['id']}), Ansicht \"gauge\" (x −100…100 mm, y ab −10 mm)",
-                vision.PX_PER_MM))
+                d / "gauge.jpg", f"Höhenlehre (Foto {ph['id']}), Ansicht \"gauge\" ({ai.gauge_range_text(a)})",
+                ai.gauge_pxmm(a)))
             n_img += 1
     if used_photo is None:
         raise HTTPException(400, "Kein auswertbares Foto (mindestens 4 Marker der Unterlage nötig).")

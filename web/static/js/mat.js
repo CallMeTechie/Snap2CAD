@@ -12,9 +12,13 @@ export function matGenerator(container) {
   const pages = { mat: true, gauge: true, guide: true };
   const hdr = h("input", { id: "hdr", class: "input", placeholder: "z. B. Werkstatt oder Firmenname", maxlength: 60 });
 
+  const FIELD = { A4: "Feld 190 × 230 mm", A3: "Feld 270 × 360 mm", Mini: "Feld 80 × 60 mm · Teile 1–40 mm" };
+  if (!FIELD[fmt]) fmt = "A4";
   const choice = f => h("label", { class: "choice" },
     h("span", { class: "c1" }, h("input", { type: "radio", name: "fmt", value: f, checked: f === fmt, onchange: () => { fmt = f; try { localStorage.setItem("mu.fmt", f); } catch { /* */ } update(); } }), f),
-    h("span", { class: "c2" }, f === "A4" ? "Feld 190 × 230 mm" : "Feld 270 × 360 mm"));
+    h("span", { class: "c2" }, FIELD[f]));
+  const miniNote = h("div", { class: "note info", role: "note" }, icon("info", 20),
+    h("div", {}, h("strong", {}, "Mini für kleine Teile:"), " eine Karte mit 0,5-mm-Raster zum Ausschneiden. Auf festen Karton kleben, das Teil mittig auflegen und aus 20–30 cm mit 2×/3×-Zoom fotografieren – ohne Makro-Modus."));
 
   const pdfBtn = h("a", { class: "btn primary big", download: "" }, icon("download"), "PDF erzeugen und herunterladen");
   const previewHead = h("h2", { id: "prev-h" });
@@ -24,11 +28,22 @@ export function matGenerator(container) {
   });
   const facts = h("dl", { class: "facts" });
 
+  const nextSteps = h("ol", { class: "nextsteps" });
+  function fillSteps() {
+    const mini = fmt === "Mini";
+    clear(nextSteps,
+      step("01", "Kontrollmaß messen", "Wert ins Feld neben der 100-mm-Skala schreiben"),
+      mini ? step("02", "Karte aufkleben", "Ausschneiden, plan auf Karton kleben") : step("02", "Plan fixieren", "Ecken festkleben, Teil mittig auflegen"),
+      mini ? step("03", "Fotografieren", "Senkrecht, 20–30 cm, 2×/3×-Zoom, kein Makro") : step("03", "Fotografieren", "Senkrecht, 50–70 cm, 2×-Zoom"),
+      h("li", {}, h("span", { class: "num" }, "04"), h("span", {}, h("strong", {}, "Hochladen"), h("br"), h("a", { href: "/fotos", class: "small" }, "Weiter zu „Fotos prüfen“"))));
+  }
+
   container.append(
     h("div", { class: "row" },
       h("section", { class: "card", style: { flex: "1 1 380px", maxWidth: "460px", gap: "22px" }, "aria-labelledby": "opt-h" },
         h("h2", { id: "opt-h" }, "Optionen"),
-        h("fieldset", {}, h("legend", {}, "Format"), h("div", { class: "grid2" }, choice("A4"), choice("A3"))),
+        h("fieldset", {}, h("legend", {}, "Format"), h("div", { class: "grid3" }, choice("A4"), choice("A3"), choice("Mini"))),
+        miniNote,
         h("fieldset", {}, h("legend", {}, "Seiten im PDF"), Object.entries(PAGE_NAMES).map(([k, t]) =>
           h("label", { class: "check" }, h("input", { type: "checkbox", checked: true, onchange: e => { pages[k] = e.target.checked; update(); } }), t))),
         h("div", { class: "field" }, h("label", { for: "hdr", class: "label" }, "Kopfzeile (optional)"), hdr,
@@ -42,11 +57,8 @@ export function matGenerator(container) {
         facts)),
     h("section", { class: "card tight", "aria-labelledby": "next-h" },
       h("h2", { id: "next-h", style: { fontSize: "15px" } }, "Nach dem Drucken"),
-      h("ol", { class: "nextsteps" },
-        step("01", "Kontrollmaß messen", "Wert ins Feld unten rechts schreiben"),
-        step("02", "Plan fixieren", "Ecken festkleben, Teil mittig auflegen"),
-        step("03", "Fotografieren", "Senkrecht, 50–70 cm, 2×-Zoom"),
-        h("li", {}, h("span", { class: "num" }, "04"), h("span", {}, h("strong", {}, "Hochladen"), h("br"), h("a", { href: "/fotos", class: "small" }, "Weiter zu „Fotos prüfen“"))))));
+      nextSteps));
+
 
   const ctrl = { abort: null };
   async function update() {
@@ -56,6 +68,8 @@ export function matGenerator(container) {
     pdfBtn.setAttribute("download", `Messunterlage_${fmt}.pdf`);
     pdfBtn.toggleAttribute("aria-disabled", !sel.length);
     previewHead.textContent = `Vorschau · ${fmt} · ${sel.length} ${sel.length === 1 ? "Seite" : "Seiten"}`;
+    miniNote.hidden = fmt !== "Mini";
+    fillSteps();
     ["mat", "gauge", "guide"].forEach((k, i) => {
       const f = figs[i];
       f.fig.hidden = !pages[k];
@@ -71,10 +85,11 @@ export function matGenerator(container) {
       ctrl.abort?.abort(); ctrl.abort = new AbortController();
       const sp = await api(`/api/mat/layout?format=${fmt}`, { signal: ctrl.abort.signal });
       const g = sp.height_gauge || {};
+      const ids = sp.ids || [0, 7];
       clear(facts,
-        fact("Raster", `${num(sp.grid_mm[0], 0)} × ${num(sp.grid_mm[1], 0)} mm`),
+        fact("Raster", `${num(sp.grid_mm[0], 0)} × ${num(sp.grid_mm[1], 0)} mm · Teilung ${num(sp.grid_unit_mm || 1, 1)} mm`),
         fact("Marker", `8 × ${num(sp.marker_size_mm, 0)} mm`),
-        fact("Wörterbuch", "4X4_50 · ID 0–7"),
+        fact("Wörterbuch", `4X4_50 · ID ${ids[0]}–${ids[ids.length - 1]}`),
         fact("Höhenlehre", `0–${num(g.vlen_mm, 0)} mm`));
     } catch (e) { fail(e); }
   }

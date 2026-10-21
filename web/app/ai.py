@@ -242,6 +242,21 @@ def image_ref(path: Path, caption: str) -> list[dict]:
     return [{"type": "image_ref", "path": str(path)}, {"type": "text", "text": caption}]
 
 
+def rect_pxmm(analysis: dict | None) -> float:
+    """Aufloesung der entzerrten Draufsicht eines Fotos (A4/A3 10 px/mm, Mini 20 px/mm)."""
+    return float(((analysis or {}).get("rect") or {}).get("pxmm") or 10.0)
+
+
+def gauge_pxmm(analysis: dict | None) -> float:
+    return float(((analysis or {}).get("gauge_rect") or {}).get("pxmm") or 10.0)
+
+
+def gauge_range_text(analysis: dict | None) -> str:
+    g = (analysis or {}).get("gauge_rect") or {}
+    x0, x1, y0 = g.get("x0", -100.0), g.get("x1", 100.0), g.get("y0", -10.0)
+    return f"x {x0:g}…{x1:g} mm, y ab {y0:g} mm".replace("-", "−")
+
+
 def scaled_caption(path: Path, base: str, pxmm: float) -> str:
     img = cv2.imread(str(path))
     h, w = img.shape[:2]

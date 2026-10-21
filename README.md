@@ -5,7 +5,7 @@
 
 **Snap2CAD** besteht aus einer druckbaren Messunterlage mit mm-Raster und ArUco-Markern. Du legst ein Bauteil darauf, fotografierst es mit dem Handy, und eine KI (oder das mitgelieferte Skript) entzerrt das Foto auf die Tischebene und misst die Konturen in Millimetern. Ein fertiger Prompt – oder die mitgelieferte Web-App mit Claude – führt anschließend vom Messergebnis zum parametrischen CAD-Modell mit **STEP- und STL-Export** für 3D-Druck oder CNC-Fräsen.
 
-> **English summary:** Snap2CAD is a printable measuring mat (A4/A3) with a 1 mm grid and ArUco markers. Photograph a part on it, and an AI with code execution (or the included script) rectifies the photo to true scale and measures it. A ready-made prompt – or the included self-hosted web app with Claude – then turns the measurements into a parametric CAD model exported as STEP and STL. The prompt and documentation are in German.
+> **English summary:** Snap2CAD is a printable measuring mat (A4/A3, plus a small cut-out card for parts of 1–40 mm) with a 1 mm grid and ArUco markers. Photograph a part on it, and an AI with code execution (or the included script) rectifies the photo to true scale and measures it. A ready-made prompt – or the included self-hosted web app with Claude – then turns the measurements into a parametric CAD model exported as STEP and STL. The prompt and documentation are in German.
 
 <p align="center">
   <img src="docs/preview_a4.png" alt="Messunterlage A4 mit Raster und Markern" width="360">
@@ -19,13 +19,26 @@
 |---|---|
 | [`pdf/Messunterlage_A4.pdf`](pdf/Messunterlage_A4.pdf) | Messfeld 190 × 230 mm, Höhenlehre bis 220 mm, Anleitung |
 | [`pdf/Messunterlage_A3.pdf`](pdf/Messunterlage_A3.pdf) | Messfeld 270 × 360 mm, Höhenlehre bis 340 mm, Anleitung |
+| [`pdf/Messunterlage_Mini.pdf`](pdf/Messunterlage_Mini.pdf) | Kleine Teile (ca. 1–40 mm): Karte 80 × 60 mm mit 0,5-mm-Raster zum Ausschneiden, Mini-Höhenlehre bis 50 mm, Anleitung |
 | [`PROMPT.md`](PROMPT.md) | Prompt für KI-Sessions: Vermessung → Maßtabelle → CAD → STEP/STL |
 | [`tools/check_photo.py`](tools/check_photo.py) | Prüft ein Foto (Marker, Restfehler) und erzeugt eine maßstäbliche Draufsicht |
 | [`generator/make_mat.py`](generator/make_mat.py) | Erzeugt die PDFs neu, z. B. nach eigenen Anpassungen |
-| [`docs/marker_layout.json`](docs/marker_layout.json) | Maschinenlesbare Markerpositionen für beide Formate |
+| [`docs/marker_layout.json`](docs/marker_layout.json) | Maschinenlesbare Markerpositionen für alle Formate |
 | [`web/`](web/), [`Dockerfile`](Dockerfile), [`docker-compose.yml`](docker-compose.yml) | Web-App: Unterlage erzeugen, Fotos prüfen, im Browser messen, CAD mit Claude ([siehe unten](#web-app-docker)) |
 
 Jedes PDF hat drei Seiten: Messunterlage, Höhenlehre zum Ausschneiden und eine Kurzanleitung.
+
+## Kleine Teile: Format „Mini“
+
+Für Schrauben, Federn, Clips, Zahnräder oder Platinenteile ist das A4-Blatt zu grob: Damit alle Marker ins Bild passen, muss das Handy weit weg, und ein 3-mm-Teil bekommt nur wenige Bildpunkte. Die Mini-Unterlage ist eine Karte von 80 × 60 mm mit 0,5-mm-Raster und acht 7-mm-Markern (eigene IDs 20–27) dicht am Teil.
+
+<p align="center"><img src="docs/preview_mini.png" alt="Messunterlage Mini mit Karte zum Ausschneiden" width="360"></p>
+
+- Karte ausschneiden und **plan auf Karton kleben**. Das 100-mm-Kontrollmaß steht daneben auf demselben Ausdruck.
+- **Aus 20–30 cm mit 2×/3×-Zoom** senkrecht fotografieren, die Karte füllt das Bild. **Kein Makro-Modus** und kein Ultraweitwinkel: deren Verzeichnung lässt sich mit acht Markern am Rand nicht herausrechnen.
+- Die entzerrte Draufsicht hat **20 px/mm** (A4/A3: 10). Die automatische Kantenerkennung findet Teile ab etwa 2 × 2 mm und Bohrungen ab etwa Ø 1 mm; an synthetischen Testbildern liegen gerade Kanten auf ±0,1 mm, Bohrungen auf ±0,02 mm.
+- Die Foto-Ampel ist strenger: „gut“ bis 0,2 mm Restfehler, „brauchbar“ bis 0,4 mm.
+- Parallaxe wirkt wie beim großen Blatt: Was über der Karte liegt, erscheint größer (Fehler ≈ Maß × Höhe ÷ Kameraabstand). Höhen am besten über eine zweite Draufsicht des gekippten Teils messen.
 
 ## So funktioniert's
 
@@ -47,7 +60,7 @@ Jedes Konto hat eine private Projektbibliothek; Teams teilen zusätzlich eine ge
 
 ```bash
 pip install -r requirements.txt
-python tools/check_photo.py foto.jpg            # Format A4/A3 wird erkannt, sonst --size A4
+python tools/check_photo.py foto.jpg            # Format A4/A3/Mini wird erkannt, sonst --size A4
 ```
 
 Das Skript meldet die erkannten Marker und den Restfehler je Marker und speichert `foto_entzerrt.jpg` mit 10 px/mm. Ursprung ist die untere linke Rasterecke. In dieser Draufsicht entspricht jeder Pixelabstand direkt einem Maß in mm. Ist eine Höhenlehre im Bild, entsteht zusätzlich `foto_entzerrt_hoehenlehre.jpg` (x = Mitte des Streifens, y = Höhe über dem Tisch).
@@ -129,7 +142,7 @@ Startseite ist die Projektbibliothek: Jedes Werkstück ist ein Projekt mit Vorsc
 
 | Schritt | Was passiert |
 |---|---|
-| 1 · Projekte | Projektbibliothek mit Vorschaubild, Suche, Sortierung, Archiv · Messunterlage als PDF (A4/A3, Seiten wählbar, Kopfzeile, Vorschau) in der Anleitung |
+| 1 · Projekte | Projektbibliothek mit Vorschaubild, Suche, Sortierung, Archiv · Messunterlage als PDF (A4/A3 oder Mini für kleine Teile, Seiten wählbar, Kopfzeile, Vorschau) in der Anleitung |
 | 2 · Fotos prüfen | Marker-Erkennung, Restfehler je Marker, entzerrte Draufsicht und Höhenlehre, Kontrollmaß-Faktoren |
 | 3 · Messen | Strecke, Kreis aus 3 Punkten, Punkt, Winkel, Höhe · Kantenfang, Lupe, Zoom · Messschieber-Werte, kritische Maße · Claude schlägt zusätzlich Maße aus dem Foto vor |
 | 4 · CAD mit Claude | Claude schreibt build123d-Code, eine Sandbox erzeugt STEP und STL, prüft sie und lässt Fehler automatisch korrigieren · 3D-Ansicht (drehen, zoomen, Schnitt), Foto-Abgleich, Änderungswünsche als neue Versionen, Download als ZIP |

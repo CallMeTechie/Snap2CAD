@@ -248,8 +248,9 @@ def _intersect(l1, l2):
     return (p1[0] + d1[0] * t, p1[1] + d1[1] * t)
 
 
-def snap_polygon(poly, segments, preferred=()):
-    """KI-Polygon auf OpenCV-Kandidaten einrasten (Spec §2). Rueckgabe (polygon, hidden-Kennzeichen je Kante)."""
+def snap_polygon(poly, segments, preferred=(), scale=1.0):
+    """KI-Polygon auf OpenCV-Kandidaten einrasten (Spec §2). Rueckgabe (polygon, hidden-Kennzeichen je Kante).
+    scale: mm je Rastereinheit (A4/A3 1, Mini 0,5) – Fangabstaende schrumpfen mit den Teilen."""
     pref = set(preferred)
     groups = ([s for s in segments if s["id"] in pref], [s for s in segments if s["id"] not in pref])
     lines, hidden = [], []
@@ -265,7 +266,7 @@ def snap_polygon(poly, segments, preferred=()):
                 if _seg_len(*seg) < 1e-6 or _angle_diff(_angle(*seg), ang) >= 6:
                     continue
                 dist = (_dist_to_line(seg[0], a, b) + _dist_to_line(seg[1], a, b)) / 2
-                if dist >= 3 or _overlap(seg, a, b) < 0.3:
+                if dist >= 3 * scale or _overlap(seg, a, b) < 0.3:
                     continue
                 if best is None or dist < best[0]:
                     best = (dist, seg)
@@ -276,7 +277,7 @@ def snap_polygon(poly, segments, preferred=()):
     out = []
     for i, v in enumerate(poly):
         q = _intersect(lines[i - 1], lines[i]) if lines[i - 1] and lines[i] else None
-        if q is None or math.hypot(q[0] - v[0], q[1] - v[1]) > 8:
+        if q is None or math.hypot(q[0] - v[0], q[1] - v[1]) > 8 * scale:
             q = v
         out.append([round(float(q[0]), 3), round(float(q[1]), 3)])
     return out, hidden
@@ -663,15 +664,21 @@ def candidate_image(photo_dir, res):
     return out
 
 
+def _scale(res) -> float:
+    """mm je Rastereinheit aus der Aufloesung der Draufsicht (10 px/mm -> 1, Mini 20 px/mm -> 0,5)."""
+    return 10.0 / float(res.get("px_per_mm") or 10.0)
+
+
 def candidate_text(res):
+    d = 1 if _scale(res) >= 1 else 2   # Mini: Hundertstel, sonst gehen kleine Teile in der Rundung unter
     lines = ["Kanten-Kandidaten (mm, Draufsicht):"]
     for s in res["segments"]:
-        lines.append(f"{s['id']}: ({s['a'][0]:.1f}, {s['a'][1]:.1f}) → ({s['b'][0]:.1f}, {s['b'][1]:.1f}), "
-                     f"{_seg_len(s['a'], s['b']):.1f} mm, {'Umriss' if s['kind'] == 'outline' else 'Innenkante'}")
+        lines.append(f"{s['id']}: ({s['a'][0]:.{d}f}, {s['a'][1]:.{d}f}) → ({s['b'][0]:.{d}f}, {s['b'][1]:.{d}f}), "
+                     f"{_seg_len(s['a'], s['b']):.{d}f} mm, {'Umriss' if s['kind'] == 'outline' else 'Innenkante'}")
     for i, o in enumerate(res["outlines"], 1):
-        lines.append(f"Umriss {i}: " + " ".join(f"({x:.1f}, {y:.1f})" for x, y in o["polygon"]))
+        lines.append(f"Umriss {i}: " + " ".join(f"({x:.{d}f}, {y:.{d}f})" for x, y in o["polygon"]))
     for h in res["holes"]:
-        lines.append(f"Bohrung: Mitte ({h['c'][0]:.1f}, {h['c'][1]:.1f}), Ø {h['d']:.1f} mm")
+        lines.append(f"Bohrung: Mitte ({h['c'][0]:.{d}f}, {h['c'][1]:.{d}f}), Ø {h['d']:.{d}f} mm")
     return "\n".join(lines)
 
 
@@ -696,8 +703,9 @@ def ai_parts(photo_dir, res, material_text=""):
     text, _ = ai.call(ai.PARTS_SYSTEM, [{"role": "user", "content": content}], max_tokens=4000)
     out = []
     for it in ai.parse_parts(text):
-        poly, hidden = snap_polygon(it["polygon"], res["segments"], it["edges"])
-        if not plausible(poly, res["outlines"]):
+        k = _scale(res)
+        poly, hidden = snap_polygon(it["polygon"], res["segments"], it["edges"], k)
+        if not plausible(poly, res["outlines"], 25.0 * k * k):
             continue
         out.append({"label": it["label"], "role": it["role"], "polygon": poly, "hidden": hidden, "note": it["note"],
                     "source": "ki"})

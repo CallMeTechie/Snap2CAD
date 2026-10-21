@@ -128,3 +128,16 @@ def test_kontrastwert():
     assert edges.detect(_rect([BOX]), "A4")["contrast"] > 30
     assert edges.detect(_rect([{"rect": [60, 80, 60, 40], "gray": 225}]), "A4")["contrast"] < 20
     assert edges.detect(_rect([]), "A4")["contrast"] is None
+
+
+def test_runder_umriss_per_kreis_fit():
+    """Scheibe: Kreis-Fit am Aussenrand statt Vieleck (dessen Tangentenecken liegen aussen)."""
+    res = edges.detect(_rect([{"circle": [95, 115, 40], "gray": 60}, {"circle": [95, 115, 10], "gray": 238}]), "A4")
+    assert len(res["outlines"]) == 1 and len(res["outlines"][0]["polygon"]) == edges.CIRCLE_VERTS
+    xs = [q[0] for q in res["outlines"][0]["polygon"]]
+    assert abs(max(xs) - min(xs) - 40) <= 0.4
+    assert len(res["holes"]) == 1 and abs(res["holes"][0]["d"] - 10) <= 0.3
+
+
+def test_rechteck_bleibt_vieleck(box):
+    assert len(box["outlines"][0]["polygon"]) == 4

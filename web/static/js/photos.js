@@ -39,7 +39,7 @@ export default async function (main) {
   let selected = null, mode = "both";
   let fmt = "";
   const fmtSel = h("select", { class: "input", style: { minWidth: "200px" }, "aria-label": "Unterlage" },
-    h("option", { value: "" }, "Automatisch erkennen"), h("option", { value: "A4" }, "A4"), h("option", { value: "A3" }, "A3"));
+    h("option", { value: "" }, "Automatisch erkennen"), h("option", { value: "A4" }, "A4"), h("option", { value: "A3" }, "A3"), h("option", { value: "Mini" }, "Mini (kleine Teile)"));
   fmtSel.addEventListener("change", async () => {
     fmt = fmtSel.value;
     const p = cur();
@@ -225,14 +225,15 @@ export default async function (main) {
       [`Höhenlehre ${p.gauge.strip} · `, h("span", { class: "mono" }, `${num(p.gauge.rms_mm, 2)} mm`), " Restfehler · Nullpunkt = Tischebene"]));
 
     const loo = a.loo_mm || {};
+    const lim = p.format === "Mini" ? [0.2, 0.4] : [0.5, 1];   // Ampelgrenzen wie core/matgen verdict_mm
     const bars = h("div", { class: "bars" }, Object.keys(loo).sort((x, y) => x - y).map(id => {
-      const v = loo[id], w = Math.min(100, v * 100);
-      return [h("span", { class: "mono" }, `ID ${id}`), h("span", { class: "bar" }, h("i", { class: v > 1 ? "err" : v > 0.5 ? "warn" : "", style: { width: `${w}%` } }), h("b")),
+      const v = loo[id], w = Math.min(100, v * 50 / lim[0]);   // Balken voll = doppelte Grenze für „brauchbar“
+      return [h("span", { class: "mono" }, `ID ${id}`), h("span", { class: "bar" }, h("i", { class: v > lim[1] ? "err" : v > lim[0] ? "warn" : "", style: { width: `${w}%` } }), h("b")),
         h("span", { class: "mono", style: { textAlign: "right" } }, num(v, 2, false))];
     }));
     const [st, sk] = STATUS[p.status] || [p.status, "off"];
 
-    const gridH = S.project.grid_h || (p.format === "A3" ? 360 : 230);
+    const gridH = S.project.grid_h || ({ A3: 360, Mini: 60 })[p.format] || 230;
     const cx = h("input", { inputmode: "decimal", value: S.project.ctrl_x != null ? num(S.project.ctrl_x, 2) : "", placeholder: "100,0", "aria-label": "Kontrollmaß 0–100 gemessen" });
     const cy = h("input", { inputmode: "decimal", value: S.project.ctrl_y != null ? num(S.project.ctrl_y, 2) : "", placeholder: num(gridH, 1, false), "aria-label": `Raster 0–${gridH} vertikal gemessen` });
     const fac = S.project.factors || [1, 1];

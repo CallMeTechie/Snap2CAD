@@ -34,6 +34,7 @@ function unterlage() {
   return section("unterlage",
     card(
       P("Die Messunterlage ist ein PDF mit 1-mm-Raster und acht ArUco-Markern, dazu auf Wunsch die Höhenlehre zum Aufstellen und eine Kurzanleitung. Ein Ausdruck reicht für beliebig viele Messungen."),
+      P(B("Für kleine Teile (etwa 1–40 mm) gibt es das Format „Mini“:"), " eine Karte von 80 × 60 mm mit 0,5-mm-Raster und kleinen Markern dicht am Teil. Die Karte ausschneiden, plan auf Karton kleben und aus 20–30 cm mit 2×/3×-Zoom fotografieren – nicht im Makro-Modus, dessen Verzeichnung lässt sich nicht herausrechnen. Die entzerrte Draufsicht hat dann 20 statt 10 Bildpunkte pro Millimeter."),
       UL([
         [B("Mit 100 % bzw. „Tatsächliche Größe“ drucken"), " – nie „An Seite anpassen“, sonst stimmt der Maßstab nicht."],
         [B("Kontrollmaß prüfen:"), " die 100-mm-Skala unten links mit einem Stahllineal nachmessen und den Wert ins Feld unten rechts auf dem Blatt schreiben. Denselben Wert auf „Fotos prüfen“ unter „Kontrollmaß vom Ausdruck“ eintragen; daraus entstehen die Korrekturfaktoren für X und Y."],
@@ -67,11 +68,11 @@ function fotos() {
   return section("fotos", card(
     UL([
       [B("Hochladen:"), " Fotos auf die Fläche ziehen, „Dateien auswählen“, am Handy „Foto aufnehmen“ oder ein Bild aus der Zwischenablage mit ", K("Strg"), " + ", K("V"), " einfügen. JPG, PNG und HEIC in Originalauflösung."],
-      [B("Ansicht:"), " oben unter „Ansicht“ festlegen, wofür die nächsten Fotos stehen (Draufsicht, Von unten, Gekippt (Höhe), Höhenlehre, Übersicht). In der Fotoliste lässt sich die Ansicht je Foto nachträglich ändern. „Unterlage“ erkennt A4 oder A3 automatisch oder legt das Format fest."],
-      [B("Ampel und Restfehler:"), " je Foto stehen die erkannten Marker und der größte Restfehler der Entzerrung. Bis 0,5 mm ist das Foto „gut“ (grün), bis 1 mm „brauchbar“ (gelb), darüber „unsicher – wiederholen“ (rot). Unter vier Markern ist es „nicht auswertbar“. Die Balken zeigen den Restfehler je Marker."],
+      [B("Ansicht:"), " oben unter „Ansicht“ festlegen, wofür die nächsten Fotos stehen (Draufsicht, Von unten, Gekippt (Höhe), Höhenlehre, Übersicht). In der Fotoliste lässt sich die Ansicht je Foto nachträglich ändern. „Unterlage“ erkennt A4, A3 oder Mini automatisch oder legt das Format fest."],
+      [B("Ampel und Restfehler:"), " je Foto stehen die erkannten Marker und der größte Restfehler der Entzerrung. Bis 0,5 mm ist das Foto „gut“ (grün), bis 1 mm „brauchbar“ (gelb), darüber „unsicher – wiederholen“ (rot); bei Mini gelten 0,2 und 0,4 mm. Unter vier Markern ist es „nicht auswertbar“. Die Balken zeigen den Restfehler je Marker."],
       [B("Original, Entzerrt, Beide, Höhenlehre:"), " schaltet die Bilder darunter um; ein Klick auf ein Bild öffnet es in größerer Ansicht in einem neuen Tab."],
       [B("Lage der Unteransicht:"), " bei Fotos „Von unten“ zeigt der Kasten „Lage zur Draufsicht“ die Überlagerung. Steht dort „Ausrichtung unsicher“ oder passt die Überlagerung nicht, die richtige Lage wählen (z. B. „seitlich umgedreht“ oder „nach vorn umgedreht“); „Wieder automatisch“ setzt die Wahl zurück."],
-      [B("Kontrollmaß vom Ausdruck:"), " den gemessenen Wert der 100-mm-Skala eintragen, auf Wunsch auch das Raster senkrecht (230 mm bei A4, 360 mm bei A3). Die Faktoren X und Y gelten für alle Fotos des Projekts; leer = Faktor 1."],
+      [B("Kontrollmaß vom Ausdruck:"), " den gemessenen Wert der 100-mm-Skala eintragen, auf Wunsch auch das Raster senkrecht (230 mm bei A4, 360 mm bei A3, 60 mm bei Mini). Die Faktoren X und Y gelten für alle Fotos des Projekts; leer = Faktor 1."],
       [B("Kasten „Werkstück“:"), " Farbe, Material, Transparenz und Oberfläche vor „Kanten erkennen“ setzen. Nur diese Handeingaben steuern die Kantenerkennung (z. B. helle oder durchscheinende Teile); eine Schätzung der KI wirkt dort nicht. „Zurücksetzen“ entfernt die Handeingaben."],
       [B("Kontrastwarnung:"), " „Geringer Kontrast zur Unterlage“ heißt: Licht von der Seite, Schatten vermeiden, bei Glas oder Klarsicht ein Blatt Papier unterlegen."],
     ])));

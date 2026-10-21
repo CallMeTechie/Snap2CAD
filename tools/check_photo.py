@@ -1,7 +1,7 @@
 """Foto einer Messunterlage pruefen und auf die Tischebene entzerren.
 
 Aufruf:
-    python tools/check_photo.py foto.jpg [--size A4|A3] [--out entzerrt.jpg]
+    python tools/check_photo.py foto.jpg [--size A4|A3|Mini] [--out entzerrt.jpg]
 
 Ohne --size wird das Format automatisch erkannt. Gibt die erkannten Marker und den
 Leave-one-out-Restfehler je Marker aus und schreibt eine massstaebliche Draufsicht (10 px/mm).
@@ -20,7 +20,7 @@ LABEL = {"gut": "gut", "brauchbar": "brauchbar", "unsicher": "unsicher – Papie
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("image")
-    ap.add_argument("--size", choices=["A4", "A3"], default=None)
+    ap.add_argument("--size", choices=["A4", "A3", "Mini"], default=None)
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
 
@@ -37,7 +37,7 @@ def main():
         sys.exit(1)
     out = a.out or str(Path(a.image).with_name(Path(a.image).stem + "_entzerrt.jpg"))
     Path(out).write_bytes(vision.encode_jpg(vision.rectify_mat(img, r["homography"], r["format"]), 92))
-    print(f"Draufsicht gespeichert: {out} (10 px/mm, Ursprung unten links)")
+    print(f"Draufsicht gespeichert: {out} ({vision.px_per_mm(r['format']):g} px/mm, Ursprung unten links)")
     if r["gauge"]:
         g, rng = vision.rectify_gauge(img, r["gauge"])
         gout = str(Path(out).with_name(Path(out).stem + "_hoehenlehre.jpg"))
