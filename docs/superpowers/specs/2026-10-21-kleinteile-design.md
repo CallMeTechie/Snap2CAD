@@ -98,8 +98,11 @@ Jedes Messformat hat ein Profil. Die Werte für A4 und A3 sind exakt die heutige
   Kleinteile-Variante (K60H ↔ K60D), wird auf diese umgeschaltet und `format_note` = „Format auf Kleinteile dunkel
   (bzw. hell) geändert“ gesetzt; die Oberfläche zeigt den Hinweis am Foto (§7 F4). Passt sonst keine ID seiner Familie,
   ist das Foto „nicht auswertbar“.
-- `mat_ids` und `missing_ids` beziehen sich auf die Familie des ermittelten Formats (`res["format"]`; bei keinem
-  Format: 0–7 wie heute).
+- `mat_ids` und `missing_ids` beziehen sich auf die Familie des ermittelten Formats (`res["format"]`); ohne Format auf
+  die Familie mit den meisten sichtbaren Markern, bei Gleichstand 0–7 (für A4/A3 wie heute).
+- Ein Formatwechsel per `PATCH /api/photos/{id}` wird mit 400 abgelehnt, wenn das Foto entzerrt ist und keine Marker der
+  neuen Familie zeigt („Auf diesem Foto sind keine Marker für <Anzeigename> zu sehen – Format bleibt.“); Auswertung,
+  Kanten und Teile bleiben. Ergibt das neue `format` nach F4 wieder das aktuelle Format, wird nicht neu ausgewertet.
 - **Qualitätsurteil:** `verdict` bekommt die Schwellen des Profils: gut ≤ 0,5 · k mm, brauchbar ≤ 1,0 · k mm (A4/A3
   0,5/1,0 wie heute, K60 0,125/0,25; §7 F1). Die Restfehler-Balken in `photos.js` nutzen dieselben Schwellen:
   `_photo_public` liefert `quality_mm: [gut, brauchbar]` aus dem Profil von `photos.format` (ohne Format `[0.5, 1.0]`)
@@ -148,20 +151,26 @@ Jedes Messformat hat ein Profil. Die Werte für A4 und A3 sind exakt die heutige
 ### Weg „Feldfarbe“ (Feldart `plain_light`, `plain_dark`)
 
 - Kein Rasterkriterium, kein Gabor-Demodulator, kein Schatten-Veto, kein `sure_bg` aus dem Raster.
-- Feldfarbe: aus dem Randstreifen des Feldes (Breite 8 mm · k) wie heute über `_paper_fit` (Ebene im Lab-Raum).
+- Feldfarbe: aus dem Randstreifen des Feldes (Breite 8 mm · k) über `_paper_fit` (Ebene im Lab-Raum), in einer zweiten
+  Anpassung ohne Ausreißer (Teile, die in den Randstreifen ragen, verschieben die Feldfarbe nicht).
 - Farbabstand: `diff = |L − L_feld| + 2 · Chroma-Abstand`, beidseitig (auf dem dunklen Feld heben sich Teile durch
   Helligkeit ab, auf dem hellen durch Dunkelheit). Schwelle wie heute Otsu mit Mindestwert `COLOR_MIN_DIFF`; Hinweis
   „hell“ senkt sie wie heute (`LIGHT_DIFF_FACTOR`, `LIGHT_MIN_DIFF`).
 - Hinweis „transparent = 2“: wie heute nur Farbmaske, geschlossen über `TRANSP_CLOSE_MM · k`, größte Komponente.
   „transparent = 1“: Schwelle mit `TRANSP_DIFF_FACTOR`, sonst wie der Normalfall.
-- GrabCut wie heute, mit `sure_fg` = erodierte Farbmaske und `sure_bg` = Randstreifen.
+- GrabCut wie heute, mit `sure_fg` = erodierte Farbmaske und `sure_bg` = Randstreifen ohne Ausreißer.
+- `edges.detect` setzt am Anfang einen festen Seed (`cv2.setRNGSeed`): GrabCut zieht aus dem Zufallsgenerator von OpenCV,
+  ohne Seed hängt das Ergebnis von früheren Aufrufen ab. Damit ist die Kantenerkennung für alle Formate reproduzierbar.
 - Bohrungen: wie heute aus der Farbmaske (eine Bohrung zeigt das Feld). Weil auf diesem Weg kein Rasterkriterium die
   Bohrung in der Objektmaske füllt, prüft `detect` die Zugehörigkeit einer Bohrung gegen die Objektmaske nach Füllen
   eingeschlossener Lücken bis zur Bohrungs-Obergrenze des Profils, nicht gegen die Maske selbst (heute: Maske an der
   Bohrungsmitte > 0). Der Raster-Weg bleibt unverändert (Goldwerte). `_fill_unround` gilt unverändert, nutzt aber die
   Bohrungs-Obergrenze des Profils statt `HOLE_MAX_MM2`.
 - Der Kontrastwert (`contrast`) wird wie heute aus `diff` berechnet; der Hinweis „wenig Kontrast“ (< 12) nennt bei K60
-  zusätzlich: „andere Variante probieren (helles Teil auf dunkles Feld, dunkles Teil auf helles Feld)“.
+  zusätzlich: „andere Variante probieren (helles Teil auf das dunkle Blatt, dunkles Teil auf das helle Blatt)“. Bei K60 gilt
+  „wenig Kontrast“ auch, wenn auf einer Draufsicht/Unteransicht kein Umriss gefunden wurde; `POST …/edges` meldet dann 422
+  „Kein Objekt erkannt – andere Variante probieren (helles Teil auf das dunkle Blatt, dunkles Teil auf das helle Blatt) oder
+  Teil von Hand zeichnen.“
 
 ### Zuordnung der Teile (`web/app/parts.py`)
 
@@ -176,9 +185,9 @@ Bildgröße). A4/A3 unverändert.
 
 ## §4 Kontrollmaß (`web/app/geom.py`, `web/app/main.py`)
 
-- `geom.factors(project, ctrl_ref, grid_h)` ersetzt die heutige Signatur `factors(project, fmt, grid_h)` (der Parameter
+- `geom.factors(project, ctrl_ref, grid_h)` (mit F5, §7) ersetzt die heutige Signatur `factors(project, fmt, grid_h)` (der Parameter
   `fmt` wird heute nicht benutzt): `fx = ctrl_x / ctrl_ref` (statt fest `/ 100`), `fy` wie heute über `grid_h`.
-  `ctrl_ref` und `grid_h` kommen aus dem Profil des Projektformats (erstes Foto mit Format wie heute); ohne Format:
+  `ctrl_ref` und `grid_h` kommen aus dem Profil des Projektformats (erstes auswertbares Foto, sonst erstes mit Format); ohne Format:
   100 / keiner wie heute. Aufrufer (`main.py`) und `tests/test_geom.py` werden angepasst.
 - `PATCH /api/projects/{pid}`: Plausibilität ±10 % um `ctrl_ref` (waagerecht, heute fest 100) bzw. `grid_h` (senkrecht,
   Rückfall heute fest 230) des Projektformats; Fehlermeldung nennt den erwarteten Wert wie heute.
@@ -225,7 +234,7 @@ Bildgröße). A4/A3 unverändert.
 - **Goldwerte A4/A3:** Vor der ersten Code-Änderung werden auf main ff95d9b `vision.analyze` und `edges.detect` für die
   bestehenden synthetischen Fotos (`photo_a4`, `photo_a3`, `photo_gauge` und die Objekt-Varianten aus `test_edges.py`)
   ausgeführt und als JSON unter `tests/fixtures/` abgelegt. Ein Test vergleicht danach exakt (Abweichung 0 nach Rundung
-  auf 3 Stellen).
+  auf 3 Stellen). Der Test läuft nur lokal; in der CI wird er übersprungen (Goldwerte sind CPU-abhängig).
 - **Synthetische Kleinteile-Fotos:** `synthetic_photo` bekommt die Messformate K60H/K60D (Seite `mat` bzw. `dark` des
   Druckformats K60; `objects` in mm von `layout(Messformat)`). Gerendert wird mit 30 px/mm, vor dem Verzerren auf
   Rahmen + 10 mm zugeschnitten (rund 3300 × 3900 px statt ganzer A4-Seite), perspektivisch verzerrt, leicht unscharf,
@@ -253,6 +262,11 @@ Bildgröße). A4/A3 unverändert.
 - **F3 Bohrungs-Obergrenze:** K60 bis Ø 40 mm.
 - **F4 Verwechselte Variante:** bei explizit gewählter Kleinteile-Variante und sichtbaren Markern der anderen Variante
   umschalten mit Hinweis; zwischen A4/A3 und Kleinteilen wird nicht umgeschaltet.
+- **F5 Kontrollmaß nach Wechsel der Unterlage** (Plan-Preflight, 21.10.2026): Ein gespeichertes Kontrollmaß außerhalb
+  ±10 % des aktuellen Bezugs (die Unterlage des ersten Fotos hat gewechselt, oder der Wert wurde vor dem ersten Foto
+  eingetragen) wird ignoriert (Faktor 1); die Projekt-API meldet `ctrl_stale: true`, „Fotos prüfen“ zeigt „Das eingetragene
+  Kontrollmaß passt nicht zur Unterlage des ersten Fotos – bitte neu messen und eintragen. Bis dahin gilt Faktor 1.“ Der
+  Wert bleibt gespeichert. Der KI-Auftrag nennt denselben Faktor. Gemischte Projekte zählen nur auswertbare Fotos.
 
 ## Nicht in dieser Stufe
 

@@ -15,9 +15,9 @@
 ## Global Constraints
 
 - Nutzerentscheidungen (Spec „Ziel“ und §7) sind gesetzt: Messfeld 60 × 80 mm; Blatt hell und Blatt dunkel je auf einem eigenen A4-Blatt; Feld ohne Raster; 8 Marker à 8 mm im weißen Rahmen außerhalb des Feldes; IDs 20–27 hell, 30–37 dunkel; Kontrollmaß 50 mm; 30 px/mm; keine Höhenlehre; gemischte Projekte nicht sperren, sondern Hinweis; F1 Qualitätsschwellen mit `k` (K60: gut ≤ 0,125 mm, brauchbar ≤ 0,25 mm); F2 `parts.py` wird mit umgestellt; F3 Bohrung K60 bis Ø 40 mm; F4 vertauschte Kleinteile-Variante → umschalten mit Hinweis (nicht zwischen A4/A3 und Kleinteilen).
-- Namen wörtlich: Messformate `A4`, `A3`, `K60H`, `K60D`; Druckformat `K60`; `matgen.PROFILES`, `matgen.FORMATS` (= `PROFILES`), `matgen.PRINT_FORMATS = {"A4": ("A4",), "A3": ("A3",), "K60": ("K60H", "K60D")}`, `matgen.PRINT_PAGES = {"A4": ("mat", "gauge", "guide"), "A3": ("mat", "gauge", "guide"), "K60": ("mat", "dark", "guide")}`, `matgen.SIBLING = {"K60H": "K60D", "K60D": "K60H"}`, `matgen.edge_scale(fmt)`, `matgen.print_format_of(fmt)`; Layout-Felder `pxmm`, `edge_scale`, `field` (`grid` | `plain_light` | `plain_dark`), `ids`, `ctrl_mm`, `hole_max_mm2`, `quality_mm`, `marker_pos` (`grid` | `frame`), `label`; `vision.rect_pxmm(a)`; Analysefeld `format_note`; `edges.Scale`, `edges.scale_of(fmt)`, Ergebnisfeld `edge_scale`; Projektfelder `ctrl_ref`, `mixed_formats`; Fotofelder `quality_mm`, `n_markers`, `view_note`; JS-Modul `web/static/js/formats.js`; Anleitungsabschnitt `kleinteile`.
+- Namen wörtlich: Messformate `A4`, `A3`, `K60H`, `K60D`; Druckformat `K60`; `matgen.PROFILES`, `matgen.FORMATS` (= `PROFILES`), `matgen.PRINT_FORMATS = {"A4": ("A4",), "A3": ("A3",), "K60": ("K60H", "K60D")}`, `matgen.PRINT_PAGES = {"A4": ("mat", "gauge", "guide"), "A3": ("mat", "gauge", "guide"), "K60": ("mat", "dark", "guide")}`, `matgen.SIBLING = {"K60H": "K60D", "K60D": "K60H"}`, `matgen.edge_scale(fmt)`, `matgen.print_format_of(fmt)`; Layout-Felder `pxmm`, `edge_scale`, `field` (`grid` | `plain_light` | `plain_dark`), `ids`, `ctrl_mm`, `hole_max_mm2`, `quality_mm`, `marker_pos` (`grid` | `frame`), `label`; `vision.rect_pxmm(a)`; Analysefeld `format_note`; `edges.Scale`, `edges.scale_for(fmt)`, Ergebnisfeld `edge_scale`; Projektfelder `ctrl_ref`, `mixed_formats`, `ctrl_stale`; Fotofelder `quality_mm`, `n_markers`, `view_note`; `matgen.ctrl_ref(fmt)`; `vision.pick_candidates(found, fmt)`; `parts.project_format(project_id)`; Parametername `edge_k` (Kantenmaßstab) in `web/app/parts.py` (dort ist `k` schon der Teil-Maßstab); JS-Modul `web/static/js/formats.js`; Anleitungsabschnitt `kleinteile`.
 - Anzeigenamen wörtlich: „Kleinteile hell“, „Kleinteile dunkel“, „Kleinteile“ (Druckformat); Hinweis F4 „Format auf Kleinteile dunkel geändert“ bzw. „Format auf Kleinteile hell geändert“; Höhenlehre auf K60 „Höhenlehre gibt es bei Kleinteilen nicht – Teil kippen und als ‚Gekippt (Höhe)‘ fotografieren“; Fehlermeldung „Format muss A4, A3 oder K60 sein“; gemischte Projekte „Fotos auf verschiedenen Unterlagen – das Kontrollmaß gilt für die Unterlage des ersten Fotos (<Anzeigename>).“
-- A4/A3 bleiben exakt: `tests/test_golden_a4a3.py` (Task 1) muss nach jedem Task grün sein. Alle Profilwerte für A4/A3 sind die heutigen Konstanten; jede neue Formel muss für `k = 1.0`, `pxmm = 10.0` bitgleich die alte Zahl ergeben (Multiplikation mit `1.0` ist exakt – keine Umstellung von Rechenreihenfolgen, die Rundung ändert, z. B. kein `x / k` statt `x * k` bei Längen, außer bei `WORK_PXMM / k`).
+- A4/A3 bleiben exakt: `tests/test_golden_a4a3.py` (Task 1) muss nach jedem Task **lokal** grün sein; in der CI wird er übersprungen (Goldwerte sind CPU-abhängig: diese VM hat nur SSE4.2, die CI-Runner AVX2/AVX-512 – im Preflight gemessen). `tests/fixtures/golden_a4a3.json` wird nach Task 1 nicht mehr geändert; jeder Task-Review prüft `git diff <Task-1-Commit> -- tests/fixtures/golden_a4a3.json` = leer. Alle Profilwerte für A4/A3 sind die heutigen Konstanten; jede neue Formel muss für `k = 1.0`, `pxmm = 10.0` bitgleich die alte Zahl ergeben (Multiplikation mit `1.0` ist exakt – keine Umstellung von Rechenreihenfolgen, die Rundung ändert, z. B. kein `x / k` statt `x * k` bei Längen, außer bei `WORK_PXMM / k`).
 - `core` wird in `web/app/parts.py` und `web/app/jobs.py` **nur funktionslokal** importiert (Muster `jobs._rect_top`); `web/app/main.py` importiert `matgen`, `vision`, `edges` wie bisher.
 - Keine neuen Abhängigkeiten (Python und JS). Keine Datenmigration (`photos.format` ist schon Text).
 - Bestehende Tests werden nur angepasst in `tests/test_geom.py` (neue Signatur `geom.factors`) und `tests/js/help.test.mjs` (`SECTIONS` um `kleinteile`); alle anderen bleiben unverändert grün.
@@ -26,13 +26,15 @@
 - Commits **ohne jede Claude-Attribution** (keine `Co-Authored-By`-Zeile, kein „Generated with“ in PR-Texten) – Nutzerregel geht vor.
 - Protokoll und Skripte nur im Scratchpad: `SP=/tmp/claude-0/-root/13c1f9d5-7997-460c-8690-80c2d3b5962a/scratchpad`, Skripte unter `$SP/kleinteile/`, Protokoll `$SP/kleinteile-protokoll.md`, Playwright `$SP/pw/kleinteile.mjs`; nie im Repo.
 - Umgebung: eigene Läufe mit `export TMPDIR=/root/.cache/snap2cad-tmp` (vorher `mkdir -p`); vor jeder Suite `df -h /tmp` ≥ 1 GB frei, sonst nicht starten und melden; Suiten nie parallel; fremde Ordner in `/tmp` nicht anfassen. Lokal: `source /root/Snap2CAD-venv/bin/activate && cd /root/Snap2CAD && ruff check . && python -m pytest -q -p no:cacheprovider && node --test tests/js/*.test.mjs && for f in web/static/js/*.js; do node --check "$f"; done` (pytest-xdist ist nicht installiert; die Suite läuft seriell, rund 5 Minuten). `tests/test_auth.py::test_unauthenticated_is_rejected` ist in Teilläufen reihenfolgeabhängig (vorbestehend) – nur die volle Suite zählt.
-- Kantenerkennung K60: Toleranzen der Tests (±0,1 mm) werden **nicht** gelockert. Scheitert ein Genauigkeitstest, wird die Ursache mit superpowers:systematic-debugging gesucht (z. B. Schwelle, Kern, Randstreifen) und innerhalb des Spec-Designs behoben; jede Abweichung vom Plan-Code wird im Report als Ruling begründet.
+- Kantenerkennung K60: Toleranzen der Tests (±0,1 mm) werden **nicht** gelockert. Scheitert ein Genauigkeitstest, wird die Ursache mit superpowers:systematic-debugging gesucht (z. B. Schwelle, Kern, Randstreifen) und innerhalb des Spec-Designs behoben; jede Abweichung vom Plan-Code wird im Report als Ruling begründet. Zeitbox: höchstens zwei Debugging-Runden (je Runde Hypothese, Messung, Änderung im Report); danach meldet der Implementer BLOCKED mit den gemessenen Abweichungen je Fall, und der Controller legt Marc die Entscheidung als Frage mit Optionen vor.
+- Bildkette (statt Einzelauswahl am Ende der Tasks 2–7, rund 3 Minuten): `python -m pytest -q -p no:cacheprovider tests/test_golden_a4a3.py tests/test_kleinteile.py tests/test_api.py tests/test_align.py tests/test_check.py tests/test_core.py tests/test_edges.py tests/test_edges_api.py tests/test_geom.py tests/test_parts.py tests/test_parts_api.py` (in Task 2 ohne `tests/test_kleinteile.py`, das erst Task 3 anlegt).
+- Rulings aus dem Plan-Preflight (21.10.2026): (R1) `edges.detect` setzt am Anfang `cv2.setRNGSeed(12345)` – GrabCut zieht aus `cv::theRNG`, ohne Seed hängt das Ergebnis von früheren Aufrufen ab (gemessen); die Goldwerte entstehen mit demselben Seed direkt vor `detect` und bleiben gleich. (R2) Ohne erkanntes Format beziehen sich `mat_ids`/`missing_ids` auf die Marker-Familie mit den meisten sichtbaren Markern (bei Gleichstand 0–7, also für A4/A3 wie heute). (R3) Ein Formatwechsel per `PATCH /api/photos/{id}` wird mit 400 abgelehnt, wenn das Foto entzerrt ist und keine Marker der neuen Familie zeigt (Auswertung, Kanten und Teile bleiben). (R4) Goldwerte in der CI übersprungen (siehe oben). Marc-Entscheidung F5 (Spec §7): ein gespeichertes Kontrollmaß außerhalb ±10 % des aktuellen Bezugs wird ignoriert (Faktor 1), `ctrl_stale` meldet es, die Oberfläche zeigt einen Hinweis.
 
 ## Review Focus
 
 1. Ein Kleinteile-Blatt liegt auf der A4-Unterlage und beide sind im Foto: Snap2CAD nimmt das Kleinteile-Format, nicht A4 (Task 3 `test_k60_auf_a4_unterlage_gewinnt`).
 2. Ein Teil ragt über den Feldrand hinaus: keine Ausnahme, der Umriss endet am Feld (Task 5 `test_k60_teil_ueber_feldrand`).
-3. Falsche Variante (dunkles Teil auf dem dunklen Blatt): kein Absturz, wenig Kontrast oder kein Umriss, und der Kontrasthinweis nennt die andere Variante (Task 5 `test_k60_falsche_variante_wenig_kontrast`, Task 8 `lowContrastText`).
+3. Falsche Variante (dunkles Teil auf dem dunklen Blatt): kein Absturz, kein Umriss, `low_contrast` ist trotzdem wahr und Kontrasthinweis wie 422-Meldung nennen die andere Variante (Task 5 `test_k60_falsche_variante_wenig_kontrast`, Task 7 `test_k60_api_falsche_variante_hinweis`, Task 8 `lowContrastText`).
 4. Ein Projekt mischt A4- und Kleinteile-Fotos: Kontrollmaß-Bezug kommt vom ersten Foto, `mixed_formats` ist wahr, die Oberfläche zeigt den Hinweis (Task 7 `test_k60_api_gemischt`, Task 8 `mixedText`).
 5. Ein Eckpunkt eines Teils liegt knapp außerhalb des kleinen Feldes: erlaubt bis 2,5 mm, darüber 400 – nicht 10 mm wie bei A4 (Task 6 `test_k60_api_eckpunkt_spielraum`).
 
@@ -64,8 +66,10 @@ Neu erzeugen nur auf dem unveraenderten Stand (Plan Kleinteile, Task 1):
 import hashlib
 import json
 import os
+import subprocess
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 
@@ -73,6 +77,8 @@ from conftest import synthetic_photo
 from core import edges, vision
 
 GOLDEN = Path(__file__).parent / "fixtures" / "golden_a4a3.json"
+pytestmark = pytest.mark.skipif(os.environ.get("GITHUB_ACTIONS") == "true",
+                                reason="Goldwerte sind CPU-abhaengig (lokal SSE4.2, CI AVX2/AVX-512); A4/A3 wird lokal geprueft")
 BOX = {"rect": [60, 80, 60, 40], "gray": 150}
 PLATE = {"rect": [50, 105, 80, 20], "gray": 90}
 HOLE = {"circle": [90, 115, 5], "gray": 235}
@@ -98,6 +104,11 @@ CASES = {
     "a4_l_bohrung": ("A4", 0, {"objects": [{"polygon": L_SHAPE, "gray": 150}, {"circle": [110, 87.5, 5], "gray": 235}]},
                      "A4", {}),
     "a3_quader": ("A3", 0, {"objects": [BOX]}, "A3", {}),
+    "a4_viele": ("A4", 0, {"objects": [{"rect": [30 + 20 * i, 30 + 22 * j, 15, 15], "gray": 120}
+                                       for i in range(6) for j in range(7)]}, "A4", {}),
+    "a4_glas_ohne": ("A4", 0, {"objects": [GLASS]}, "A4", {}),
+    "a4_grau225_ohne": ("A4", 0, {"objects": [{"rect": [60, 80, 60, 40], "gray": 225}]}, "A4", {}),
+    "a4_hoehenlehre_auto": ("A4", 1, {"tilt": 0.03}, None, None),
 }
 
 
@@ -111,6 +122,7 @@ def _snap(name: str) -> dict:
         out["rect_shape"] = list(rect.shape)
         out["rect_md5"] = hashlib.md5(np.ascontiguousarray(rect).tobytes()).hexdigest()
         if hints is not None:
+            cv2.setRNGSeed(12345)  # GrabCut zieht aus cv::theRNG; ab Task 4 setzt detect denselben Seed selbst
             out["detect"] = edges.detect(rect, a["format"], hints)
     return json.loads(json.dumps(out))  # Tupel -> Listen, int-Schluessel -> str (wie im JSON)
 
@@ -123,7 +135,8 @@ def _same(old, new, path="$"):
             assert k in new, f"{path}.{k} fehlt"
             _same(v, new[k], f"{path}.{k}")
     elif isinstance(old, list):
-        assert isinstance(new, list) and len(new) == len(old), f"{path}: Laenge {len(old)} -> {len(new) if isinstance(new, list) else new}"
+        assert isinstance(new, list), f"{path}: keine Liste"
+        assert len(new) == len(old), f"{path}: Laenge {len(old)} -> {len(new)}"
         for i, (a, b) in enumerate(zip(old, new, strict=True)):
             _same(a, b, f"{path}[{i}]")
     elif isinstance(old, float) or isinstance(new, float):
@@ -136,6 +149,9 @@ def _same(old, new, path="$"):
 @pytest.fixture(scope="module")
 def golden() -> dict:
     if os.environ.get("SNAP2CAD_WRITE_GOLDEN") == "1":
+        root = Path(__file__).resolve().parents[1]
+        unchanged = subprocess.run(["git", "diff", "--quiet", "ff95d9b", "--", "core", "web", "tests/conftest.py"], cwd=root)
+        assert unchanged.returncode == 0, "Goldwerte nur auf dem unveraenderten Stand erzeugen"
         GOLDEN.write_text(json.dumps({n: _snap(n) for n in CASES}, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     return json.loads(GOLDEN.read_text(encoding="utf-8"))
 
@@ -160,7 +176,7 @@ for n, v in g.items():
     print(n, v["analyze"]["format"], v["analyze"]["status"], len(d.get("outlines", [])), len(d.get("holes", [])), v.get("rect_md5", "-")[:8])
 EOF
 ```
-Expected: beide Läufe 15 passed. Die Übersicht zeigt `a4_standard A4 gut 1 0`, `a4_zwei A4 gut 1 1`, `a4_leer A4 gut 0 0`, `a4_hoehenlehre A4 gut - -` (ohne Kanten), `a3_quader A3 gut 1 0`; die Datei ist kleiner als 1 MB (`ls -la tests/fixtures/golden_a4a3.json`).
+Expected: beide Läufe 19 passed. Die Übersicht zeigt `a4_standard A4 gut 1 0`, `a4_zwei A4 gut 1 1`, `a4_leer A4 gut 0 0`, `a4_hoehenlehre A4 nicht_auswertbar 0 0 -` (die Höhenlehren-Seite hat nur die IDs 10–15; ohne Kanten), `a3_quader A3 gut 1 0`; die Datei ist kleiner als 1 MB (`ls -la tests/fixtures/golden_a4a3.json`). Zusätzlich die Reihenfolge-Unabhängigkeit prüfen: `python -m pytest -q -p no:cacheprovider tests/test_edges.py tests/test_golden_a4a3.py` → alles grün (der Seed vor `detect` macht die Goldwerte unabhängig von früheren GrabCut-Aufrufen).
 
 - [ ] **Step 4: Ruff und Commit**
 
@@ -177,6 +193,7 @@ git commit -m "Kleinteile: Goldwerte A4/A3 auf dem unveraenderten Stand"
 **Files:**
 - Modify: `core/matgen.py` (Konstanten `FORMATS`/`PAGES` am Dateiende ersetzen; neue Funktionen `k60_page`, `k60_guide_page`, `_profile_fields`, `edge_scale`, `print_format_of`; `_spec`, `build`, `__main__`)
 - Modify: `generator/make_mat.py`
+- Modify: `core/vision.py:121` (Übergang bis Task 3: Automatik nur über A4/A3; Task 3 ersetzt die Stelle durch `pick_candidates`)
 - Test: `tests/test_core.py` (neue Tests am Ende; bestehende bleiben unverändert)
 
 **Interfaces:**
@@ -184,25 +201,13 @@ git commit -m "Kleinteile: Goldwerte A4/A3 auf dem unveraenderten Stand"
 - Produces:
   - `PROFILES: dict[str, dict]` mit Schlüsseln `A4`, `A3`, `K60H`, `K60D`; je Profil `page`, `marker_mm`, `ids` (Tupel), `field`, `pxmm`, `edge_scale`, `ctrl_mm`, `hole_max_mm2`, `quality_mm` (Tupel gut, brauchbar), `gauge` (bool), `border_bgr` (Tupel), `label`.
   - `FORMATS = PROFILES` (Messformate; `fmt in FORMATS` bleibt die Prüfung für Messformate), `PRINT_FORMATS`, `PRINT_PAGES`, `PAGES = ("mat", "gauge", "guide")` (bisheriger Name, Seiten von A4/A3), `SIBLING`.
-  - `edge_scale(fmt: str | None) -> float` (1.0 ohne bekanntes Format), `print_format_of(fmt: str | None) -> str | None`.
+  - `edge_scale(fmt: str | None) -> float` (1.0 ohne bekanntes Format), `ctrl_ref(fmt: str | None) -> float` (waagerechtes Kontrollmaß, 100.0 ohne bekanntes Format), `print_format_of(fmt: str | None) -> str | None`.
   - `layout(fmt)` für Messformate: bisherige Felder plus `pxmm`, `edge_scale`, `field`, `ids` (Liste), `ctrl_mm`, `hole_max_mm2`, `quality_mm` (Liste), `marker_pos`, `label`; K60 ohne `height_gauge`; `grid_mm == [60, 80]`, `grid_origin_on_page_mm == [75.0, 170.0]`.
   - `build(out, fmt="A4", pages=None, header="")` für **Druckformate**; Rückgabe bei A4/A3 wie bisher das Layout, bei K60 `{"K60H": layout, "K60D": layout}`; `ValueError("Format muss A4, A3 oder K60 sein")` sonst (auch für `K60H`).
 
 - [ ] **Step 1: Tests schreiben** (an das Ende von `tests/test_core.py`)
 
 ```python
-def _render(pdf_bytes: bytes, page: int, px: float):
-    import cv2
-    import numpy as np
-    import pypdfium2 as pdfium
-    pdf = pdfium.PdfDocument(pdf_bytes)
-    try:
-        img = pdf[page].render(scale=px * 25.4 / 72).to_pil().convert("RGB")
-    finally:
-        pdf.close()
-    return cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
-
-
 def _pages(pdf_bytes: bytes) -> int:
     import pypdfium2 as pdfium
     pdf = pdfium.PdfDocument(pdf_bytes)
@@ -219,7 +224,8 @@ def test_profile_a4_a3_unveraendert():
         assert "height_gauge" in sp
 
 
-@pytest.mark.parametrize("f,ids,field", [("K60H", list(range(20, 28)), "plain_light"), ("K60D", list(range(30, 38)), "plain_dark")])
+@pytest.mark.parametrize("f,ids,field", [("K60H", list(range(20, 28)), "plain_light"),
+                                         ("K60D", list(range(30, 38)), "plain_dark")])
 def test_profile_k60(f, ids, field):
     sp = matgen.layout(f)
     assert sp["grid_mm"] == [60, 80] and sp["marker_size_mm"] == 8.0 and sp["grid_origin_on_page_mm"] == [75.0, 170.0]
@@ -238,26 +244,40 @@ def test_print_formats_und_helfer():
     assert matgen.print_format_of("K60D") == "K60" and matgen.print_format_of("A3") == "A3"
     assert matgen.print_format_of(None) is None and matgen.print_format_of("A5") is None
     assert matgen.edge_scale("K60H") == 0.25 and matgen.edge_scale("A4") == 1.0 and matgen.edge_scale(None) == 1.0
+    assert matgen.ctrl_ref("K60D") == 50.0 and matgen.ctrl_ref("A3") == 100.0 and matgen.ctrl_ref(None) == 100.0
     assert matgen.SIBLING == {"K60H": "K60D", "K60D": "K60H"}
 
 
 def test_k60_pdf_drei_seiten_und_marker_erkennbar():
+    from conftest import _render_page
     buf = io.BytesIO()
     spec = matgen.build(buf, "K60", header="Werkstatt Test")
     assert set(spec) == {"K60H", "K60D"}
-    data = buf.getvalue()
-    assert _pages(data) == 3
+    assert _pages(buf.getvalue()) == 3
     for i, f in enumerate(("K60H", "K60D")):
-        assert sorted(vision.detect(_render(data, i, 12.0))) == spec[f]["ids"]
+        assert sorted(vision.detect(_render_page("K60", i, 12.0))) == spec[f]["ids"]
+
+
+def test_k60_spezifikationszeile_wie_layout():
+    import pypdfium2 as pdfium
+    buf = io.BytesIO()
+    spec = matgen.build(buf, "K60")
+    pdf = pdfium.PdfDocument(buf.getvalue())
+    try:
+        for i, f in enumerate(("K60H", "K60D")):
+            txt = pdf[i].get_textpage().get_text_range()
+            assert f"Kante {matgen.fmt(spec[f]['marker_size_mm'])} mm" in txt
+            for k, (x, y) in spec[f]["centers_mm"].items():
+                assert f"ID{k} ({matgen.fmt(x)}|{matgen.fmt(y)})" in txt, (f, k)
+    finally:
+        pdf.close()
 
 
 def test_k60_feldfarbe_und_ueberstand():
-    data = io.BytesIO()
-    matgen.build(data, "K60")
-    data = data.getvalue()
+    from conftest import _render_page
     px = 12.0
     for i, (lo, hi) in enumerate(((235, 256), (0, 60))):
-        img = _render(data, i, px)
+        img = _render_page("K60", i, px)
         h = img.shape[0]
         for x_mm, y_mm in ((105, 210), (75.5, 170.5), (134.5, 249.5)):  # Feldmitte und 0,5 mm innerhalb der Feldecken
             v = int(img[int(h - y_mm * px), int(x_mm * px)].mean())
@@ -321,6 +341,10 @@ def edge_scale(fmt: str | None) -> float:
     return PROFILES[fmt]["edge_scale"] if fmt in PROFILES else 1.0
 
 
+def ctrl_ref(fmt: str | None) -> float:
+    return float(PROFILES[fmt]["ctrl_mm"]) if fmt in PROFILES else 100.0
+
+
 def print_format_of(fmt: str | None) -> str | None:
     return next((p for p, fs in PRINT_FORMATS.items() if fmt in fs), None)
 
@@ -337,10 +361,10 @@ def _profile_fields(fmt: str) -> dict:
 - [ ] **Step 4: Kleinteile-Blatt** – nach `strip_page` einfügen:
 
 ```python
-def k60_page(c, W, H, fmt):
+def k60_page(c, W, H, label):
     """Kleinteile-Blatt (Spec Kleinteile §1): Feld 60 x 80 mm ohne Raster, hell oder dunkel; Skala und 8 Marker im
-    weissen Rahmen ausserhalb des Feldes. Rueckgabe wie mat_page, Koordinaten ab Feldecke unten links."""
-    p = PROFILES[fmt]
+    weissen Rahmen ausserhalb des Feldes. label = K60H | K60D. Rueckgabe wie mat_page, Koordinaten ab Feldecke unten links."""
+    p = PROFILES[label]
     fw, fh = K60_FIELD
     gx, gy = K60_ORIGIN
     s, off, t0 = p["marker_mm"], K60_OFF, K60_TICK0
@@ -404,8 +428,8 @@ def k60_page(c, W, H, fmt):
     c.drawRightString((W - m) * mm, (H - m - 6) * mm, "Drucken mit 100 % / Tatsächliche Größe")
     c.setFont("Helvetica", 7)
     c.setFillColor(MUTED)
-    c.drawRightString((W - m) * mm, (H - m - 10.5) * mm,
-                      "Tintenstrahl, mattes Papier · nicht „An Seite anpassen“" if dark else "nicht „An Seite anpassen“ · Papier plan auflegen")
+    hint = "Tintenstrahl, mattes Papier · nicht „An Seite anpassen“" if dark else "nicht „An Seite anpassen“ · Papier plan auflegen"
+    c.drawRightString((W - m) * mm, (H - m - 10.5) * mm, hint)
 
     # Kontrollmass 50 mm und Eintragsfeld
     by, bx = 128.0, gx + 5
@@ -446,15 +470,16 @@ def k60_page(c, W, H, fmt):
         c.drawString(fx * mm, (by - 32 - n * 4.2) * mm, t)
 
     # Selbstbeschreibende Spezifikation
-    sp = "  ".join(f"ID{i} ({fmt_mm(px)}|{fmt_mm(py)})" for i, (px, py) in pos.items())
+    sp = "  ".join(f"ID{i} ({fmt(px)}|{fmt(py)})" for i, (px, py) in pos.items())
     c.setFont("Helvetica", 4.6)
     c.setFillColor(MUTED)
-    c.drawString(m * mm, (m - 0.5) * mm, f"ArUco DICT_4X4_50 · Kante {fmt_mm(s)} mm · Mittelpunkte in mm ab Feldecke unten links: {sp}")
+    c.drawString(m * mm, (m - 0.5) * mm,
+                 f"ArUco DICT_4X4_50 · Kante {fmt(s)} mm · Mittelpunkte in mm ab Feldecke unten links: {sp}")
     return {"grid_mm": [fw, fh], "marker_size_mm": s, "centers_mm": {str(k): v for k, v in pos.items()},
             "grid_origin_on_page_mm": [gx, gy]}
 ```
 
-Hinweis zum Namen: Die bestehende Funktion heißt `fmt(v)` (Zahl mit Komma). In `k60_page` verdeckt der Parameter `fmt` diese Funktion – deshalb im Rumpf von `k60_page` **nicht** `fmt(...)` aufrufen, sondern auf Modulebene direkt unter der Definition von `fmt` einen Alias anlegen: `fmt_mm = fmt`, und in `k60_page` `fmt_mm(...)` benutzen.
+Der Parameter heißt wie bei `mat_page`/`strip_page`/`guide_page` `label`, damit er die Zahlenformatierung `fmt(v)` nicht verdeckt.
 
 - [ ] **Step 5: Anleitungsseite Kleinteile** – nach `guide_page` einfügen:
 
@@ -584,18 +609,20 @@ if __name__ == "__main__":
 
 `generator/make_mat.py`: Import `from core.matgen import PRINT_FORMATS, build` und `specs = {f: build(f"{out}/Messunterlage_{f}.pdf", f) for f in PRINT_FORMATS}`.
 
+Übergang in `core/vision.py:121` (bis Task 3; ohne ihn wirft `analyze(img)` mit `fmt=None` `KeyError: 0`, weil die K60-Layouts die IDs 20–37 haben): `cands = [fmt] if fmt in FORMATS else ["A4", "A3"]`.
+
 Vor dem Lauf: `grep -rn "matgen.FORMATS\[\|FORMATS\[" core web tools generator tests` – außer `matgen.py` selbst darf niemand `FORMATS[fmt]` als Tupel `(Seite, Kante)` lesen; Fundstellen auf `PROFILES[fmt]["page"]` / `["marker_mm"]` umstellen.
 
 - [ ] **Step 7: Tests laufen lassen**
 
-Run: `python -m pytest -q -p no:cacheprovider tests/test_core.py tests/test_golden_a4a3.py`
-Expected: PASS (alle bisherigen und neuen Tests in `test_core.py`, 15 Goldwert-Tests). Sichtprüfung: `python generator/make_mat.py $SP/kleinteile/pdf > /dev/null` (vorher `mkdir -p $SP/kleinteile/pdf`), dann Seite 1 und 2 von `Messunterlage_K60.pdf` mit 6 px/mm rendern und ansehen (Read auf ein PNG): Feld frei von Linien, Skala außen, Marker ohne Überlappung mit Beschriftungen.
+Run: Bildkette ohne `tests/test_kleinteile.py` (Global Constraints).
+Expected: PASS (alle bisherigen und neuen Tests in `test_core.py`, 19 Goldwert-Tests). Sichtprüfung: `python generator/make_mat.py $SP/kleinteile/pdf > /dev/null` (vorher `mkdir -p $SP/kleinteile/pdf`), dann Seite 1 und 2 von `Messunterlage_K60.pdf` mit 6 px/mm rendern und ansehen (Read auf ein PNG): Feld frei von Linien, Skala außen, Marker ohne Überlappung mit Beschriftungen.
 
 - [ ] **Step 8: Ruff und Commit**
 
 ```bash
-ruff check core/matgen.py generator/make_mat.py tests/test_core.py
-git add core/matgen.py generator/make_mat.py tests/test_core.py
+ruff check core/matgen.py core/vision.py generator/make_mat.py tests/test_core.py
+git add core/matgen.py core/vision.py generator/make_mat.py tests/test_core.py
 git commit -m "Kleinteile: Formatprofile, Druckformat K60 mit Blatt hell/dunkel und Anleitung"
 ```
 
@@ -605,7 +632,8 @@ git commit -m "Kleinteile: Formatprofile, Druckformat K60 mit Blatt hell/dunkel 
 
 **Files:**
 - Modify: `tests/conftest.py` (`_render_k60` neu, `synthetic_photo` erweitert)
-- Modify: `core/vision.py` (Import, `spec`-Cache, `rect_pxmm`, `verdict`, `_pick`, `analyze`, `rectify_mat`, `bottom_warp_matrix`, `bottom_warp`)
+- Modify: `core/vision.py` (Import, `spec`-Cache, `rect_pxmm`, `verdict`, `pick_candidates`, `analyze`, `rectify_mat`, `bottom_warp_matrix`, `bottom_warp`)
+- Modify: `web/app/main.py:1043` (`_analyze_store`: `rect.pxmm` aus dem Profil – sonst speichert ein K60-Upload ab hier `pxmm = 10` zu einem Bild mit 30 px/mm)
 - Create: `tests/test_kleinteile.py` (Abschnitt „Erkennung“; spätere Tasks ergänzen weitere Abschnitte)
 
 **Interfaces:**
@@ -613,7 +641,7 @@ git commit -m "Kleinteile: Formatprofile, Druckformat K60 mit Blatt hell/dunkel 
 - Produces:
   - `conftest._render_k60(fmt: str, px: float) -> tuple[np.ndarray, tuple[float, float]]` – Ausschnitt Feld + 30 mm Rand, Rückgabe (BGR-Bild, Feldursprung im Bild in mm von unten links = `(30.0, 30.0)`).
   - `conftest.synthetic_photo("K60H" | "K60D", objects=[…])` – Objekte in mm des Feldes; gerendert mit 30 px/mm; `page` wird bei K60 ignoriert; `objects=None` bei K60 = keine Objekte.
-  - `vision.rect_pxmm(a: dict | None) -> float`; `vision.verdict(n_markers, max_err, quality=(0.5, 1.0))`; `vision.analyze(img, fmt=None)` mit `format_note` (nur wenn F4 umschaltet); `vision.rectify_mat(img, H, fmt, pxmm=None)`; `vision.bottom_warp_matrix(analysis_bot, analysis_top, pxmm_out=None)`; `vision.bottom_warp(rect_bot, analysis_bot, analysis_top=None, pxmm_out=None)`.
+  - `vision.rect_pxmm(a: dict | None) -> float`; `vision.verdict(n_markers, max_err, quality=(0.5, 1.0))`; `vision.pick_candidates(found: dict, fmt: str | None) -> tuple[list[str], str | None]` (öffentlich, Task 7 nutzt sie für R3); `vision.analyze(img, fmt=None)` mit `format_note` (nur wenn F4 umschaltet); `vision.rectify_mat(img, H, fmt, pxmm=None)`; `vision.bottom_warp_matrix(analysis_bot, analysis_top, pxmm_out=None)`; `vision.bottom_warp(rect_bot, analysis_bot, analysis_top=None, pxmm_out=None)`.
 
 - [ ] **Step 1: `conftest.py` erweitern** – nach `_render_page` einfügen:
 
@@ -669,8 +697,6 @@ In `synthetic_photo` die Zeilen von `px = 6.0` bis vor `for o in objects if shad
 
 ```python
 """Kleinteile-Unterlage K60 (Spec 2026-10-21-kleinteile): Erkennung, Kanten, Teile, API."""
-import math
-
 import numpy as np
 import pytest
 
@@ -729,6 +755,7 @@ def test_k60_drei_marker_nicht_auswertbar():
             cv2.rectangle(sheet, (cx - 72, cy - 72), (cx + 72, cy + 72), (255, 255, 255), -1)
     a = vision.analyze(sheet)
     assert a["status"] == "nicht_auswertbar" and a["homography"] is None and a["format"] is None
+    assert a["mat_ids"] == [20, 21, 22] and a["missing_ids"] == [23, 24, 25, 26, 27]  # R2: Familie mit den meisten Markern
 
 
 def test_rect_pxmm_und_verdict():
@@ -779,7 +806,7 @@ def verdict(n_markers: int, max_err: float | None, quality: tuple = (0.5, 1.0)) 
     return "unsicher"
 
 
-def _pick(found: dict, fmt: str | None) -> tuple[list[str], str | None]:
+def pick_candidates(found: dict, fmt: str | None) -> tuple[list[str], str | None]:
     """Kandidaten fuer die Entzerrung und Hinweis (Spec Kleinteile §2 und §7 F4)."""
     def n(f):
         return sum(1 for i in PROFILES[f]["ids"] if i in found)
@@ -807,7 +834,7 @@ def analyze(img: np.ndarray, fmt: str | None = None) -> dict:
     found = detect(img)
     h, w = img.shape[:2]
     res: dict = {"width": w, "height": h, "found_ids": sorted(found)}
-    cands, note = _pick(found, fmt)
+    cands, note = pick_candidates(found, fmt)
     if cands:
         scored = []
         for f in cands:
@@ -826,7 +853,11 @@ def analyze(img: np.ndarray, fmt: str | None = None) -> dict:
             res["format_note"] = note
     else:
         f0 = fmt if fmt in FORMATS else None
-        all_ids = PROFILES[f0]["ids"] if f0 else tuple(range(8))
+        if f0:
+            all_ids = PROFILES[f0]["ids"]
+        else:  # R2: Familie mit den meisten sichtbaren Markern, bei Gleichstand 0-7 (A4/A3 wie bisher)
+            fams = {p["ids"] for p in PROFILES.values()}
+            all_ids = max(fams, key=lambda ids: (sum(1 for i in ids if i in found), ids == tuple(range(8))))
         res["mat_ids"] = sorted(i for i in found if i in all_ids)
         res["missing_ids"] = [i for i in all_ids if i not in found]
         res.update(format=f0, homography=None, rms_mm=None, loo_mm={}, max_err_mm=None)
@@ -887,16 +918,37 @@ def bottom_warp(rect_bot: np.ndarray, analysis_bot: dict, analysis_top: dict | N
                           flags=cv2.INTER_LINEAR, borderValue=border)
 ```
 
+`web/app/main.py` `_analyze_store`: `a["rect"] = {"pxmm": matgen.PROFILES[a["format"]]["pxmm"], …}` statt `vision.PX_PER_MM` (`gauge_rect` bleibt bei `vision.PX_PER_MM`).
+
 - [ ] **Step 5: Tests laufen lassen**
 
-Run: `python -m pytest -q -p no:cacheprovider tests/test_kleinteile.py tests/test_core.py tests/test_align.py tests/test_golden_a4a3.py`
+Run: Bildkette (Global Constraints).
 Expected: PASS.
+
+- [ ] **Step 5b: Machbarkeitsprobe Genauigkeit (Scratchpad, nicht im Repo)** – trennt Foto und Entzerrung von der Kantenerkennung, bevor Task 4/5 beginnen:
+
+```bash
+TMPDIR=/root/.cache/snap2cad-tmp python - <<'EOF'
+import sys; sys.path.insert(0, "tests"); sys.path.insert(0, ".")
+import cv2
+from conftest import synthetic_photo
+from core import vision
+img = vision.load_image(synthetic_photo("K60H", objects=[{"rect": [28.5, 38.5, 3, 3], "gray": 60}]))
+a = vision.analyze(img, "K60H")
+rect = vision.rectify_mat(img, a["homography"], "K60H")
+g = cv2.cvtColor(rect, cv2.COLOR_BGR2GRAY)
+_, m = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+c = max(cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)[0], key=cv2.contourArea)
+print(a["max_err_mm"], [round(v / 30, 3) for v in cv2.minAreaRect(c)[1]])
+EOF
+```
+Expected: Restfehler ≤ 0,125 mm und beide Seiten 3,0 ± 0,05 mm. Liegt ein Wert außerhalb, liegt die Ursache in Testfoto oder Entzerrung – vor Task 4 klären (Report), nicht in Task 5.
 
 - [ ] **Step 6: Ruff und Commit**
 
 ```bash
-ruff check core/vision.py tests/conftest.py tests/test_kleinteile.py
-git add core/vision.py tests/conftest.py tests/test_kleinteile.py
+ruff check core/vision.py web/app/main.py tests/conftest.py tests/test_kleinteile.py
+git add core/vision.py web/app/main.py tests/conftest.py tests/test_kleinteile.py
 git commit -m "Kleinteile: Formaterkennung nach Marker-Familie, Entzerrung mit Profil, synthetische K60-Fotos"
 ```
 
@@ -910,7 +962,7 @@ git commit -m "Kleinteile: Formaterkennung nach Marker-Familie, Entzerrung mit P
 
 **Interfaces:**
 - Consumes: `vision.spec(fmt)` mit `pxmm`, `edge_scale`, `field`, `hole_max_mm2`, `marker_pos` (Task 2/3).
-- Produces: `edges.Scale` (frozen dataclass: `pxmm`, `work`, `k`, `field`, `hole_max`, `frame`), `edges.scale_of(fmt) -> Scale`; `detect(...)` liefert zusätzlich `edge_scale` (= `k`), `px_per_mm` = `pxmm` des Profils. Alle internen Funktionen nehmen `sc: Scale`. Für A4/A3 ändert sich kein Ergebnis (Goldwerte).
+- Produces: `edges.Scale` (frozen dataclass: `pxmm`, `work`, `k`, `field`, `hole_max`, `frame`), `edges.scale_for(fmt) -> Scale`; `detect(...)` liefert zusätzlich `edge_scale` (= `k`), `px_per_mm` = `pxmm` des Profils. Alle internen Funktionen nehmen `sc: Scale`. Für A4/A3 ändert sich kein Ergebnis (Goldwerte).
 
 - [ ] **Step 1: Test schreiben** (an `tests/test_kleinteile.py` anhängen)
 
@@ -918,9 +970,9 @@ git commit -m "Kleinteile: Formaterkennung nach Marker-Familie, Entzerrung mit P
 # ------------------------------------------------------------------ Kantenmassstab (§3)
 
 
-def test_scale_of_profile():
+def test_scale_for_profile():
     from core import edges
-    a4, k = edges.scale_of("A4"), edges.scale_of("K60D")
+    a4, k = edges.scale_for("A4"), edges.scale_for("K60D")
     assert (a4.pxmm, a4.work, a4.k, a4.field, a4.hole_max, a4.frame) == (10.0, 4.0, 1.0, "grid", 2000.0, False)
     assert (k.pxmm, k.work, k.k, k.field, k.frame) == (30.0, 16.0, 0.25, "plain_dark", True)
     assert k.hole_max == pytest.approx(1256.6, abs=0.1)
@@ -928,10 +980,10 @@ def test_scale_of_profile():
 
 - [ ] **Step 2: Test laufen lassen, er scheitert**
 
-Run: `python -m pytest -q -p no:cacheprovider tests/test_kleinteile.py -k scale_of`
-Expected: FAIL (`AttributeError: module 'core.edges' has no attribute 'scale_of'`).
+Run: `python -m pytest -q -p no:cacheprovider tests/test_kleinteile.py -k scale_for`
+Expected: FAIL (`AttributeError: module 'core.edges' has no attribute 'scale_for'`).
 
-- [ ] **Step 3: `Scale` und `scale_of`** – nach den Konstanten einfügen (`from dataclasses import dataclass` zu den Importen; Modulkonstanten bleiben als Grundwerte für `k = 1` stehen, Kopfkommentar Zeile 3: „Eingabe: rect.jpg (Massstab aus dem Profil, genau die Feldflaeche)“):
+- [ ] **Step 3: `Scale` und `scale_for`** – nach den Konstanten einfügen (`from dataclasses import dataclass` zu den Importen; Modulkonstanten bleiben als Grundwerte für `k = 1` stehen, Kopfkommentar Zeile 3: „Eingabe: rect.jpg (Massstab aus dem Profil, genau die Feldflaeche)“):
 
 ```python
 @dataclass(frozen=True)
@@ -945,58 +997,60 @@ class Scale:
     frame: bool       # Marker im Rahmen ausserhalb des Feldes
 
 
-def scale_of(fmt: str) -> Scale:
+def scale_for(fmt: str) -> Scale:
     sp = spec(fmt)
     k = float(sp["edge_scale"])
     return Scale(float(sp["pxmm"]), WORK_PXMM / k, k, sp["field"], float(sp["hole_max_mm2"]), sp["marker_pos"] == "frame")
 ```
 
-- [ ] **Step 4: Alle Stellen umstellen** – jede Funktion bekommt `sc: Scale` als letzten Parameter (vor optionalen), alle Aufrufer reichen `sc` weiter; `detect` ruft einmal `sc = scale_of(fmt)`. Ersetzungen (alte Zeilennummern von ff95d9b; `W` steht für `sc.work`, `px` für `sc.pxmm`):
+- [ ] **Step 4: Alle Stellen umstellen** – jede Funktion bekommt `sc: Scale` als letzten Parameter (vor optionalen), alle Aufrufer reichen `sc` weiter; `detect` ruft einmal `sc = scale_for(fmt)`. Ersetzungen (alte Zeilennummern von ff95d9b; `W` steht für `sc.work`, `px` für `sc.pxmm`):
 
 | Zeile | Funktion | alt | neu |
 |---|---|---|---|
-| 48 | `_marker_mask(fmt, shape, pxmm)` | Signatur | `_marker_mask(fmt, shape, pxmm, sc)`; erste Zeile im Rumpf: `if sc.frame: return np.full(shape, 255, np.uint8)` (Marker liegen außerhalb des Feldes) |
+| 48 | `_marker_mask(fmt, shape, pxmm)` | Signatur, `pxmm` im Rumpf | `_marker_mask(fmt, shape, sc)`; im Rumpf `pxmm` → `sc.work`; erste Zeile im Rumpf: `if sc.frame: return np.full(shape, 255, np.uint8)` (Marker liegen außerhalb des Feldes) |
 | 53 | `_marker_mask` | `half = sp["marker_size_mm"] / 2 + 2` | `half = sp["marker_size_mm"] / 2 + 2 * sc.k` |
-| 61, 65 | `_drop_small(mask, pxmm)` | `>= MIN_AREA_MM2` | Signatur `_drop_small(mask, pxmm, sc)`, Bedingung `>= MIN_AREA_MM2 * sc.k ** 2` |
+| 61, 65 | `_drop_small(mask, pxmm)` | `/ pxmm ** 2 >= MIN_AREA_MM2` | Signatur `_drop_small(mask, sc)`, Bedingung `/ sc.work ** 2 >= MIN_AREA_MM2 * sc.k ** 2`; alle Aufrufe `_drop_small(x, sc)` |
 | 70, 77 | `_grabcut(...)` | `m = int(10 * WORK_PXMM)` | Signatur `+ sc`; `m = int(10 * sc.k * sc.work)` |
-| 95 | `_grabcut` | `_drop_small(out, WORK_PXMM)` | `_drop_small(out, sc.work, sc)` |
+| 95 | `_grabcut` | `_drop_small(out, WORK_PXMM)` | `_drop_small(out, sc)` |
 | 99–117 | `_grid_demod(rect)` | `PX_PER_MM` (4×) | Signatur `_grid_demod(rect, sc)`; jedes `PX_PER_MM` → `sc.pxmm` |
-| 122–136 | `_grid_energy(rect, win_mm=…, smooth_mm=…, demod=None)` | `PX_PER_MM`, `WORK_PXMM`, `_grid_demod(rect)` | Signatur `_grid_energy(rect, sc, win_mm=GRID_WIN_MM, smooth_mm=GRID_SMOOTH_MM, demod=None)`; `box = _odd(win_mm * sc.k * sc.pxmm)`; `resize` mit `sc.work / sc.pxmm`; `k = _odd(smooth_mm * sc.k * sc.work)`; `_grid_demod(rect, sc)` |
+| 122–136 | `_grid_energy(rect, win_mm=…, smooth_mm=…, demod=None)` | `PX_PER_MM`, `WORK_PXMM`, `_grid_demod(rect)` | Signatur `_grid_energy(rect, sc, win_mm=GRID_WIN_MM, smooth_mm=GRID_SMOOTH_MM, demod=None)`; `box = _odd(win_mm * sc.k * sc.pxmm)`; `cv2.resize(e, (int(round(W * sc.work / sc.pxmm)), int(round(H * sc.work / sc.pxmm))), …)` (Reihenfolge `W * a / b` beibehalten, nicht `W * (a / b)`); `k = _odd(smooth_mm * sc.k * sc.work)`; `_grid_demod(rect, sc)` |
 | 140, 148 | `_fill_small(mask, max_mm2)` | `area / WORK_PXMM ** 2 <= max_mm2` | Signatur `_fill_small(mask, max_mm2, sc)`; `area / sc.work ** 2 <= max_mm2` (Aufrufer übergeben `max_mm2` schon skaliert) |
 | 170 | `_mask(rect, fmt, hints)` | Signatur | `_mask(rect, fmt, hints, sc)` |
 | 180 | `_mask` | `s = WORK_PXMM / PX_PER_MM` | `s = sc.work / sc.pxmm` |
-| 183 | `_mask` | `_marker_mask(fmt, (h, w), WORK_PXMM)` | `_marker_mask(fmt, (h, w), sc.work, sc)` |
+| 183 | `_mask` | `_marker_mask(fmt, (h, w), WORK_PXMM)` | `_marker_mask(fmt, (h, w), sc)` |
 | 184 | `_mask` | `_odd(1.5 * WORK_PXMM)` | `_odd(1.5 * sc.k * sc.work)` |
 | 187 | `_mask` | `b = int(8 * WORK_PXMM)` | `b = int(8 * sc.k * sc.work)` |
 | 195 | `_mask` | `_odd((GRID_WIN_MM + GRID_SMOOTH_MM) * WORK_PXMM)` | `_odd((GRID_WIN_MM + GRID_SMOOTH_MM) * sc.k * sc.work)` |
 | 196–197 | `_mask` | `_grid_demod(rect)`, `_grid_energy(rect, demod=demod)` | `_grid_demod(rect, sc)`, `_grid_energy(rect, sc, demod=demod)` |
 | 202 | `_mask` | `_grid_energy(rect, GRID_FINE_MM, GRID_FINE_MM, demod)` | `_grid_energy(rect, sc, GRID_FINE_MM, GRID_FINE_MM, demod)` |
-| 216 | `_mask` | `_mask_transparent(color, valid)` | `_mask_transparent(color, valid, sc)` |
-| 227 | `_mask` | `_fill_small(_drop_small(nogrid, WORK_PXMM), FILL_MM2)` | `_fill_small(_drop_small(nogrid, sc.work, sc), FILL_MM2 * sc.k ** 2, sc)` |
-| 232 | `_mask` | `_grabcut(_drop_small(mask, WORK_PXMM), closed, sure_fg, sure_bg)` | `_grabcut(_drop_small(mask, sc.work, sc), closed, sure_fg, sure_bg, sc)` |
+| 218 | `_mask` | `_mask_transparent(color, valid)` | `_mask_transparent(color, valid, sc)` |
+| 227 | `_mask` | `_fill_small(_drop_small(nogrid, WORK_PXMM), FILL_MM2)` | `_fill_small(_drop_small(nogrid, sc), FILL_MM2 * sc.k ** 2, sc)` |
+| 232 | `_mask` | `_grabcut(_drop_small(mask, WORK_PXMM), closed, sure_fg, sure_bg)` | `_grabcut(_drop_small(mask, sc), closed, sure_fg, sure_bg, sc)` |
 | 233 | `_mask` | `_fill_unround(out, valid)` | `_fill_unround(out, valid, sc)` |
-| 236 | `_mask` | `_drop_small(res[0], WORK_PXMM)` | `_drop_small(res[0], sc.work, sc)` |
-| 241, 244 | `_mask_transparent(color, valid)` | `_odd(TRANSP_CLOSE_MM * WORK_PXMM)` | Signatur `+ sc`; `_odd(TRANSP_CLOSE_MM * sc.k * sc.work)`; `_fill_unround(m, valid, sc)` |
+| 236 | `_mask` | `_drop_small(res[0], WORK_PXMM)` | `_drop_small(res[0], sc)` |
+| 241–247 | `_mask_transparent(color, valid)` | `_odd(TRANSP_CLOSE_MM * WORK_PXMM)` | Signatur `+ sc`; `_odd(TRANSP_CLOSE_MM * sc.k * sc.work)`; `_fill_unround(m, valid, sc)` |
 | 255–268 | `_fill_unround(mask, valid)` | `WORK_PXMM` (2×), `HOLE_MAX_MM2` | Signatur `+ sc`; `sc.work`; `area <= sc.hole_max` |
 | 275–320 | `_refine(poly, gx, gy, gh)` | `px = PX_PER_MM`; `SEARCH_MM * px` (2×); `L < 5 * px`; `np.arange(2 * px, L - 2 * px, px / 2)`; `MAX_SHIFT_MM * px` | Signatur `+ sc`; `px = sc.pxmm`; `SEARCH_MM * sc.k * px`; `L < 5 * sc.k * px`; `np.arange(2 * sc.k * px, L - 2 * sc.k * px, sc.k * px / 2)`; `MAX_SHIFT_MM * sc.k * px`. Der `0.5`-Schritt von `offs` und die Schwelle `40` bleiben. |
 | 326–328 | `_refine_hole(c, d0, gray, gh)` | `px = PX_PER_MM` | Signatur `+ sc`; `px = sc.pxmm` |
 | 359–370 | `_holes(cnts, hier, gray, gh)` | `WORK_PXMM` (4×), `area < math.pi`, `_refine_hole(...)` | Signatur `+ sc`; `sc.work`; `area < math.pi * sc.k ** 2` (Kommentar „Ø < 2 mm · k“); `_refine_hole(c_mm, d0, gray, gh, sc)` |
-| 376–391 | `_try_merge(a, b)` | `>= 1.0`, `L + 2`, `< -2` | Signatur `_try_merge(a, b, k=1.0)`; `>= 1.0 * k`; `lo_b > L + 2 * k or hi_b < -2 * k` |
-| 397 | `_merge(segs)` | `_try_merge(segs[i], segs[j])` | `_merge(segs, k=1.0)`; `_try_merge(segs[i], segs[j], k)` |
-| 419–439 | `_segments(gray, mask_full, gh)` | `px = PX_PER_MM`; `_odd(3 * px)`; `< 2 * px`; `_merge(segs)`; `>= MIN_SEG_MM` | Signatur `+ sc`; `px = sc.pxmm`; `_odd(3 * sc.k * px)`; `< 2 * sc.k * px`; `_merge(segs, sc.k)`; `>= MIN_SEG_MM * sc.k` |
-| 443–449 | `detect` | — | nach `hints = hints or {}`: `sc = scale_of(fmt)`; `_mask(rect, fmt, hints, sc)` |
+| 376–391 | `_try_merge(a, b)` | `>= 1.0`, `L + 2`, `< -2` | Signatur `_try_merge(a, b, sc)`; `>= 1.0 * sc.k`; `lo_b > L + 2 * sc.k or hi_b < -2 * sc.k` |
+| 397, 404 | `_merge(segs)` | `_try_merge(segs[i], segs[j])` | `_merge(segs, sc)`; `_try_merge(segs[i], segs[j], sc)` |
+| 419–439 | `_segments(gray, mask_full, gh)` | `px = PX_PER_MM`; `_odd(3 * px)`; `< 2 * px`; `_merge(segs)`; `>= MIN_SEG_MM` | Signatur `+ sc`; `px = sc.pxmm`; `_odd(3 * sc.k * px)`; `< 2 * sc.k * px`; `_merge(segs, sc)`; `>= MIN_SEG_MM * sc.k` |
+| 443–449 | `detect` | — | nach `hints = hints or {}`: `sc = scale_for(fmt)`; `cv2.setRNGSeed(12345)` mit Kommentar „GrabCut zieht aus cv::theRNG – ohne Seed haengt das Ergebnis von frueheren Aufrufen ab (Ruling R1)“; `_mask(rect, fmt, hints, sc)` |
 | 462–465 | `detect` | `WORK_PXMM`, `MIN_AREA_MM2`, `APPROX_MM * WORK_PXMM` | `sc.work`; `MIN_AREA_MM2 * sc.k ** 2`; `APPROX_MM * sc.k * sc.work` |
 | 467 | `detect` | `eps < 8 * WORK_PXMM` | `eps < 8 * sc.k * sc.work` |
-| 472–478 | `detect` | `WORK_PXMM` (5×), `_refine(coarse, gx, gy, gh)`, `_holes(hc, hh[0], gray, gh)` | `sc.work`; `_refine(coarse, gx, gy, gh, sc)`; `_holes(hc, hh[0], gray, gh, sc)` |
-| 486 | `detect` | `_segments(gray, full, gh)` | `_segments(gray, full, gh, sc)` |
+| 472–478 | `detect` | `WORK_PXMM` (4×), `_refine(coarse, gx, gy, gh)`, `_holes(hc, hh[0], gray, gh)` | `sc.work`; `_refine(coarse, gx, gy, gh, sc)`; `_holes(hc, hh[0], gray, gh, sc)` |
+| 485 | `detect` | `_segments(gray, full, gh)` | `_segments(gray, full, gh, sc)` |
 | 497 | `detect` | `"px_per_mm": PX_PER_MM` | `"px_per_mm": sc.pxmm, "edge_scale": sc.k` |
 
-Danach: `grep -n "WORK_PXMM\|PX_PER_MM\|HOLE_MAX_MM2\|MIN_AREA_MM2\|FILL_MM2" core/edges.py` zeigt nur noch die Konstantendefinitionen, den Import (`PX_PER_MM` wird nicht mehr gebraucht → aus dem Import entfernen, falls ruff F401 meldet) und `scale_of`. `grep -rn "edges\._\(mask\|refine\|holes\|segments\|grid_energy\|fill_small\|drop_small\)" tests web` – rufen Tests interne Funktionen direkt auf, bekommen sie `edges.scale_of("A4")` als `sc` übergeben (das ist keine Teständerung im Sinne der Global Constraints, sondern Anpassung an die neue Signatur; im Report nennen).
+**Fest bleiben ausdrücklich** (Spec §3 „jede weitere Zahlenkonstante“): Anzahlen `MAX_SEGMENTS`, `MAX_OUTLINES`, `MAX_VERTS`; Anteile `GRID_PAPER`, `GRID_OBJECT`, `PART_TRANSP_GRID_FACTOR`, `LIGHT_GRID_FACTOR`, `LIGHT_DIFF_FACTOR`, `TRANSP_DIFF_FACTOR`; Farbschwellen `COLOR_MIN_DIFF`, `TRANSP_MIN_DIFF`, `LIGHT_MIN_DIFF`, `SHADOW_CHROMA`; Rundheit `0.85` in `_holes`/`_fill_unround`; in `_refine_hole` die radiusbezogenen Faktoren (`1.8 · r + 2` px, `0.6/1.3/1.6 · r`, `0.7–1.3 · d0`); `_paper_fit` (50 Punkte, 20000 Stichproben); GrabCut 3 Iterationen, Anteil `0.5`, 5×5-Erosion; `eps *= 1.5`; `[:300]` LSD-Segmente, 5 Stützpunkte/mindestens 3 in `_segments`; `math.sin(math.radians(10))` und `fitLine` 0.01 in `_refine`; 7×7-Schließkern und Sobel `ksize=3` in `detect`; Kontrast `100/255`; Rundungsstellen. Nur im Raster-Weg und nur mit `pxmm`: das Gabor-Fenster `_odd(4 * sc.pxmm)` in `_grid_demod` (Rasterperiode 1 mm ist physikalisch).
+
+Danach: `grep -n "WORK_PXMM\|PX_PER_MM\|HOLE_MAX_MM2\|MIN_AREA_MM2\|FILL_MM2" core/edges.py` zeigt nur noch die Konstantendefinitionen, den Import (`PX_PER_MM` wird nicht mehr gebraucht → aus dem Import entfernen, falls ruff F401 meldet) und `scale_for`. `grep -rn "edges\._\(mask\|refine\|holes\|segments\|grid_energy\|fill_small\|drop_small\)" tests web` – rufen Tests interne Funktionen direkt auf, bekommen sie `edges.scale_for("A4")` als `sc` übergeben (das ist keine Teständerung im Sinne der Global Constraints, sondern Anpassung an die neue Signatur; im Report nennen).
 
 - [ ] **Step 5: Tests laufen lassen**
 
-Run: `python -m pytest -q -p no:cacheprovider tests/test_golden_a4a3.py tests/test_edges.py tests/test_align.py tests/test_kleinteile.py -k "not k60_kanten"`
-Expected: PASS – insbesondere alle 15 Goldwert-Tests (A4/A3 unverändert).
+Run: Bildkette (Global Constraints).
+Expected: PASS – insbesondere alle 19 Goldwert-Tests (A4/A3 unverändert, auch mit dem Seed in `detect`).
 
 - [ ] **Step 6: Ruff und Commit**
 
@@ -1014,10 +1068,10 @@ git commit -m "Kleinteile: Kantenerkennung rechnet mit Massstab aus dem Profil (
 - Test: `tests/test_kleinteile.py` (Abschnitt „Kanten K60“)
 
 **Interfaces:**
-- Consumes: `Scale`, `scale_of`, `_paper_fit`, `_drop_small`, `_grabcut`, `_fill_unround`, `_fill_small`, `_mask_transparent`, `_odd` (Task 4); `synthetic_photo("K60H"|"K60D", objects=…)` (Task 3).
+- Consumes: `Scale`, `scale_for`, `_paper_fit`, `_drop_small`, `_grabcut`, `_fill_unround`, `_fill_small`, `_mask_transparent`, `_odd` (Task 4); `synthetic_photo("K60H"|"K60D", objects=…)` (Task 3).
 - Produces: `detect(rect, "K60H"|"K60D", hints)` mit Umrissen, Bohrungen (`holes[].d`), Kanten; Raster-Weg unverändert (Goldwerte).
 
-- [ ] **Step 1: Tests schreiben** (an `tests/test_kleinteile.py` anhängen)
+- [ ] **Step 1: Tests schreiben** (an `tests/test_kleinteile.py` anhängen; oben `import math` vor `import numpy as np` ergänzen – erst ab hier benutzt)
 
 ```python
 # ------------------------------------------------------------------ Kanten K60 (§3 Weg „Feldfarbe“)
@@ -1042,9 +1096,10 @@ def _rect_ok(res, w, h, tol=0.1):
     assert all(abs(a - b) <= tol for a, b in zip(s, want, strict=True)), (s, want)
 
 
-def test_k60_kanten_quadrat_3mm():
+@pytest.mark.parametrize("fmt,gray", [("K60H", 60), ("K60D", 220)])
+def test_k60_kanten_quadrat_3mm(fmt, gray):
     from core import edges
-    res = edges.detect(_k60_rect("K60H", [{"rect": [28.5, 38.5, 3, 3], "gray": 60}]), "K60H")
+    res = edges.detect(_k60_rect(fmt, [{"rect": [28.5, 38.5, 3, 3], "gray": gray}]), fmt)
     _rect_ok(res, 3, 3)
     assert res["px_per_mm"] == 30.0 and res["edge_scale"] == 0.25
 
@@ -1078,14 +1133,21 @@ def test_k60_kanten_dunkles_teil_auf_hell():
 def test_k60_teil_ueber_feldrand():
     from core import edges
     res = edges.detect(_k60_rect("K60H", [{"rect": [50, 30, 20, 10], "gray": 60}]), "K60H")  # ragt 10 mm ueber den Rand
-    for o in res["outlines"]:
-        assert all(-0.5 <= x <= 60.5 and -0.5 <= y <= 80.5 for x, y in o["polygon"]), o["polygon"]
+    assert len(res["outlines"]) == 1, res["outlines"]
+    xs, ys = zip(*res["outlines"][0]["polygon"])
+    assert abs(min(xs) - 50) <= 0.1 and 59.5 <= max(xs) <= 60.5, xs
+    assert abs(min(ys) - 30) <= 0.1 and abs(max(ys) - 40) <= 0.1, ys
+
+
+def test_k60_teil_dicht_am_rand():
+    from core import edges
+    _rect_ok(edges.detect(_k60_rect("K60D", [{"rect": [1, 30, 20, 10], "gray": 230}]), "K60D"), 20, 10)
 
 
 def test_k60_falsche_variante_wenig_kontrast():
     from core import edges
     res = edges.detect(_k60_rect("K60D", [{"rect": [15, 30, 30, 20], "gray": 45}]), "K60D")
-    assert res["contrast"] is None or res["contrast"] < 12, res["contrast"]
+    assert res["outlines"] == [] and res["contrast"] is None, (res["outlines"], res["contrast"])  # dL ≈ 12 < 18
 ```
 
 - [ ] **Step 2: Tests laufen lassen, sie scheitern**
@@ -1116,6 +1178,13 @@ def _mask_plain(rect: np.ndarray, hints: dict, sc: Scale) -> tuple[np.ndarray, n
     band[:, :b] = True
     band[:, -b:] = True
     field = _paper_fit(lab, band)
+    # zweite Anpassung ohne Ausreisser: ein Teil im Randstreifen soll die Feldfarbe nicht verschieben
+    r0 = np.abs(lab[..., 0] - field[..., 0]) + 2 * np.hypot(lab[..., 1] - field[..., 1], lab[..., 2] - field[..., 2])
+    keep = band & (r0 < max(3.0 * float(np.median(r0[band])), COLOR_MIN_DIFF))
+    if keep.sum() >= 0.5 * band.sum():
+        field = _paper_fit(lab, keep)
+    else:
+        keep = band
     dl = np.abs(field[..., 0] - lab[..., 0])
     dc = np.hypot(lab[..., 1] - field[..., 1], lab[..., 2] - field[..., 2])
     diff = np.clip(dl + 2 * dc, 0, 255).astype(np.uint8)
@@ -1134,7 +1203,7 @@ def _mask_plain(rect: np.ndarray, hints: dict, sc: Scale) -> tuple[np.ndarray, n
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
     sure_fg = cv2.erode(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))) > 0
-    out = _grabcut(_drop_small(mask, sc.work, sc), closed, sure_fg, band, sc)
+    out = _grabcut(_drop_small(mask, sc), closed, sure_fg, keep, sc)   # sicher Feld: Randstreifen ohne Teile
     return _fill_unround(out, valid, sc), np.where(color, 255, 0).astype(np.uint8), diff
 ```
 
@@ -1154,7 +1223,7 @@ In `_mask` als erste Anweisung nach dem Docstring: `if sc.field != "grid": retur
 
 - [ ] **Step 5: Tests laufen lassen**
 
-Run: `python -m pytest -q -p no:cacheprovider tests/test_kleinteile.py tests/test_golden_a4a3.py tests/test_edges.py`
+Run: Bildkette (Global Constraints).
 Expected: PASS. Scheitert ein K60-Genauigkeitstest: Global Constraints „Kantenerkennung K60“ (Ursache suchen, Toleranz bleibt).
 
 - [ ] **Step 6: Ruff und Commit**
@@ -1176,7 +1245,7 @@ git commit -m "Kleinteile: Kantenerkennung auf Feldern ohne Raster (Weg Feldfarb
 
 **Interfaces:**
 - Consumes: `matgen.edge_scale(fmt)` (Task 2); `detect(...)["edge_scale"]` (Task 4).
-- Produces: `parts.edge_scale(fmt) -> float` (funktionslokaler Import von `core.matgen`); zusätzlicher Parameter `k: float = 1.0` (immer letzter, mit Standardwert) an `auto_dims(data, fx=1.0, fy=1.0, k=1.0)`, `transfer_ids(old_poly, old_ids, new_poly, next_id, k=1.0)`, `update_edge_ids(..., k=1.0)` (reicht `k` an `transfer_ids` weiter), `transfer_holes(old_holes, new_holes, next_id, k=1.0)`, `snap_polygon(poly, segments, preferred=(), k=1.0)`, `assign(points, parts, k=1.0)`. `plausible` behält seine Signatur, `ai_parts` übergibt `min_area=25.0 * k ** 2`.
+- Produces: `parts.edge_scale(fmt) -> float` (funktionslokaler Import von `core.matgen`); zusätzlicher Parameter `edge_k: float = 1.0` (immer letzter, mit Standardwert; `k` ist in `parts.py` schon der Teil-Maßstab) an `auto_dims(data, fx=1.0, fy=1.0, edge_k=1.0)`, `transfer_ids(old_poly, old_ids, new_poly, next_id, edge_k=1.0)`, `update_edge_ids(..., edge_k=1.0)` (reicht `edge_k` an `transfer_ids` weiter), `transfer_holes(old_holes, new_holes, next_id, edge_k=1.0)`, `snap_polygon(poly, segments, preferred=(), edge_k=1.0)`, `assign(points, parts, edge_k=1.0)`. `plausible` behält seine Signatur, `ai_parts` übergibt `min_area=25.0 * ek ** 2`.
 
 - [ ] **Step 1: Tests schreiben** (an `tests/test_kleinteile.py` anhängen)
 
@@ -1196,20 +1265,21 @@ def test_k60_teile_schwellen_skaliert():
     from app import parts
     moved = [[x + 1.0, y] for x, y in SQ]                                    # 1 mm verschoben
     assert parts.transfer_ids(SQ, [1, 2, 3, 4], moved, 5)[0] == [1, 2, 3, 4]
-    assert parts.transfer_ids(SQ, [1, 2, 3, 4], moved, 5, k=0.25)[0] == [5, 6, 7, 8]
+    assert parts.transfer_ids(SQ, [1, 2, 3, 4], moved, 5, edge_k=0.25)[0] == [5, 6, 7, 8]
+    assert parts.transfer_ids(SQ, [1, 2, 3, 4], [[x + 0.2, y] for x, y in SQ], 5, edge_k=0.25)[0] == [1, 2, 3, 4]
     old = [{"id": 1, "c": [30, 40], "d": 1.0}]
     assert parts.transfer_holes(old, [{"c": [31.0, 40], "d": 1.0}], 2)[0][0]["id"] == 1
-    assert parts.transfer_holes(old, [{"c": [31.0, 40], "d": 1.0}], 2, k=0.25)[0][0]["id"] == 2
+    assert parts.transfer_holes(old, [{"c": [31.0, 40], "d": 1.0}], 2, edge_k=0.25)[0][0]["id"] == 2
     seg = [{"id": "K1", "a": [28.5, 37.5], "b": [31.5, 37.5]}]                # 1 mm unter der Unterkante
     assert parts.snap_polygon(SQ, seg)[0][0] == [28.5, 37.5]
-    assert parts.snap_polygon(SQ, seg, k=0.25)[0][0] == [28.5, 38.5]
+    assert parts.snap_polygon(SQ, seg, edge_k=0.25)[0][0] == [28.5, 38.5]
     assert parts.assign([[32.0, 40.0]], [(7, SQ)]) == 7                       # 0,5 mm ausserhalb
-    assert parts.assign([[32.0, 40.0]], [(7, SQ)], k=0.25) is None
+    assert parts.assign([[32.0, 40.0]], [(7, SQ)], edge_k=0.25) is None
     uneven = {"polygon": [[0, 0], [10, 0], [10, 5], [0, 5.5]], "edge_ids": [1, 2, 3, 4], "hidden": [], "holes": []}
     assert parts.is_rect(uneven["polygon"])                                  # Winkel weichen 2,9° ab (< 4°)
     warn = "gegenüberliegende Kanten ungleich – Kante prüfen"                # links 5,5 mm, rechts 5 mm
     assert warn not in [d["warn"] for d in parts.auto_dims(uneven)]          # 0,5 mm < 1 mm
-    assert warn in [d["warn"] for d in parts.auto_dims(uneven, k=0.25)]      # 0,5 mm > 0,25 mm
+    assert warn in [d["warn"] for d in parts.auto_dims(uneven, edge_k=0.25)]      # 0,5 mm > 0,25 mm
 
 
 def test_k60_teile_default_unc():
@@ -1225,7 +1295,7 @@ def test_k60_teile_default_unc():
 - [ ] **Step 2: Tests laufen lassen, sie scheitern**
 
 Run: `python -m pytest -q -p no:cacheprovider tests/test_kleinteile.py -k k60_teile`
-Expected: FAIL (`TypeError: … unexpected keyword argument 'k'`).
+Expected: FAIL (`TypeError: … unexpected keyword argument 'edge_k'`).
 
 - [ ] **Step 3: `parts.py` umstellen**
 
@@ -1236,16 +1306,16 @@ def edge_scale(fmt):
     return matgen.edge_scale(fmt)
 ```
 
-Ersetzungen (je Funktion Parameter `k=1.0` ans Ende):
+Ersetzungen (je Funktion Parameter `edge_k=1.0` ans Ende):
 
 | Funktion | alt | neu |
 |---|---|---|
-| `auto_dims` | `> EDGE_DIFF_MM` | `> EDGE_DIFF_MM * k` |
-| `update_edge_ids` | `return transfer_ids(old_poly, old_ids, new_poly, next_id)` | `return transfer_ids(old_poly, old_ids, new_poly, next_id, k)` |
-| `transfer_ids` | `if d < 3 and …` | `if d < 3 * k and …` (Docstring: „Mitte < 3 mm · k“) |
-| `transfer_holes` | `if d <= 2 and …` | `if d <= 2 * k and …` (Docstring: „<= 2 mm · k“) |
-| `snap_polygon` | `if dist >= 3 or …`; `… > 8:` | `if dist >= 3 * k or …`; `… > 8 * k:` |
-| `assign` | `P.buffer(ON_EDGE_MM)`; `<= ON_EDGE_MM` | `P.buffer(ON_EDGE_MM * k)`; `<= ON_EDGE_MM * k` |
+| `auto_dims` | `> EDGE_DIFF_MM` | `> EDGE_DIFF_MM * edge_k` |
+| `update_edge_ids` | `return transfer_ids(old_poly, old_ids, new_poly, next_id)` | `return transfer_ids(old_poly, old_ids, new_poly, next_id, edge_k)` |
+| `transfer_ids` | `if d < 3 and …` | `if d < 3 * edge_k and …` (Docstring: „Mitte < 3 mm · edge_k“) |
+| `transfer_holes` | `if d <= 2 and …` | `if d <= 2 * edge_k and …` (Docstring: „<= 2 mm · edge_k“) |
+| `snap_polygon` | `if dist >= 3 or …`; `… > 8:` | `if dist >= 3 * edge_k or …`; `… > 8 * edge_k:` |
+| `assign` | `P.buffer(ON_EDGE_MM)`; `<= ON_EDGE_MM` | `P.buffer(ON_EDGE_MM * edge_k)`; `<= ON_EDGE_MM * edge_k` |
 
 `default_unc` (Höhenlehren-Zweig unverändert):
 
@@ -1257,17 +1327,17 @@ def default_unc(photo, view):
     a = db.jload(photo["analysis"], {}) or {}
     if view == "gauge" and a.get("gauge"):
         return round((a["gauge"].get("rms_mm") or 0.3) * 2 + 0.3, 2)
-    k = edge_scale(photo["format"])
-    return round((photo["max_err"] or 0.3 * k) + 0.2 * k, 2)
+    ek = edge_scale(photo["format"])
+    return round((photo["max_err"] or 0.3 * ek) + 0.2 * ek, 2)
 ```
 
 Aufrufer:
-- `set_polygon(part, polygon, …)`: am Anfang `k = edge_scale((db.q1("SELECT format FROM photos WHERE id=?", (part["photo_id"],)) or {}).get("format"))`; `transfer_ids(…, k)`, `update_edge_ids(…, k)`, `transfer_holes(…, k)`.
+- `set_polygon(part, polygon, …)`: am Anfang `ek = edge_scale((db.q1("SELECT format FROM photos WHERE id=?", (part["photo_id"],)) or {}).get("format"))`; `transfer_ids(…, ek)`, `update_edge_ids(…, ek)`, `transfer_holes(…, ek)`.
 - `_sync_auto(part, photo, fx, fy)`: `auto_dims(d, fx, fy, edge_scale(photo["format"]) if photo else 1.0)`.
 - `refresh`: im Zuordnungsschritt `assign(d["points"], by_photo[m["photo_id"]], edge_scale(photos[m["photo_id"]]["format"]) if m["photo_id"] in photos else 1.0)`.
-- `ai_parts`: `k = res.get("edge_scale", 1.0)`; `snap_polygon(it["polygon"], res["segments"], it["edges"], k)`; `plausible(poly, res["outlines"], min_area=25.0 * k ** 2)`.
+- `ai_parts`: `ek = res.get("edge_scale", 1.0)`; `snap_polygon(it["polygon"], res["segments"], it["edges"], ek)`; `plausible(poly, res["outlines"], min_area=25.0 * ek ** 2)`.
 
-`grep -n "transfer_ids\|update_edge_ids\|transfer_holes\|snap_polygon\|assign(\|auto_dims\|default_unc" web/app/*.py` – jeder weitere Aufrufer bekommt `k` aus dem Format seines Fotos oder bleibt bewusst bei 1.0 (im Report begründen).
+`grep -n "transfer_ids\|update_edge_ids\|transfer_holes\|snap_polygon\|assign(\|auto_dims\|default_unc" web/app/*.py` – jeder weitere Aufrufer bekommt `edge_k` aus dem Format seines Fotos oder bleibt bewusst bei 1.0 (im Report begründen).
 
 - [ ] **Step 4: Eckpunkt-Spielraum in `main.py`** – Test zuerst (an `tests/test_kleinteile.py` anhängen):
 
@@ -1307,7 +1377,7 @@ def _margin_mm(photo: dict) -> float:
 
 - [ ] **Step 5: Tests laufen lassen**
 
-Run: `python -m pytest -q -p no:cacheprovider tests/test_kleinteile.py tests/test_parts.py tests/test_parts_api.py tests/test_edges_api.py tests/test_golden_a4a3.py`
+Run: Bildkette (Global Constraints).
 Expected: PASS.
 
 - [ ] **Step 6: Ruff und Commit**
@@ -1324,8 +1394,9 @@ git commit -m "Kleinteile: Teile-Zuordnung, Einrasten, Unsicherheit und Eckpunkt
 
 **Files:**
 - Modify: `web/app/geom.py:42-49` (`factors`)
-- Modify: `web/app/main.py` (`_photo_public`, `_ctrl_ref`/`_mixed_formats` neu, `_factors`, `project_patch`, `_project_public`, Messunterlagen-Endpunkte, `_analyze_store`, `photo_align_jpg`, Vorschlags-Bildbeschriftung)
-- Modify: `web/app/jobs.py` (`_rect_top`, `pick_images`)
+- Modify: `web/app/parts.py` (`project_format` neu, aus `main._project_format` verschoben)
+- Modify: `web/app/main.py` (`_photo_public`, `_mixed_formats` neu, `_project_format` → `parts.project_format`, `_factors`, `project_patch`, `_project_public`, `photo_patch`, `photo_edges` (422-Meldung), Messunterlagen-Endpunkte, `photo_align_jpg`, Vorschlags-Bildbeschriftung)
+- Modify: `web/app/jobs.py` (`_rect_top`, `pick_images`, `build_initial_message`)
 - Modify: `web/app/ai.py:30` (Text)
 - Modify: `tools/check_photo.py`
 - Modify: `tests/test_geom.py:32-35` (neue Signatur)
@@ -1334,13 +1405,15 @@ git commit -m "Kleinteile: Teile-Zuordnung, Einrasten, Unsicherheit und Eckpunkt
 **Interfaces:**
 - Consumes: Profile (Task 2), `vision.rect_pxmm`, `format_note` (Task 3), `detect(...)["edge_scale"]` (Task 4), `_k60_project` (Task 6).
 - Produces:
-  - `geom.factors(project, ctrl_ref, grid_h) -> (fx, fy)`.
-  - Projekt-API: `ctrl_ref` (float), `mixed_formats` (bool), wie bisher `format`, `grid_h` (Detail), `factors`.
-  - Foto-API: `quality_mm` (Liste), `n_markers` (int), `view_note` (str | None), `analysis.format_note`.
+  - `geom.factors(project, ctrl_ref, grid_h) -> (fx, fy)`; gespeicherte Werte außerhalb ±10 % des Bezugs gelten nicht (Faktor 1, Marc F5).
+  - `parts.project_format(project_id) -> str | None` (Format des ersten auswertbaren Fotos, sonst des ersten mit Format).
+  - Projekt-API: `ctrl_ref` (float), `mixed_formats` (bool, nur auswertbare Fotos), `ctrl_stale` (bool), wie bisher `format`, `grid_h` (Detail), `factors`.
+  - Foto-API: `quality_mm` (Liste), `n_markers` (int), `view_note` (str | None), `analysis.format_note`; `low_contrast` ist bei K60 auch wahr, wenn auf einer Draufsicht/Unteransicht kein Umriss gefunden wurde.
+  - `PATCH /api/photos/{id}` mit `format`: 400 „Auf diesem Foto sind keine Marker für <Anzeigename> zu sehen – Format bleibt.“, wenn das Foto entzerrt ist und `vision.pick_candidates` für das neue Format nichts findet (R3); ergäbe das neue `format` nach F4 wieder das aktuelle Format, wird nicht neu ausgewertet (idempotent).
   - `/api/mat.pdf`, `/api/mat/preview.png`, `/api/mat/layout` für Druckformate `A4`, `A3`, `K60`; Layout `K60` → `{"K60H": …, "K60D": …}`.
   - `jobs._rect_top(ph, top) -> tuple[Path, float] | None` (Pfad, px/mm).
 
-- [ ] **Step 1: Tests schreiben** (an `tests/test_kleinteile.py` anhängen; `tests/test_geom.py::test_factors` auf die neue Signatur umstellen: `geom.factors({"ctrl_x": 99.5}, 100.0, 230)` und `geom.factors({"ctrl_x": 100.2, "ctrl_y": 229.0}, 100.0, 230)`, Erwartungen unverändert; dazu `assert geom.factors({"ctrl_x": 49.8}, 50.0, 80) == (pytest.approx(0.996), pytest.approx(0.996))`)
+- [ ] **Step 1: Tests schreiben** (an `tests/test_kleinteile.py` anhängen; `tests/test_geom.py::test_factors` auf die neue Signatur umstellen: `geom.factors({"ctrl_x": 99.5}, 100.0, 230)` und `geom.factors({"ctrl_x": 100.2, "ctrl_y": 229.0}, 100.0, 230)`, Erwartungen unverändert; dazu `assert geom.factors({"ctrl_x": 49.8}, 50.0, 80) == (pytest.approx(0.996), pytest.approx(0.996))`, `assert geom.factors({"ctrl_x": 99.8}, 50.0, 80) == (1.0, 1.0)`, `assert geom.factors({"ctrl_x": 49.9, "ctrl_y": 229.0}, 50.0, 80) == (pytest.approx(0.998), pytest.approx(0.998))` (unpassendes `ctrl_y` fällt auf `fx` zurück), `assert geom.ctrl_stale({"ctrl_x": 99.8}, 50.0, 80) and not geom.ctrl_stale({"ctrl_x": 49.8}, 50.0, 80) and not geom.ctrl_stale({}, 100.0, 230)`)
 
 ```python
 def test_k60_api_foto_und_projekt(user):
@@ -1358,9 +1431,47 @@ def test_k60_api_kontrollmass(user):
     assert p["factors"][0] == pytest.approx(49.8 / 50) and p["factors"][1] == pytest.approx(80.4 / 80)
     r = user.patch(f"/api/projects/{pid}", json={"ctrl_x": 100.0}, headers=H)
     assert r.status_code == 400 and "erwartet um 50 mm" in r.text
+    r = user.patch(f"/api/projects/{pid}", json={"ctrl_y": 89.0}, headers=H)
+    assert r.status_code == 400 and "erwartet um 80 mm" in r.text
+
+
+def test_k60_kontrollmass_bezug_gewechselt(user, photo_a4):
+    pid = user.post("/api/projects", json={"name": "Wechsel"}, headers=H).json()["id"]
+    a4 = user.post(f"/api/projects/{pid}/photos", headers=H, data={"view": "top"},
+                   files={"file": ("a4.jpg", photo_a4, "image/jpeg")}).json()
+    assert user.patch(f"/api/projects/{pid}", json={"ctrl_x": 99.8}, headers=H).status_code == 200
+    user.post(f"/api/projects/{pid}/photos", headers=H, data={"view": "top"},
+              files={"file": ("k.jpg", synthetic_photo("K60H", objects=PLATE_H), "image/jpeg")})
+    assert user.delete(f"/api/photos/{a4['id']}", headers=H).status_code == 200
+    p = user.get(f"/api/projects/{pid}").json()
+    assert p["format"] == "K60H" and p["factors"] == [1.0, 1.0] and p["ctrl_stale"] is True
+
+
+def test_k60_kontrollmass_vor_dem_ersten_foto(user):
+    pid = user.post("/api/projects", json={"name": "Vorher"}, headers=H).json()["id"]
+    assert user.patch(f"/api/projects/{pid}", json={"ctrl_x": 99.8}, headers=H).status_code == 200
+    user.post(f"/api/projects/{pid}/photos", headers=H, data={"view": "top"},
+              files={"file": ("k.jpg", synthetic_photo("K60H"), "image/jpeg")})
+    p = user.get(f"/api/projects/{pid}").json()
+    assert p["factors"] == [1.0, 1.0] and p["ctrl_stale"] is True
+
+
+def test_k60_ki_auftrag_faktor(user):
+    from app import jobs
+    pid, _ = _k60_project(user)
+    user.patch(f"/api/projects/{pid}", json={"ctrl_x": 49.9}, headers=H)
+    p = user.get(f"/api/projects/{pid}").json()
+    msg = jobs.build_initial_message(p, "x", {"name": "P"})
+    text = " ".join(b.get("text", "") for m in msg for b in (m["content"] if isinstance(m["content"], list) else [])
+                    if isinstance(b, dict))
+    assert "(X 0.9980)" in text, text[:500]
 
 
 def test_k60_api_gemischt(user, photo_a4):
+    pid2, _ = _k60_project(user)
+    user.post(f"/api/projects/{pid2}/photos", headers=H, data={"view": "top"},
+              files={"file": ("d.jpg", synthetic_photo("K60D"), "image/jpeg")})
+    assert user.get(f"/api/projects/{pid2}").json()["mixed_formats"] is False   # hell + dunkel = eine Unterlage
     pid, _ = _k60_project(user)
     r = user.post(f"/api/projects/{pid}/photos", headers=H, data={"view": "top"},
                   files={"file": ("a4.jpg", photo_a4, "image/jpeg")})
@@ -1372,6 +1483,41 @@ def test_k60_api_gemischt(user, photo_a4):
 def test_k60_api_variante_hinweis(user):
     _, ph = _k60_project(user, fmt="K60D", objects=[{"rect": [15, 30, 30, 20], "gray": 230}], fmt_form="K60H")
     assert ph["format"] == "K60D" and ph["analysis"]["format_note"] == "Format auf Kleinteile dunkel geändert"
+
+
+def test_k60_api_formatwechsel_ohne_marker_abgelehnt(user, photo_a4):
+    pid = user.post("/api/projects", json={"name": "A4"}, headers=H).json()["id"]
+    ph = user.post(f"/api/projects/{pid}/photos", headers=H, data={"view": "top"},
+                   files={"file": ("a4.jpg", photo_a4, "image/jpeg")}).json()
+    assert user.post(f"/api/photos/{ph['id']}/edges", json={"use_ai": False}, headers=H).status_code == 200
+    n_parts = len(user.get(f"/api/projects/{pid}").json()["parts"])
+    r = user.patch(f"/api/photos/{ph['id']}", json={"format": "K60H"}, headers=H)
+    assert r.status_code == 400 and "keine Marker für Kleinteile hell" in r.text
+    p = user.get(f"/api/projects/{pid}").json()
+    assert p["photos"][0]["format"] == "A4" and "rect" in p["photos"][0]["files"] and len(p["parts"]) == n_parts
+
+
+def test_k60_api_variante_idempotent(user):
+    pid, ph = _k60_project(user, fmt="K60D", objects=[{"rect": [15, 30, 30, 20], "gray": 230}], fmt_form="K60H")
+    assert user.post(f"/api/photos/{ph['id']}/edges", json={"use_ai": False}, headers=H).status_code == 200
+    n_parts = len(user.get(f"/api/projects/{pid}").json()["parts"])
+    assert user.patch(f"/api/photos/{ph['id']}", json={"format": "K60H"}, headers=H).status_code == 200
+    assert len(user.get(f"/api/projects/{pid}").json()["parts"]) == n_parts      # nicht erneut ausgewertet
+
+
+def test_k60_api_falsche_variante_hinweis(user):
+    pid, ph = _k60_project(user, fmt="K60D", objects=[{"rect": [15, 30, 30, 20], "gray": 45}])
+    assert ph["low_contrast"] is True
+    r = user.post(f"/api/photos/{ph['id']}/edges", json={"use_ai": False}, headers=H)
+    assert r.status_code == 422 and "andere Variante probieren" in r.text
+
+
+def test_k60_api_ki_teil_3mm_und_ids(user):
+    pid, ph = _k60_project(user, objects=[{"rect": [28.5, 38.5, 3, 3], "gray": 60}])
+    res = user.post(f"/api/photos/{ph['id']}/edges", json={"use_ai": True}, headers=H).json()
+    assert [t["label"] for t in res["parts"]] == ["Quader"] and res["notice"] == "", res
+    again = user.post(f"/api/photos/{ph['id']}/edges", json={"use_ai": True}, headers=H).json()
+    assert [t["id"] for t in again["parts"]] == [t["id"] for t in res["parts"]]
 
 
 def test_k60_api_hoehenlehre_hinweis(user):
@@ -1421,65 +1567,130 @@ def test_k60_api_kanten_teile_und_ki_bilder(user):
 
 - [ ] **Step 2: Tests laufen lassen, sie scheitern**
 
-Run: `python -m pytest -q -p no:cacheprovider tests/test_kleinteile.py -k "api and not eckpunkt" tests/test_geom.py`
+Run: `python -m pytest -q -p no:cacheprovider tests/test_kleinteile.py tests/test_geom.py -k "(api or kontrollmass or ki_auftrag or mat_k60 or factors) and not eckpunkt"`
 Expected: FAIL (`KeyError: 'quality_mm'`, `ctrl_ref`, 400 bei `format=K60` usw.).
 
 - [ ] **Step 3: `geom.factors`**
 
 ```python
 def factors(project: dict, ctrl_ref: float | None, grid_h: float | None) -> tuple[float, float]:
-    """Korrekturfaktoren aus dem Kontrollmass: ctrl_ref = waagerechter Bezug des Profils (A4/A3 100, Kleinteile 50)."""
+    """Korrekturfaktoren aus dem Kontrollmass: ctrl_ref = waagerechter Bezug des Profils (A4/A3 100, Kleinteile 50).
+    Gespeicherte Werte ausserhalb ±10 % des aktuellen Bezugs (Unterlage gewechselt) gelten nicht: Faktor 1 (Spec §7 F5)."""
     ref = ctrl_ref or 100.0
-    fx = (project.get("ctrl_x") or ref) / ref
+    cx, cy = project.get("ctrl_x"), project.get("ctrl_y")
+    if cx and not 0.9 * ref <= cx <= 1.1 * ref:
+        cx = None
+    if cy and grid_h and not 0.9 * grid_h <= cy <= 1.1 * grid_h:
+        cy = None
+    fx = (cx or ref) / ref
     fy = 1.0
-    if project.get("ctrl_y") and grid_h:
-        fy = project["ctrl_y"] / grid_h
-    elif project.get("ctrl_x"):
+    if cy and grid_h:
+        fy = cy / grid_h
+    elif cx:
         fy = fx
     return fx, fy
+
+
+def ctrl_stale(project: dict, ctrl_ref: float | None, grid_h: float | None) -> bool:
+    """Ein gespeichertes Kontrollmass passt nicht zum aktuellen Bezug (wird von factors ignoriert)."""
+    ref = ctrl_ref or 100.0
+    cx, cy = project.get("ctrl_x"), project.get("ctrl_y")
+    return bool((cx and not 0.9 * ref <= cx <= 1.1 * ref) or (cy and grid_h and not 0.9 * grid_h <= cy <= 1.1 * grid_h))
 ```
 
-- [ ] **Step 4: `main.py`**
+- [ ] **Step 4: `main.py` und `parts.project_format`**
 
-Helfer nach `_project_format`:
+`parts.py` (nach `default_unc`): `main._project_format` hierher verschieben; neu ist nur, dass auswertbare Fotos vorgehen (ein explizit falsch gewähltes, nicht auswertbares erstes Foto bestimmt sonst den Bezug):
 
 ```python
-def _ctrl_ref(fmt: str | None) -> float:
-    return float(matgen.PROFILES[fmt]["ctrl_mm"]) if fmt in matgen.FORMATS else 100.0
+def project_format(project_id):
+    """Format des ersten auswertbaren Fotos, sonst des ersten mit Format (Bezug fuer Kontrollmass und Rasterhoehe)."""
+    r = db.q1("SELECT format FROM photos WHERE project_id=? AND format IS NOT NULL "
+              "ORDER BY (status = 'nicht_auswertbar'), id LIMIT 1", (project_id,))
+    return r["format"] if r else None
+```
 
+In `main.py` jeden Aufruf `_project_format(…)` durch `parts.project_format(…)` ersetzen und `_project_format` löschen. Neue Helfer in `main.py` (nach `_grid_h`):
 
+```python
 def _mixed_formats(pid: int) -> bool:
-    """Fotos auf verschiedenen Unterlagen (Druckformate; Kleinteile hell und dunkel zaehlen als eine)."""
-    rows = db.q("SELECT DISTINCT format FROM photos WHERE project_id=? AND format IS NOT NULL", (pid,))
+    """Auswertbare Fotos auf verschiedenen Unterlagen (Druckformate; Kleinteile hell und dunkel zaehlen als eine)."""
+    rows = db.q("SELECT DISTINCT format FROM photos WHERE project_id=? AND format IS NOT NULL AND status != 'nicht_auswertbar'",
+                (pid,))
     return len({matgen.print_format_of(r["format"]) for r in rows} - {None}) > 1
 
 
 GAUGE_NOTE_K60 = "Höhenlehre gibt es bei Kleinteilen nicht – Teil kippen und als ‚Gekippt (Höhe)‘ fotografieren"
+NO_OBJECT_K60 = ("Kein Objekt erkannt – andere Variante probieren (helles Teil auf das dunkle Blatt, dunkles Teil auf das "
+                 "helle Blatt) oder Teil von Hand zeichnen.")
 ```
 
-- `_factors`: `return geom.factors(project, _ctrl_ref(fmt), _grid_h(fmt))`.
-- `project_patch`: `fmt = _project_format(pid)`; `ref = _ctrl_ref(fmt) if k == "ctrl_x" else (_grid_h(fmt) or 230.0)`.
-- `_project_public`: nach `out["factors"] = _factors(p)`: `out["ctrl_ref"] = _ctrl_ref(fmt)`; `out["mixed_formats"] = _mixed_formats(p["id"])`.
-- `_photo_public`: Analyse-Schlüssel um `"format_note"` ergänzen; zusätzliche Felder:
+- `_factors`: `fmt = parts.project_format(project["id"])`; `return geom.factors(project, matgen.ctrl_ref(fmt), _grid_h(fmt))`.
+- `project_patch`: `fmt = parts.project_format(pid)`; `ref = matgen.ctrl_ref(fmt) if k == "ctrl_x" else (_grid_h(fmt) or 230.0)`.
+- `_project_public`: nach `out["factors"] = _factors(p)`: `out["ctrl_ref"] = matgen.ctrl_ref(fmt)`; `out["mixed_formats"] = _mixed_formats(p["id"])`; `out["ctrl_stale"] = geom.ctrl_stale(p, matgen.ctrl_ref(fmt), _grid_h(fmt))`.
+- `_photo_public`: Analyse-Schlüssel um `"format_note"` ergänzen; zusätzliche Felder und `low_contrast` neu:
   ```python
   prof = matgen.PROFILES.get(ph["format"])
   ...
   "quality_mm": list(prof["quality_mm"]) if prof else [0.5, 1.0],
   "n_markers": len(prof["ids"]) if prof else 8,
   "view_note": GAUGE_NOTE_K60 if ph["view"] == "gauge" and prof and not prof["gauge"] else None,
+  "low_contrast": (a.get("contrast") is not None and a["contrast"] < 12) or bool(
+      prof and prof["field"] != "grid" and ph["view"] in PLANAR and a.get("rect") and "outline_mm" in a
+      and a["outline_mm"] is None),
   ```
-- `_analyze_store`: `a["rect"] = {"pxmm": matgen.PROFILES[a["format"]]["pxmm"], …}` (statt `vision.PX_PER_MM`; `gauge_rect` bleibt bei `vision.PX_PER_MM`).
+  `low_contrast` ersetzt den bestehenden Eintrag (`"contrast": a.get("contrast"), "low_contrast": …`, heute Z. 212) – nicht zusätzlich anlegen (sonst ruff F601). (`PLANAR` ist weiter unten definiert; `_photo_public` wird erst zur Laufzeit aufgerufen, der Name ist dann bekannt.)
+- `photo_edges`: bei leerem Ergebnis `raise HTTPException(422, NO_OBJECT_K60 if matgen.edge_scale(ph["format"]) != 1.0 else "Kein Objekt erkannt – Teil von Hand zeichnen.")`.
+- `photo_patch`, Formatzweig (`if body.format is not None and body.format != ph["format"]:`) – Prüfung vor `_analyze_store` (R3) und keine Neuauswertung, wenn das Ergebnis wieder das aktuelle Format wäre (F4-Schwester):
+  ```python
+      if body.format is not None and body.format != ph["format"]:
+          img = vision.load_image((_photo_dir(phid) / "orig.jpg").read_bytes())
+          old_a = db.jload(ph["analysis"], {}) or {}
+          cands = vision.pick_candidates(vision.detect(img), body.format)[0] if body.format in matgen.FORMATS else None
+          if cands is not None and old_a.get("homography") and not cands:
+              raise HTTPException(400, f"Auf diesem Foto sind keine Marker für {matgen.PROFILES[body.format]['label']} "
+                                       "zu sehen – Format bleibt.")
+          if cands != [ph["format"]]:   # Ergebnis waere dasselbe Format (F4-Schwester): nicht neu auswerten
+              a = _analyze_store(phid, img, …)   # wie bisher, samt Transaktion, delete_photo_parts, _refresh
+  ```
+  (Die vorhandene Zeile `img = vision.load_image(...)` wird dabei nach oben gezogen, nicht verdoppelt; der bisherige Rumpf rückt unter `if cands != [ph["format"]]:` ein.)
 - Messunterlage:
   ```python
   def _pages(fmt: str, pages: str) -> list[str]:
       allowed = matgen.PRINT_PAGES[fmt]
       return [x for x in allowed if x in (pages or "").split(",")] or list(allowed)
   ```
-  `mat_pdf`: `if format not in matgen.PRINT_FORMATS: raise HTTPException(400, "Format muss A4, A3 oder K60 sein")`; `_pdf_bytes(format, _pages(format, pages), header[:60])`. `mat_preview`: `if format not in matgen.PRINT_FORMATS or not 0 <= page < len(matgen.PRINT_PAGES[format])`; Rendern mit `list(matgen.PRINT_PAGES[format])`. `mat_layout`: gleiche Prüfung und Meldung; `return {f: vision.spec(f) for f in matgen.PRINT_FORMATS[format]} if format == "K60" else vision.spec(format)`.
+  `mat_pdf`: `if format not in matgen.PRINT_FORMATS: raise HTTPException(400, "Format muss A4, A3 oder K60 sein")`; `_pdf_bytes(format, _pages(format, pages), header[:60])`. `mat_layout`: gleiche Prüfung und Meldung; `return {f: vision.spec(f) for f in matgen.PRINT_FORMATS[format]} if format == "K60" else vision.spec(format)`. `mat_preview`: `if format not in matgen.PRINT_FORMATS or not 0 <= page < len(matgen.PRINT_PAGES[format])`; Rendern mit `list(matgen.PRINT_PAGES[format])`; den Cache **nicht** mitten in der Schleife leeren (vorbestehender 500er ab der elften Kopfzeile, gemessen):
+  ```python
+              fresh = {}
+              try:
+                  for i in range(len(pdf)):
+                      img = pdf[i].render(scale=110 / 72).to_pil()
+                      b = io.BytesIO()
+                      img.save(b, "PNG", optimize=True)
+                      fresh[(format, i, header[:60])] = b.getvalue()
+              finally:
+                  pdf.close()
+              if len(_preview_cache) + len(fresh) > 30:
+                  _preview_cache.clear()
+              _preview_cache.update(fresh)
+              png = fresh[key]
+  ```
+  Test dazu (an `test_mat_k60_endpunkte` anhängen): `for i in range(12): assert admin.get(f"/api/mat/preview.png?format=K60&page=0&header=K{i}").status_code == 200`.
 - `photo_align_jpg`: `pxo = ALIGN_PXMM / matgen.edge_scale(top["format"])`; `vision.bottom_warp(img, a, at, pxo)` und `draw_outlines(…, pxo, at["rect"]["h_mm"])`.
 - Vorschlags-Bildbeschriftung (Route mit `ai.SUGGEST_SYSTEM`): `vision.rect_pxmm(db.jload(ph["analysis"], {}))` statt `vision.PX_PER_MM` bei `rect.jpg` (die Höhenlehre bleibt bei `vision.PX_PER_MM`).
 
 - [ ] **Step 5: `jobs.py`**
+
+`build_initial_message`: die feste Formel `fx = (project.get("ctrl_x") or 100) / 100` (Z. 248) ersetzen durch
+
+```python
+    from core import matgen  # spaet: main.py setzt sys.path erst nach den App-Importen
+    fmt = project_format(project["id"])
+    fx = geom.factors(project, matgen.ctrl_ref(fmt), None)[0]
+```
+
+(`geom` und `project_format` in die Importe von `jobs.py` aufnehmen: `from . import … geom …`, `from .parts import … project_format`.)
 
 `_rect_top` gibt `(out, pxmm)` zurück: `pxmm = vision.rect_pxmm(at or a)`; `vision.bottom_warp(img, a, at, pxmm)`; `return out, pxmm` (bei fehlendem Bild weiter `None`). In `pick_images`: Draufsicht `ai.scaled_caption(…, vision.rect_pxmm(a))`; Unteransicht `got = _rect_top(p, top)` / `if got: path, pxmm = got` und `ai.scaled_caption(path, …, pxmm)`. Höhenlehre unverändert. `grep -n "_rect_top" web/app/*.py tests/*.py` – weitere Aufrufer anpassen.
 
@@ -1491,14 +1702,14 @@ GAUGE_NOTE_K60 = "Höhenlehre gibt es bei Kleinteilen nicht – Teil kippen und 
 
 - [ ] **Step 7: Tests laufen lassen**
 
-Run: `python -m pytest -q -p no:cacheprovider tests/test_kleinteile.py tests/test_geom.py tests/test_api.py tests/test_align.py tests/test_edges_api.py tests/test_golden_a4a3.py`
+Run: Bildkette (Global Constraints).
 Expected: PASS.
 
 - [ ] **Step 8: Ruff und Commit**
 
 ```bash
-ruff check web/app/main.py web/app/geom.py web/app/jobs.py web/app/ai.py tools/check_photo.py tests/test_kleinteile.py tests/test_geom.py
-git add web/app/main.py web/app/geom.py web/app/jobs.py web/app/ai.py tools/check_photo.py tests/test_kleinteile.py tests/test_geom.py
+ruff check web/app/main.py web/app/geom.py web/app/jobs.py web/app/parts.py web/app/ai.py tools/check_photo.py tests/test_kleinteile.py tests/test_geom.py
+git add web/app/main.py web/app/geom.py web/app/jobs.py web/app/parts.py web/app/ai.py tools/check_photo.py tests/test_kleinteile.py tests/test_geom.py
 git commit -m "Kleinteile: API mit Druckformat K60, Kontrollmass aus dem Profil, Hinweise, KI-Bilder im Massstab des Fotos"
 ```
 
@@ -1510,10 +1721,11 @@ git commit -m "Kleinteile: API mit Druckformat K60, Kontrollmass aus dem Profil,
 - Create: `web/static/js/formats.js`
 - Create: `tests/js/formats.test.mjs`
 - Modify: `web/static/js/mat.js`
-- Modify: `web/static/js/photos.js` (Formatauswahl Z. 41–42, Bildunterschriften Z. 219–224, Balken Z. 226–231, Kontrollmaß Z. 235–236, Hinweise Z. 248–251, Legende Z. 268, Kontrollmaß-Labels Z. 272–273)
+- Modify: `web/static/js/photos.js` (Formatauswahl Z. 41–42, Bildunterschriften Z. 220–225, Balken Z. 227–232, Kontrollmaß Z. 235–237, Hinweise Z. 258–261, Legende Z. 269, Kontrollmaß-Labels Z. 273–274)
+- Modify: `web/static/js/measure.js:350` (Statuszeile: Anzeigename statt Formatcode)
 
 **Interfaces:**
-- Consumes: Projektfelder `ctrl_ref`, `mixed_formats`, `format`, `grid_h`; Fotofelder `quality_mm`, `n_markers`, `view_note`, `analysis.format_note`, `rect.pxmm` (Task 7); `/api/mat/layout?format=K60` (Task 7).
+- Consumes: Projektfelder `ctrl_ref`, `mixed_formats`, `ctrl_stale`, `format`, `grid_h`; Fotofelder `quality_mm`, `n_markers`, `view_note`, `analysis.format_note`, `rect.pxmm` (Task 7); `/api/mat/layout?format=K60` (Task 7).
 - Produces: `formats.js` mit `FORMAT_LABEL`, `PRINT`, `isSmall(fmt)`, `barClass(v, q)`, `barWidth(v, q)`, `qualityLegend(q)`, `unsureText(q)`, `lowContrastText(fmt)`, `ctrlLabels(ref, gridH, small)`, `mixedText(fmt)`, `layoutFacts(fmt, sp)` (alle ohne DOM).
 
 - [ ] **Step 1: Tests schreiben** – `tests/js/formats.test.mjs`:
@@ -1575,6 +1787,8 @@ Expected: FAIL (`Cannot find module …/formats.js`).
 
 ```js
 // Formate der Messunterlage: Druckformate (PDF) und Messformate (am Foto) – Daten und Texte ohne DOM (Spec Kleinteile §5)
+import { de } from "./geom.js";
+
 export const FORMAT_LABEL = Object.freeze({ A4: "A4", A3: "A3", K60H: "Kleinteile hell", K60D: "Kleinteile dunkel" });
 
 const PAGES_BIG = Object.freeze([["mat", "Messunterlage"], ["gauge", "Höhenlehre zum Aufstellen"], ["guide", "Anleitung"]]);
@@ -1587,7 +1801,6 @@ export const PRINT = Object.freeze({
     pages: Object.freeze([["mat", "Blatt hell"], ["dark", "Blatt dunkel"], ["guide", "Anleitung"]]) }),
 });
 
-const de = v => String(v).replace(".", ",");
 const span = ids => `${Math.min(...ids)}–${Math.max(...ids)}`;
 
 export function isSmall(fmt) { return fmt === "K60H" || fmt === "K60D"; }
@@ -1621,12 +1834,12 @@ export function layoutFacts(fmt, sp) {
 }
 ```
 
-(Die Zahlenformatierung `de` reicht hier, weil alle Werte ganz oder mit höchstens drei Nachkommastellen ohne Tausendertrennung sind; `num` aus `lib.js` wird nicht importiert, damit das Modul ohne DOM testbar bleibt.)
+(`de` kommt aus `geom.js` – ohne DOM, wie in `viewer.js`/`cad.js`; rundet auf drei Stellen und setzt das Dezimalkomma.)
 
 - [ ] **Step 4: `mat.js` umbauen**
 
 - Import: `import { PRINT, layoutFacts } from "./formats.js";`; `PAGE_NAMES` und `CAPTIONS` entfallen.
-- `fmt`: gelesen aus `localStorage` `mu.fmt`, nur übernehmen, wenn `fmt in PRINT`, sonst `"A4"`.
+- `fmt`: gelesen aus `localStorage` `mu.fmt`, nur übernehmen, wenn `Object.hasOwn(PRINT, v)` (wie `cad.js:59`; `in` ließe `"constructor"` durch), sonst `"A4"`. In `update()` die URLs mit `format=${encodeURIComponent(fmt)}`.
 - Seitenwahl je Format: `let pages = {}; const pagesBox = h("div");` und
   ```js
   function drawPages() {
@@ -1637,7 +1850,9 @@ export function layoutFacts(fmt, sp) {
   ```
   `fieldset „Seiten im PDF“` enthält `pagesBox`; beim Formatwechsel (`onchange` der Radio-Buttons) `drawPages()` vor `update()`.
 - `choice(f)`: Beschriftung `PRINT[f].title`, Zusatz `PRINT[f].field`; die Formatauswahl zeigt `h("div", { class: "grid3" }, choice("A4"), choice("A3"), choice("K60"))` (`.grid3` gibt es in `app.css`).
-- Druckhinweis: der Text „Danach das 100-mm-Kontrollmaß mit dem Lineal prüfen.“ steht in einem `span`, der in `update()` auf `` `Danach das ${PRINT[fmt].ctrl}-mm-Kontrollmaß mit dem Lineal prüfen.` `` gesetzt wird.
+- Druckhinweis: der Text „ Nicht „An Seite anpassen“. Danach das 100-mm-Kontrollmaß mit dem Lineal prüfen.“ steht heute als blanker Text neben dem `strong` (Z. 37); ihn in ein `span` mit Referenz legen, das `update()` auf `` ` Nicht „An Seite anpassen“. Danach das ${PRINT[fmt].ctrl}-mm-Kontrollmaß mit dem Lineal prüfen.` `` setzt.
+- Kopfzeilen-Hinweis (Z. 35) „Raster und Marker bleiben unverändert.“ → „Messfeld und Marker bleiben unverändert.“ (gilt für alle Formate).
+- „Nach dem Drucken“ Schritt 01 (Z. 46): Untertitel per Referenz, in `update()` bei K60 „Wert ins Feld unter dem Messfeld schreiben“, sonst wie bisher „Wert ins Feld unten rechts schreiben“.
 - „Nach dem Drucken“ Schritt 03: Untertitel-`span` mit Referenz, in `update()` `PRINT[fmt].photo`.
 - `update()`: `const sel = PRINT[fmt].pages.map(([k]) => k).filter(k => pages[k]);` Vorschau-Schleife über `PRINT[fmt].pages.map(([k]) => k)` mit Index `i`; Bildunterschrift `figs[i]` bekommt den Namen `PRINT[fmt].pages[i][1]` (beim Formatwechsel neu setzen: `figcaption` per Referenz speichern); `alt` mit diesem Namen; `download`-Name `` `Messunterlage_${fmt}.pdf` ``.
 - Kennzahlen: `clear(facts, layoutFacts(fmt, sp).map(([k, v]) => fact(k, v)));`
@@ -1650,6 +1865,8 @@ export function layoutFacts(fmt, sp) {
 - Unterzeile Kopf: `p.format ? `${FORMAT_LABEL[p.format] || p.format}${a.format_auto ? " (automatisch)" : ""}` : null`.
 - Balken: `const q = p.quality_mm || [0.5, 1];` `w = barWidth(v, q)`, `class: barClass(v, q)`; Legende `qualityLegend(q)`; Hinweis „unsicher“ `unsureText(q)`; Kontrasthinweis `lowContrastText(p.format)`.
 - Neue Hinweise direkt nach dem Kontrasthinweis: `a.format_note ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, a.format_note)) : null` und `p.view_note ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, p.view_note)) : null`.
+- Bei `S.project.ctrl_stale` direkt über den Eingabefeldern `h("div", { class: "note warn" }, icon("warn"), h("span", {}, "Das eingetragene Kontrollmaß passt nicht zur Unterlage des ersten Fotos – bitte neu messen und eintragen. Bis dahin gilt Faktor 1."))` (Marc F5).
+- `measure.js:350`: `src.photo.format || ""` → `FORMAT_LABEL[src.photo.format] || src.photo.format || ""` (Import `FORMAT_LABEL` aus `./formats.js`).
 - Kontrollmaß: `const gridH = S.project.grid_h || 230, ref = S.project.ctrl_ref || 100;` `const L = ctrlLabels(ref, gridH, isSmall(S.project.format));` `cx` mit `placeholder: L.xPlaceholder, "aria-label": L.xAria`; `cy` mit `"aria-label": L.yAria`; Feldbeschriftungen `L.x` und `L.y`. Unter den Faktor-Chips bei `S.project.mixed_formats` zusätzlich `h("div", { class: "note warn" }, icon("warn"), h("span", {}, mixedText(S.project.format)))`.
 
 - [ ] **Step 6: Tests und Prüfungen**
@@ -1660,7 +1877,7 @@ Expected: PASS. Sichtprüfung folgt im Browser-Durchlauf (Task 10).
 - [ ] **Step 7: Commit**
 
 ```bash
-git add web/static/js/formats.js tests/js/formats.test.mjs web/static/js/mat.js web/static/js/photos.js
+git add web/static/js/formats.js tests/js/formats.test.mjs web/static/js/mat.js web/static/js/photos.js web/static/js/measure.js
 git commit -m "Kleinteile: Oberflaeche fuer Formatwahl, Blatt hell/dunkel, Schwellen und Hinweise je Format"
 ```
 
@@ -1770,7 +1987,7 @@ git push -u origin kleinteile
 gh pr create --draft --base main --title "Kleinteile-Unterlage (Feld 60 × 80 mm, Blatt hell/dunkel)" --body-file $SP/kleinteile/pr.md
 H=$(git rev-parse HEAD) && until gh run list -b kleinteile -L5 --json databaseId,headSha -q ".[] | select(.headSha==\"$H\") | .databaseId" | grep -q .; do sleep 5; done && gh run watch --exit-status $(gh run list -b kleinteile -L5 --json databaseId,headSha -q ".[] | select(.headSha==\"$H\") | .databaseId" | head -1)
 ```
-`$SP/kleinteile/pr.md`: Ziel, Nutzerentscheidungen (Spec §7), Änderungen je Bereich, Tests (Zahlen), Hinweis „A4/A3 durch Goldwerte gesichert“, Spec- und Plan-Pfad; **keine** Attribution. Rote CI allein durch Trivy ohne Bezug zum Branch: nicht im Branch umgehen, an Marc melden. Scheitert der Goldwert-Test nur in der CI (andere CPU, Abweichung in der letzten Stelle): Ruling – Vergleich auf Toleranz eine Einheit der Rundungsstelle umstellen, im Protokoll mit Beispielwert begründen.
+`$SP/kleinteile/pr.md`: Ziel, Nutzerentscheidungen (Spec §7), Änderungen je Bereich, Tests (Zahlen), Hinweis „A4/A3 durch Goldwerte gesichert“, Spec- und Plan-Pfad; **keine** Attribution. Rote CI allein durch Trivy ohne Bezug zum Branch: nicht im Branch umgehen, an Marc melden. Der Goldwert-Test erscheint in der CI als „skipped“ – erwartet (R4); maßgeblich ist der lokale Lauf in Step 1.
 
 - [ ] **Step 3: Server und Testfotos**
 
@@ -1862,8 +2079,15 @@ await step("kontrollmass", async () => {
 });
 
 await step("kanten_und_messen", async () => {
-  await api("POST", `/api/photos/${phid}/edges`, { use_ai: false });
-  await page.goto(`${B}/messen`); await sleep(3000);
+  await page.goto(`${B}/messen`); await sleep(2500);
+  const wait = page.waitForResponse(r => r.url().endsWith(`/api/photos/${phid}/edges`) && r.request().method() === "POST",
+    { timeout: 60000 });
+  await page.getByRole("button", { name: "Kanten erkennen" }).click();
+  C.kanten_ui = (await wait).ok(); await sleep(1500);
+  C.teile_liste = (await page.locator("li.mitem").count()) >= 1;
+  const m = await api("POST", `/api/projects/${pid}/measurements`,
+    { photo_id: phid, kind: "length", view: "top", points: [[20, 34], [40, 34]] });
+  C.messung_20mm = Math.abs(m.value - 20 * 49.9 / 50) <= 0.15;
   const p = await api("GET", `/api/projects/${pid}`);
   const d = p.measurements.find(m => m.kind === "diameter");
   C.bohrung_1mm = !!d && Math.abs(d.value - 1.0) <= 0.1;
@@ -1929,6 +2153,6 @@ Server stoppen; `$SP/kleinteile-protokoll.md` um Abschnitt „Task 10“ ergänz
 
 - [ ] **Step 2: Merge** – nur nach Marcs Freigabe (Merge-Ablauf PR → CI grün → Merge → CI main → NAS). PR auf „ready“ setzen (Body bei Bedarf per `gh api -X PATCH repos/CallMeTechie/Snap2CAD/pulls/<n> -f body=@…`, weil `gh pr edit` am GraphQL-Fehler scheitert), `gh pr merge --merge`, CI auf main abwarten (Image wird veröffentlicht).
 
-- [ ] **Step 3: NAS** – `/root/Snap2CAD-teams-protokoll/nas_update.sh` und `rueckweg.sh` nach `$SP/kleinteile/` kopieren, darin `vor-teams` durch `vor-kleinteile` ersetzen; `ssh -i ~/.ssh/id_ed25519_nas ma.backes@192.168.2.151 'sh -s' < $SP/kleinteile/nas_update.sh | tee $SP/kleinteile/update.log`. Erwartet: neue Sicherung `backup-data-<datum>-<n>.tgz`, Images `:vor-kleinteile`, beide Container healthy, Revision = Merge-Commit, `https://snap2cad.collabtive.cloud/api/mat/layout?format=K60` ohne Login 401 (Route erreicht die App, kein WAF-Block). Keine Datenmigration; bestehende Fotos unverändert (Format A4/A3).
+- [ ] **Step 3: NAS** – `/root/Snap2CAD-teams-protokoll/nas_update.sh` und `rueckweg.sh` nach `$SP/kleinteile/` kopieren, darin `vor-teams` durch `vor-kleinteile` ersetzen; vorher auf der NAS zählen, wie viele Fotos es gibt (Vergleich vorher/nachher wie bei Teams). Ausführen über denselben SSH-Aufruf wie in `/root/Snap2CAD-teams-protokoll/teams-protokoll.md` (Zugangsdaten stehen nur dort und in der Memory, nicht im Repo), Ausgabe mit `tee $SP/kleinteile/update.log` mitschreiben. Erwartet: neue Sicherung `backup-data-<datum>-<n>.tgz`, Images `:vor-kleinteile`, beide Container healthy, Revision = Merge-Commit, `https://snap2cad.collabtive.cloud/api/mat/layout?format=K60` ohne Login 401 (Route erreicht die App, kein WAF-Block). Keine Datenmigration; bestehende Fotos unverändert (Format A4/A3). Hinweis für den Rückweg (in den Bericht): Die alte Version kennt `K60H`/`K60D` nicht – solche Fotos bleiben gespeichert, aber ohne Kantenerkennung (400), und Browser mit `mu.fmt=K60` zeigen auf der Unterlagen-Seite erst nach Wahl von A4 wieder ein Format; vor einem Rückweg `SELECT COUNT(*) FROM photos WHERE format LIKE 'K60%'` zählen.
 
 - [ ] **Step 4: Abschluss** – Memory `snap2cad-nas.md` und Index aktualisieren, Protokoll und Skripte nach `/root/Snap2CAD-kleinteile-protokoll/` sichern, Bericht an Marc mit der Bitte um den Echtfoto-Test (Spec §6: Kleinteil auf echtem Ausdruck, Messschieber-Vergleich).
