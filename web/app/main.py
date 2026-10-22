@@ -1296,8 +1296,10 @@ def photo_edges(phid: int, body: EdgesIn, request: Request, u: dict = Depends(au
     if not res["outlines"]:
         raise HTTPException(422, "Kein Objekt erkannt – Teil von Hand zeichnen.")
 
+    mg = _margin_mm(ph)
+
     def inside(poly):
-        return all(-10 <= q[0] <= rect["w_mm"] + 10 and -10 <= q[1] <= rect["h_mm"] + 10 for q in poly)
+        return all(-mg <= q[0] <= rect["w_mm"] + mg and -mg <= q[1] <= rect["h_mm"] + mg for q in poly)
     notice, detected = "", []
     if body.use_ai and settings.ai_enabled():
         if u["role"] != "admin" and _ai_uses_today(u) >= AI_DAILY_LIMIT:
@@ -1576,6 +1578,11 @@ class PartPatch(BaseModel):
     reset_scale: bool = False
 
 
+def _margin_mm(photo: dict) -> float:
+    """Spielraum fuer Eckpunkte ausserhalb des Feldes: 10 mm · k (A4/A3 10 mm, Kleinteile 2,5 mm)."""
+    return 10.0 * matgen.edge_scale(photo.get("format"))
+
+
 def _polygon(pts: list, photo: dict) -> list:
     import math
     a = db.jload(photo["analysis"], {}) or {}
@@ -1584,9 +1591,10 @@ def _polygon(pts: list, photo: dict) -> list:
         raise HTTPException(400, "Für dieses Foto gibt es keine entzerrte Draufsicht.")
     if not 3 <= len(pts) <= 64:
         raise HTTPException(400, "Ein Teil braucht 3 bis 64 Eckpunkte.")
+    mg = _margin_mm(photo)
     for q in pts:
         if len(q) != 2 or not all(math.isfinite(v) for v in q) \
-                or not (-10 <= q[0] <= r["w_mm"] + 10 and -10 <= q[1] <= r["h_mm"] + 10):
+                or not (-mg <= q[0] <= r["w_mm"] + mg and -mg <= q[1] <= r["h_mm"] + mg):
             raise HTTPException(400, "Eckpunkt außerhalb der Messfläche")
     return [[float(q[0]), float(q[1])] for q in pts]
 

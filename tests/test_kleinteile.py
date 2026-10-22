@@ -4,7 +4,7 @@ import math
 import numpy as np
 import pytest
 
-from conftest import _render_k60, _render_page, synthetic_photo
+from conftest import H, _render_k60, _render_page, synthetic_photo
 from core import matgen, vision
 
 # ------------------------------------------------------------------ Erkennung und Entzerrung (§2)
@@ -170,3 +170,66 @@ def test_k60_falsche_variante_wenig_kontrast():
     from core import edges
     res = edges.detect(_k60_rect("K60D", [{"rect": [15, 30, 30, 20], "gray": 45}]), "K60D")
     assert res["outlines"] == [] and res["contrast"] is None, (res["outlines"], res["contrast"])  # dL ≈ 12 < 18
+
+
+# ------------------------------------------------------------------ Teile (§3 Zuordnung, F2)
+
+SQ = [[28.5, 38.5], [31.5, 38.5], [31.5, 41.5], [28.5, 41.5]]  # 3 x 3 mm
+
+
+def test_k60_teile_plausible():
+    from app import parts
+    assert not parts.plausible(SQ, [{"polygon": SQ}])                       # A4-Grenze 25 mm²
+    assert parts.plausible(SQ, [{"polygon": SQ}], min_area=25.0 * 0.25 ** 2)
+
+
+def test_k60_teile_schwellen_skaliert():
+    from app import parts
+    moved = [[x + 1.0, y] for x, y in SQ]                                    # 1 mm verschoben
+    assert parts.transfer_ids(SQ, [1, 2, 3, 4], moved, 5)[0] == [1, 2, 3, 4]
+    assert parts.transfer_ids(SQ, [1, 2, 3, 4], moved, 5, edge_k=0.25)[0] == [5, 6, 7, 8]
+    assert parts.transfer_ids(SQ, [1, 2, 3, 4], [[x + 0.2, y] for x, y in SQ], 5, edge_k=0.25)[0] == [1, 2, 3, 4]
+    old = [{"id": 1, "c": [30, 40], "d": 1.0}]
+    assert parts.transfer_holes(old, [{"c": [31.0, 40], "d": 1.0}], 2)[0][0]["id"] == 1
+    assert parts.transfer_holes(old, [{"c": [31.0, 40], "d": 1.0}], 2, edge_k=0.25)[0][0]["id"] == 2
+    seg = [{"id": "K1", "a": [28.5, 37.5], "b": [31.5, 37.5]}]                # 1 mm unter der Unterkante
+    assert parts.snap_polygon(SQ, seg)[0][0] == [28.5, 37.5]
+    assert parts.snap_polygon(SQ, seg, edge_k=0.25)[0][0] == [28.5, 38.5]
+    assert parts.assign([[32.0, 40.0]], [(7, SQ)]) == 7                       # 0,5 mm ausserhalb
+    assert parts.assign([[32.0, 40.0]], [(7, SQ)], edge_k=0.25) is None
+    uneven = {"polygon": [[0, 0], [10, 0], [10, 5], [0, 5.5]], "edge_ids": [1, 2, 3, 4], "hidden": [], "holes": []}
+    assert parts.is_rect(uneven["polygon"])                                  # Winkel weichen 2,9° ab (< 4°)
+    warn = "gegenüberliegende Kanten ungleich – Kante prüfen"                # links 5,5 mm, rechts 5 mm
+    assert warn not in [d["warn"] for d in parts.auto_dims(uneven)]          # 0,5 mm < 1 mm
+    assert warn in [d["warn"] for d in parts.auto_dims(uneven, edge_k=0.25)]      # 0,5 mm > 0,25 mm
+
+
+def test_k60_teile_default_unc():
+    from app import parts
+    assert parts.default_unc({"format": "K60H", "max_err": 0.05, "analysis": "{}"}, "top") == 0.1
+    assert parts.default_unc({"format": "K60H", "max_err": None, "analysis": "{}"}, "top") == 0.12
+    assert parts.default_unc({"format": "A4", "max_err": 0.3, "analysis": "{}"}, "top") == 0.5
+    assert parts.default_unc(None, "top") == 0.5
+
+
+# ------------------------------------------------------------------ API (§2, §4, §5)
+
+PLATE_H = [{"rect": [20, 34, 20, 12], "gray": 90}, {"circle": [30, 40, 1.0], "gray": 245}]
+
+
+def _k60_project(c, fmt="K60H", objects=None, view="top", fmt_form=""):
+    pid = c.post("/api/projects", json={"name": "Klein"}, headers=H).json()["id"]
+    r = c.post(f"/api/projects/{pid}/photos", headers=H, data={"view": view, "format": fmt_form},
+               files={"file": ("k.jpg", synthetic_photo(fmt, objects=PLATE_H if objects is None else objects), "image/jpeg")})
+    assert r.status_code == 200, r.text
+    return pid, r.json()
+
+
+def test_k60_api_eckpunkt_spielraum(user):
+    pid, ph = _k60_project(user)
+    ok = [[-2.0, 30], [10, 30], [10, 40]]
+    bad = [[-3.0, 30], [10, 30], [10, 40]]
+    r = user.post(f"/api/projects/{pid}/parts", json={"photo_id": ph["id"], "label": "A", "polygon": ok}, headers=H)
+    assert r.status_code == 200, r.text
+    r = user.post(f"/api/projects/{pid}/parts", json={"photo_id": ph["id"], "label": "B", "polygon": bad}, headers=H)
+    assert r.status_code == 400 and "außerhalb der Messfläche" in r.text
