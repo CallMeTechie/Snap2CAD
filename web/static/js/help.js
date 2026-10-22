@@ -9,7 +9,7 @@ export const KEY_OF = Object.freeze(Object.fromEntries(Object.entries(TOOL_KEYS)
 
 // Abschnitte der Anleitung (Sprungmarken /anleitung#id)
 export const SECTIONS = Object.freeze([
-  ["ablauf", "Ablauf"], ["unterlage", "Messunterlage drucken"], ["fotografieren", "Fotografieren"], ["fotos", "Fotos prüfen"],
+  ["ablauf", "Ablauf"], ["unterlage", "Messunterlage drucken"], ["fotografieren", "Fotografieren"], ["kleinteile", "Kleinteile"], ["fotos", "Fotos prüfen"],
   ["messen", "Messen"], ["kanten", "Kanten und Teile"], ["cad", "CAD-Modell"], ["bemassung", "Bemaßung am Modell"],
   ["teams", "Teams"], ["tastatur", "Tastatur und Maus"], ["probleme", "Häufige Probleme"],
 ]);

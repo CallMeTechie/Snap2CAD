@@ -33,10 +33,10 @@ function unterlage() {
   matGenerator(gen);
   return section("unterlage",
     card(
-      P("Die Messunterlage ist ein PDF mit 1-mm-Raster und acht ArUco-Markern, dazu auf Wunsch die Höhenlehre zum Aufstellen und eine Kurzanleitung. Ein Ausdruck reicht für beliebig viele Messungen."),
+      P("Die Messunterlage ist ein PDF mit 1-mm-Raster und acht ArUco-Markern, dazu auf Wunsch die Höhenlehre zum Aufstellen und eine Kurzanleitung. Für Kleinteile gibt es eine eigene Unterlage ohne Raster (siehe „Kleinteile“). Ein Ausdruck reicht für beliebig viele Messungen."),
       UL([
         [B("Mit 100 % bzw. „Tatsächliche Größe“ drucken"), " – nie „An Seite anpassen“, sonst stimmt der Maßstab nicht."],
-        [B("Kontrollmaß prüfen:"), " die 100-mm-Skala unten links mit einem Stahllineal nachmessen und den Wert ins Feld unten rechts auf dem Blatt schreiben. Denselben Wert auf „Fotos prüfen“ unter „Kontrollmaß vom Ausdruck“ eintragen; daraus entstehen die Korrekturfaktoren für X und Y."],
+        [B("Kontrollmaß prüfen:"), " die 100-mm-Skala unten links (bei Kleinteilen 50 mm) mit einem Stahllineal nachmessen und den Wert ins Feld unten rechts auf dem Blatt schreiben. Denselben Wert auf „Fotos prüfen“ unter „Kontrollmaß vom Ausdruck“ eintragen; daraus entstehen die Korrekturfaktoren für X und Y."],
         [B("Mattes Papier"), " verwenden: Glanz und Blitz überstrahlen die Marker."],
         [B("Plan fixieren:"), " die Unterlage auf eine Glasplatte oder einen festen Karton kleben, die Ecken mit Klebeband sichern. Welliges Papier ist die häufigste Fehlerquelle."],
       ])),
@@ -63,15 +63,28 @@ function fotografieren() {
     NOTE("info", B("Passmaße mit dem Messschieber nachmessen."), " Lagersitze, Wellen, Gewinde und Anschlussmaße brauchen mehr Genauigkeit, als ein Foto liefert. Fotos liefern Geometrie und Lage, keine Passmaßgenauigkeit.")));
 }
 
+function kleinteile() {
+  return section("kleinteile", card(
+    P("Für Teile von wenigen Millimetern bis etwa 50 mm gibt es eine eigene Unterlage: Feld 60 × 80 mm ohne Raster, als Blatt hell und Blatt dunkel. Beim Erzeugen der Messunterlage „Kleinteile“ wählen."),
+    UL([
+      [B("Variante wählen:"), " dunkle oder bunte Teile auf das helle Blatt; helle, blanke, weiße oder durchsichtige Teile auf das dunkle Blatt."],
+      [B("Drucken:"), " mit 100 %. Das dunkle Blatt möglichst mit Tintenstrahl auf mattem Papier – Laser-Toner glänzt auf großen dunklen Flächen. Das 50-mm-Kontrollmaß nachmessen und auf „Fotos prüfen“ eintragen, senkrecht die Skala 0–80."],
+      [B("Auflegen:"), " Teil mittig ins Feld, alle 8 Marker frei lassen. Diffuses Licht, keine harten Schatten – es gibt kein Raster, das einen Schatten von einer Kante unterscheidet."],
+      [B("Fotografieren:"), " senkrecht, 2×- oder 3×-Zoom aus 25–30 cm, der Rahmen füllt das Bild. Kein Makro-Modus: Fehler ≈ Maß × Höhe ÷ Abstand – ein 20 mm breites, 10 mm hohes Teil wirkt oben aus 25 cm 0,8 mm, aus 8 cm 2,5 mm zu breit."],
+      [B("Höhe:"), " Teil kippen und erneut fotografieren (Ansicht „Gekippt (Höhe)“ oder als weitere Draufsicht). Eine Höhenlehre gibt es für Kleinteile nicht."],
+      [B("Genauigkeit:"), " flache Teile (Höhe bis 2 mm) etwa ±0,2–0,3 mm, mit Messschieber-Nachmessung ±0,1–0,2 mm. Höhere Teile an der Auflagekante messen oder die Maße am Modell mit dem Messschieber korrigieren."],
+    ])));
+}
+
 function fotos() {
   return section("fotos", card(
     UL([
       [B("Hochladen:"), " Fotos auf die Fläche ziehen, „Dateien auswählen“, am Handy „Foto aufnehmen“ oder ein Bild aus der Zwischenablage mit ", K("Strg"), " + ", K("V"), " einfügen. JPG, PNG und HEIC in Originalauflösung."],
-      [B("Ansicht:"), " oben unter „Ansicht“ festlegen, wofür die nächsten Fotos stehen (Draufsicht, Von unten, Gekippt (Höhe), Höhenlehre, Übersicht). In der Fotoliste lässt sich die Ansicht je Foto nachträglich ändern. „Unterlage“ erkennt A4 oder A3 automatisch oder legt das Format fest."],
-      [B("Ampel und Restfehler:"), " je Foto stehen die erkannten Marker und der größte Restfehler der Entzerrung. Bis 0,5 mm ist das Foto „gut“ (grün), bis 1 mm „brauchbar“ (gelb), darüber „unsicher – wiederholen“ (rot). Unter vier Markern ist es „nicht auswertbar“. Die Balken zeigen den Restfehler je Marker."],
+      [B("Ansicht:"), " oben unter „Ansicht“ festlegen, wofür die nächsten Fotos stehen (Draufsicht, Von unten, Gekippt (Höhe), Höhenlehre, Übersicht). In der Fotoliste lässt sich die Ansicht je Foto nachträglich ändern. „Unterlage“ erkennt A4, A3 und die Kleinteile-Blätter automatisch oder legt das Format fest."],
+      [B("Ampel und Restfehler:"), " je Foto stehen die erkannten Marker und der größte Restfehler der Entzerrung. Bis 0,5 mm ist das Foto „gut“ (grün), bis 1 mm „brauchbar“ (gelb), darüber „unsicher – wiederholen“ (rot). Bei Kleinteilen gelten 0,125 und 0,25 mm. Unter vier Markern ist es „nicht auswertbar“. Die Balken zeigen den Restfehler je Marker."],
       [B("Original, Entzerrt, Beide, Höhenlehre:"), " schaltet die Bilder darunter um; ein Klick auf ein Bild öffnet es in größerer Ansicht in einem neuen Tab."],
       [B("Lage der Unteransicht:"), " bei Fotos „Von unten“ zeigt der Kasten „Lage zur Draufsicht“ die Überlagerung. Steht dort „Ausrichtung unsicher“ oder passt die Überlagerung nicht, die richtige Lage wählen (z. B. „seitlich umgedreht“ oder „nach vorn umgedreht“); „Wieder automatisch“ setzt die Wahl zurück."],
-      [B("Kontrollmaß vom Ausdruck:"), " den gemessenen Wert der 100-mm-Skala eintragen, auf Wunsch auch das Raster senkrecht (230 mm bei A4, 360 mm bei A3). Die Faktoren X und Y gelten für alle Fotos des Projekts; leer = Faktor 1."],
+      [B("Kontrollmaß vom Ausdruck:"), " den gemessenen Wert der 100-mm-Skala eintragen, auf Wunsch auch das Raster senkrecht (230 mm bei A4, 360 mm bei A3, Skala 80 mm bei Kleinteilen; waagerecht 50 mm bei Kleinteilen). Die Faktoren X und Y gelten für alle Fotos des Projekts; leer = Faktor 1."],
       [B("Kasten „Werkstück“:"), " Farbe, Material, Transparenz und Oberfläche vor „Kanten erkennen“ setzen. Nur diese Handeingaben steuern die Kantenerkennung (z. B. helle oder durchscheinende Teile); eine Schätzung der KI wirkt dort nicht. „Zurücksetzen“ entfernt die Handeingaben."],
       [B("Kontrastwarnung:"), " „Geringer Kontrast zur Unterlage“ heißt: Licht von der Seite, Schatten vermeiden, bei Glas oder Klarsicht ein Blatt Papier unterlegen."],
     ])));
@@ -181,7 +194,7 @@ function probleme() {
   const q = (t, ...a) => h("div", { class: "faq" }, h("h3", {}, t), P(...a));
   return section("probleme", card(
     q("Marker werden nicht erkannt", "Alle acht Marker frei lassen, kein Blitz und kein Glanz, Foto scharf und die Unterlage vollständig im Bild. Auf „Fotos prüfen“ nennt „Fehlend: ID …“ die verdeckten Marker; mindestens vier sind nötig."),
-    q("Foto „unsicher – wiederholen“", "Der Restfehler liegt über 1 mm. Meist liegt die Unterlage nicht flach oder das Foto ist unscharf: Papier fixieren und neu fotografieren."),
+    q("Foto „unsicher – wiederholen“", "Der Restfehler liegt über 1 mm (bei Kleinteilen über 0,25 mm). Meist liegt die Unterlage nicht flach oder das Foto ist unscharf: Papier fixieren und neu fotografieren."),
     q("Kanten mit Schatten oder falschem Umriss", "Diffuses Licht von der Seite verwenden, im Kasten „Werkstück“ Farbe und Transparenz angeben und „Kanten erkennen“ erneut starten. Danach die Eckpunkte von Hand korrigieren. Beim Messen hilft die Lupe; der Kantenfang lässt sich abschalten, wenn er auf den Schatten springt."),
     q("Unteransicht falsch ausgerichtet", "Auf „Fotos prüfen“ das Foto „Von unten“ wählen und im Kasten „Lage zur Draufsicht“ die richtige Lage anklicken."),
     q("„Anfrage blockiert“ hinter einem Reverse-Proxy", "Umbenennen, Löschen, Eckpunkte, Messungen und Werkstück-Angaben nutzen die HTTP-Methoden PATCH und DELETE. Eine Firewall oder ein Proxy vor Snap2CAD muss beide durchlassen. Funktioniert es im lokalen Netz, liegt die Sperre im Proxy."),
@@ -190,7 +203,7 @@ function probleme() {
 }
 
 // Inhalt in der Reihenfolge von SECTIONS (dieselbe Liste wie das Inhaltsverzeichnis)
-const BUILD = { ablauf, unterlage, fotografieren, fotos, messen, kanten, cad, bemassung, teams, tastatur, probleme };
+const BUILD = { ablauf, unterlage, fotografieren, kleinteile, fotos, messen, kanten, cad, bemassung, teams, tastatur, probleme };
 
 export default function (main) {
   const toc = h("nav", { class: "gtoc", "aria-label": "Inhalt der Anleitung" },
