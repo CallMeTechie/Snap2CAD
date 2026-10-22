@@ -44,3 +44,18 @@ export function layoutFacts(fmt, sp) {
   return [["Raster", `${sp.grid_mm[0]} × ${sp.grid_mm[1]} mm`], ["Marker", `8 × ${de(sp.marker_size_mm)} mm`],
     ["Wörterbuch", `4X4_50 · ID ${span(sp.ids)}`], ["Höhenlehre", `0–${de((sp.height_gauge || {}).vlen_mm)} mm`]];
 }
+
+// Fototipps als [Titel, Text]; Kleinteile: kurzer Abstand und keine Höhenlehre (Spec Kleinteile §5)
+export function photoTips(fmt) {
+  const small = isSmall(fmt);
+  return [
+    ["Senkrecht von oben", "Handy parallel zur Unterlage, Objekt in der Bildmitte."],
+    small ? ["2×- oder 3×-Zoom aus 25–30 cm, kein Makro", "der Rahmen füllt das Bild."]
+      : ["Abstand 50–70 cm, 2×-Zoom", "weniger perspektivische Verzerrung als nah mit Weitwinkel."],
+    ["Alle 8 Marker sichtbar", "mindestens 4 sind nötig, mehr erhöhen die Genauigkeit."],
+    ["Kein Blitz, kein Schlagschatten", "diffuses Licht, Marker dürfen nicht spiegeln."],
+    ["Unterlage flach", "Ecken festkleben, keine Wellen im Papier."],
+    small ? ["Teil kippen und als ‚Gekippt (Höhe)‘ fotografieren", "für Kleinteile gibt es keine Höhenlehre."]
+      : ["Höhen", "Höhenlehre direkt neben das Objekt stellen – alle drei Marker im Bild, Kamera auf Höhe der Objektmitte."],
+  ];
+}

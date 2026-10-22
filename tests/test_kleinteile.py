@@ -316,6 +316,16 @@ def test_k60_api_formatwechsel_ohne_marker_abgelehnt(user, photo_a4):
     assert p["photos"][0]["format"] == "A4" and "rect" in p["photos"][0]["files"] and len(p["parts"]) == n_parts
 
 
+def test_k60_api_formatwechsel_mit_ansicht_alles_oder_nichts(user, photo_a4):
+    pid = user.post("/api/projects", json={"name": "A4"}, headers=H).json()["id"]
+    ph = user.post(f"/api/projects/{pid}/photos", headers=H, data={"view": "top"},
+                   files={"file": ("a4.jpg", photo_a4, "image/jpeg")}).json()
+    r = user.patch(f"/api/photos/{ph['id']}", json={"view": "bottom", "format": "K60H"}, headers=H)
+    assert r.status_code == 400 and "keine Marker für Kleinteile hell" in r.text
+    p = user.get(f"/api/projects/{pid}").json()["photos"][0]
+    assert p["view"] == "top" and p["format"] == "A4"
+
+
 def test_k60_api_variante_idempotent(user):
     pid, ph = _k60_project(user, fmt="K60D", objects=[{"rect": [15, 30, 30, 20], "gray": 230}], fmt_form="K60H")
     assert user.post(f"/api/photos/{ph['id']}/edges", json={"use_ai": False}, headers=H).status_code == 200

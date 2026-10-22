@@ -1209,6 +1209,14 @@ def photo_patch(phid: int, body: PhotoPatch, u: dict = Depends(auth.require_user
     if "bottom_align" in body.model_fields_set and new_view != "bottom":
         raise HTTPException(400, "Nur für Fotos der Ansicht „Von unten“")   # vor jeder Aenderung pruefen
     realign = False
+    fmt_change = body.format is not None and body.format != ph["format"]
+    if fmt_change:   # R3 vor jeder Aenderung pruefen: Erkennung haengt nicht von der Ansicht ab
+        img = vision.load_image((_photo_dir(phid) / "orig.jpg").read_bytes())
+        old_a = db.jload(ph["analysis"], {}) or {}
+        cands = vision.pick_candidates(vision.detect(img), body.format)[0] if body.format in matgen.FORMATS else None
+        if cands is not None and old_a.get("homography") and not cands:   # R3: entzerrtes Foto bleibt, wie es ist
+            raise HTTPException(400, f"Auf diesem Foto sind keine Marker für {matgen.PROFILES[body.format]['label']} "
+                                     "zu sehen – Format bleibt.")
     if body.view in VIEWS and body.view != ph["view"]:
         with db.atomic():
             db.ex("UPDATE photos SET view=? WHERE id=?", (body.view, phid))
@@ -1224,13 +1232,7 @@ def photo_patch(phid: int, body: PhotoPatch, u: dict = Depends(auth.require_user
             _align_photo(db.q1("SELECT * FROM photos WHERE id=?", (phid,)), None)
         ph = db.q1("SELECT * FROM photos WHERE id=?", (phid,))
         _refresh(p)   # Auto-Masse bekommen die neue Ansicht (_refresh ist selbst atomar)
-    if body.format is not None and body.format != ph["format"]:
-        img = vision.load_image((_photo_dir(phid) / "orig.jpg").read_bytes())
-        old_a = db.jload(ph["analysis"], {}) or {}
-        cands = vision.pick_candidates(vision.detect(img), body.format)[0] if body.format in matgen.FORMATS else None
-        if cands is not None and old_a.get("homography") and not cands:   # R3: entzerrtes Foto bleibt, wie es ist
-            raise HTTPException(400, f"Auf diesem Foto sind keine Marker für {matgen.PROFILES[body.format]['label']} "
-                                     "zu sehen – Format bleibt.")
+    if fmt_change:
         if cands != [ph["format"]]:   # Ergebnis waere dasselbe Format (F4-Schwester): nicht neu auswerten
             a = _analyze_store(phid, img, body.format if body.format in matgen.FORMATS else None, ph["view"],
                                _hints(p))

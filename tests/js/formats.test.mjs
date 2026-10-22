@@ -1,7 +1,7 @@
 // Formate der Messunterlage (web/static/js/formats.js) – Aufruf: node --test tests/js/*.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { FORMAT_LABEL, PRINT, isSmall, barClass, barWidth, qualityLegend, unsureText, lowContrastText, ctrlLabels, mixedText, layoutFacts }
+import { FORMAT_LABEL, PRINT, isSmall, barClass, barWidth, qualityLegend, unsureText, lowContrastText, ctrlLabels, mixedText, layoutFacts, photoTips }
   from "../../web/static/js/formats.js";
 
 test("Anzeigenamen und Druckformate", () => {
@@ -42,4 +42,20 @@ test("Kennzahlen der Unterlage", () => {
   const k = { K60H: { grid_mm: [60, 80], marker_size_mm: 8, ids: [20, 21, 22, 23, 24, 25, 26, 27] },
               K60D: { grid_mm: [60, 80], marker_size_mm: 8, ids: [30, 31, 32, 33, 34, 35, 36, 37] } };
   assert.deepEqual(layoutFacts("K60", k), [["Feld", "60 × 80 mm"], ["Marker", "8 × 8 mm"], ["Wörterbuch", "4X4_50 · ID 20–27 / 30–37"], ["Höhenlehre", "keine – Teil kippen"]]);
+});
+
+test("Fototipps: A4 unveraendert, Kleinteile mit eigenem Abstand und Kipp-Hinweis", () => {
+  const big = photoTips("A4");
+  assert.deepEqual(big[1], ["Abstand 50–70 cm, 2×-Zoom", "weniger perspektivische Verzerrung als nah mit Weitwinkel."]);
+  assert.deepEqual(big[5],
+    ["Höhen", "Höhenlehre direkt neben das Objekt stellen – alle drei Marker im Bild, Kamera auf Höhe der Objektmitte."]);
+  assert.deepEqual(photoTips(""), big);
+  assert.deepEqual(photoTips(null), big);
+  const small = photoTips("K60D");
+  assert.equal(small.length, big.length);
+  const line = t => t.join(" – ");
+  assert.equal(line(small[1]), "2×- oder 3×-Zoom aus 25–30 cm, kein Makro – der Rahmen füllt das Bild.");
+  assert.equal(line(small[5]), "Teil kippen und als ‚Gekippt (Höhe)‘ fotografieren – für Kleinteile gibt es keine Höhenlehre.");
+  assert.deepEqual(small.filter((_, i) => i !== 1 && i !== 5), big.filter((_, i) => i !== 1 && i !== 5));
+  assert.doesNotMatch(JSON.stringify(small), /50–70 cm|Höhenlehre direkt/);
 });

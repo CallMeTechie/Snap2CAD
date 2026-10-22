@@ -2,7 +2,7 @@
 import { api, upload, h, clear, icon, num, parseNum, toast, fail, dialog, confirmDlg } from "./lib.js";
 import { S, ensureProject, reloadProject, projectPicker, go, onLeave, readOnlyMode } from "./app.js";
 import { isReadOnly } from "./rights.js";
-import { FORMAT_LABEL, isSmall, barClass, barWidth, qualityLegend, unsureText, lowContrastText, ctrlLabels, mixedText } from "./formats.js";
+import { FORMAT_LABEL, isSmall, barClass, barWidth, qualityLegend, unsureText, lowContrastText, ctrlLabels, mixedText, photoTips } from "./formats.js";
 
 export const VIEW_LABEL = { top: "Draufsicht", bottom: "Von unten", tilted: "Gekippt (Höhe)", gauge: "Höhenlehre", overview: "Übersicht" };
 export const STATUS = {
@@ -20,15 +20,17 @@ export function photoStatusLine(p) {
   return h("span", { class: "st" }, h("span", { class: `dot ${k === "ok" ? "" : k}` }), parts.join(" · "));
 }
 
-export function tipsDialog() {
-  const li = (t, s) => h("li", {}, h("strong", {}, t), " – ", s);
-  return dialog({ title: "Fototipps", body: h("ul", { class: "ul" },
-    li("Senkrecht von oben", "Handy parallel zur Unterlage, Objekt in der Bildmitte."),
-    li("Abstand 50–70 cm, 2×-Zoom", "weniger perspektivische Verzerrung als nah mit Weitwinkel."),
-    li("Alle 8 Marker sichtbar", "mindestens 4 sind nötig, mehr erhöhen die Genauigkeit."),
-    li("Kein Blitz, kein Schlagschatten", "diffuses Licht, Marker dürfen nicht spiegeln."),
-    li("Unterlage flach", "Ecken festkleben, keine Wellen im Papier."),
-    li("Höhen", "Höhenlehre direkt neben das Objekt stellen – alle drei Marker im Bild, Kamera auf Höhe der Objektmitte.")),
+// Format fuer die Tipps: gewaehlt/erkannt, sonst aus den Marker-IDs (20-37 = Kleinteile)
+export function tipFormat(p) {
+  if (!p) return "";
+  const a = p.analysis || {};
+  const ids = [...(a.mat_ids || []), ...(a.missing_ids || [])];
+  return p.format || (ids.length && ids.every(i => i >= 20 && i <= 37) ? "K60H" : "");
+}
+
+export function tipsDialog(fmt) {
+  const li = ([t, s]) => h("li", {}, h("strong", {}, t), " – ", s);
+  return dialog({ title: "Fototipps", body: h("ul", { class: "ul" }, photoTips(fmt).map(li)),
   actions: [{ label: "Verstanden", primary: true, value: true }] });
 }
 
@@ -76,7 +78,7 @@ export default async function (main) {
       h("aside", { "aria-label": "Hochgeladene Fotos", style: { display: "flex", flexDirection: "column", gap: "12px" } },
         h("p", { class: "small muted matlink" }, icon("printer", 16), "Noch keine Messunterlage? ", h("a", { href: "/anleitung#unterlage" }, "Messunterlage drucken")),
         drop, ws, list,
-        h("button", { class: "btn ghost sm", style: { alignSelf: "flex-start" }, onclick: tipsDialog, "data-ro": "ok" }, icon("info", 16), "Fototipps")),
+        h("button", { class: "btn ghost sm", style: { alignSelf: "flex-start" }, onclick: () => tipsDialog(fmtSel.value || tipFormat(cur())), "data-ro": "ok" }, icon("info", 16), "Fototipps")),
       detail));
 
   ["dragenter", "dragover"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add("over"); }));
@@ -132,7 +134,7 @@ export default async function (main) {
           h("span", { class: "nm", title: p.filename }, p.filename), bad ? null : sel, photoStatusLine(p),
           p.gauge ? h("span", { class: "xs muted" }, `Höhenlehre ${p.gauge.strip} · ${p.gauge.ids.length}/3 Marker`) : null,
           bad ? h("span", { class: "xs", style: { color: "var(--err)" } }, `Mindestens 4 Marker nötig. ${missing.length ? `Marker ID ${missing.join(", ")} verdeckt oder unscharf.` : ""}`) : null,
-          bad ? h("div", { class: "acts" }, h("button", { class: "btn sm", "data-ro": "ok", onclick: e => { e.stopPropagation(); tipsDialog(); } }, "Fototipps"),
+          bad ? h("div", { class: "acts" }, h("button", { class: "btn sm", "data-ro": "ok", onclick: e => { e.stopPropagation(); tipsDialog(tipFormat(p)); } }, "Fototipps"),
             h("button", { class: "btn sm danger", onclick: e => { e.stopPropagation(); del(p); } }, "Entfernen")) : null));
     }), pending.map(it => h("li", { class: "pitem", "aria-busy": "true" }, h("div", { class: "ph" }, h("span", { class: "spin" })),
       h("div", {}, h("span", { class: "nm" }, it.name), h("br"),
@@ -275,7 +277,7 @@ export default async function (main) {
           h("span", { class: "xs muted" }, qualityLegend(q))),
         h("div", { style: { display: "flex", flexDirection: "column", gap: "12px" } },
           h("h3", {}, "Kontrollmaß vom Ausdruck"),
-          S.project.ctrl_stale ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, "Das eingetragene Kontrollmaß passt nicht zur Unterlage des ersten Fotos – bitte neu messen und eintragen. Bis dahin gilt Faktor 1.")) : null,
+          S.project.ctrl_stale ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, "Das eingetragene Kontrollmaß passt nicht zur Unterlage des ersten Fotos – bitte neu messen und eintragen. Bis dahin gilt Faktor 1. Beide Werte (waagerecht und senkrecht) neu eintragen.")) : null,
           h("div", { class: "ctrl" },
             h("label", { class: "field" }, h("span", { class: "small", style: { fontWeight: 600 } }, L.x), h("span", { class: "unit" }, cx, h("span", {}, "mm"))),
             h("label", { class: "field" }, h("span", { class: "small", style: { fontWeight: 600 } }, L.y), h("span", { class: "unit" }, cy, h("span", {}, "mm")))),

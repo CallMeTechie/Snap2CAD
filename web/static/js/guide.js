@@ -36,7 +36,7 @@ function unterlage() {
       P("Die Messunterlage ist ein PDF mit 1-mm-Raster und acht ArUco-Markern, dazu auf Wunsch die Höhenlehre zum Aufstellen und eine Kurzanleitung. Für Kleinteile gibt es eine eigene Unterlage ohne Raster (siehe „Kleinteile“). Ein Ausdruck reicht für beliebig viele Messungen."),
       UL([
         [B("Mit 100 % bzw. „Tatsächliche Größe“ drucken"), " – nie „An Seite anpassen“, sonst stimmt der Maßstab nicht."],
-        [B("Kontrollmaß prüfen:"), " die 100-mm-Skala unten links (bei Kleinteilen 50 mm) mit einem Stahllineal nachmessen und den Wert ins Feld unten rechts auf dem Blatt schreiben. Denselben Wert auf „Fotos prüfen“ unter „Kontrollmaß vom Ausdruck“ eintragen; daraus entstehen die Korrekturfaktoren für X und Y."],
+        [B("Kontrollmaß prüfen:"), " die 100-mm-Skala unten links mit einem Stahllineal nachmessen und den Wert ins Feld unten rechts auf dem Blatt schreiben (bei Kleinteilen die 50-mm-Skala und das Eintragsfeld unter dem Messfeld). Denselben Wert auf „Fotos prüfen“ unter „Kontrollmaß vom Ausdruck“ eintragen; daraus entstehen die Korrekturfaktoren für X und Y."],
         [B("Mattes Papier"), " verwenden: Glanz und Blitz überstrahlen die Marker."],
         [B("Plan fixieren:"), " die Unterlage auf eine Glasplatte oder einen festen Karton kleben, die Ecken mit Klebeband sichern. Welliges Papier ist die häufigste Fehlerquelle."],
       ])),
