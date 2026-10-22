@@ -174,7 +174,9 @@ def synthetic_photo(fmt: str = "A4", page: int = 0, tilt: float = 0.06, blur: bo
             layer = sheet.copy() if alpha < 1 else sheet
             if "rect" in o:
                 x, y, rw, rh = o["rect"]
-                cv2.rectangle(layer, P(x, y + rh), P(x + rw, y), g, -1)
+                (a0, b0), (a1, b1) = P(x, y + rh), P(x + rw, y)
+                # K60: Endpunkt ausschliessen, damit das Teil genau rw × rh mm misst (A4/A3 wie bisher)
+                cv2.rectangle(layer, (a0, b0), (a1 - int(k60), b1 - int(k60)), g, -1)
             if "circle" in o:
                 cx, cy, d = o["circle"]
                 cv2.circle(layer, P(cx, cy), int(round(d / 2 * px)), g, -1, cv2.LINE_AA)

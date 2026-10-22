@@ -185,16 +185,12 @@ def _paper_fit(lab: np.ndarray, sample: np.ndarray) -> np.ndarray:
     return (design(gx, gy) @ coef).astype(np.float32)
 
 
-def _mask_plain(rect: np.ndarray, hints: dict, sc: Scale) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Objektmaske auf einem Feld ohne Raster (Spec Kleinteile §3 „Feldfarbe“): Feldfarbe aus dem Randstreifen,
-    Farbabstand beidseitig (hell auf dunkel und dunkel auf hell). Kein Rasterkriterium, kein Schatten-Veto.
-    Rueckgabe wie _mask."""
-    t = hints.get("transparent", 0)
-    light = bool(hints.get("light", False))
+def _prep(rect: np.ndarray, sc: Scale) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Gemeinsamer Anfang von _mask und _mask_plain: Bild auf sc.work verkleinern, feine Linien schliessen
+    (closed, BGR), dasselbe in Lab (float32) und der Randstreifen von 8 mm · k (band, bool)."""
     s = sc.work / sc.pxmm
     small = cv2.resize(rect, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
     h, w = small.shape[:2]
-    valid = np.full((h, w), 255, np.uint8)
     k = _odd(1.5 * sc.k * sc.work)
     closed = cv2.morphologyEx(small, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
     lab = cv2.cvtColor(closed, cv2.COLOR_BGR2LAB).astype(np.float32)
@@ -204,6 +200,17 @@ def _mask_plain(rect: np.ndarray, hints: dict, sc: Scale) -> tuple[np.ndarray, n
     band[-b:] = True
     band[:, :b] = True
     band[:, -b:] = True
+    return closed, lab, band
+
+
+def _mask_plain(rect: np.ndarray, hints: dict, sc: Scale) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Objektmaske auf einem Feld ohne Raster (Spec Kleinteile §3 „Feldfarbe“): Feldfarbe aus dem Randstreifen,
+    Farbabstand beidseitig (hell auf dunkel und dunkel auf hell). Kein Rasterkriterium, kein Schatten-Veto.
+    Rueckgabe wie _mask."""
+    t = hints.get("transparent", 0)
+    light = bool(hints.get("light", False))
+    closed, lab, band = _prep(rect, sc)
+    valid = np.full(band.shape, 255, np.uint8)
     field = _paper_fit(lab, band)
     # zweite Anpassung ohne Ausreisser: ein Teil im Randstreifen soll die Feldfarbe nicht verschieben
     r0 = np.abs(lab[..., 0] - field[..., 0]) + 2 * np.hypot(lab[..., 1] - field[..., 1], lab[..., 2] - field[..., 2])
@@ -246,19 +253,9 @@ def _mask(rect: np.ndarray, fmt: str, hints: dict, sc: Scale) -> tuple[np.ndarra
         return _mask_plain(rect, hints, sc)
     t = hints.get("transparent", 0)
     light = bool(hints.get("light", False))
-    s = sc.work / sc.pxmm
-    small = cv2.resize(rect, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
-    h, w = small.shape[:2]
+    closed, lab, band = _prep(rect, sc)
+    h, w = band.shape
     valid = _marker_mask(fmt, (h, w), sc)
-    k = _odd(1.5 * sc.k * sc.work)
-    closed = cv2.morphologyEx(small, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
-    lab = cv2.cvtColor(closed, cv2.COLOR_BGR2LAB).astype(np.float32)
-    b = int(8 * sc.k * sc.work)
-    band = np.zeros((h, w), bool)
-    band[:b] = True
-    band[-b:] = True
-    band[:, :b] = True
-    band[:, -b:] = True
     band &= valid > 0
     # sicher Papier erst eine Fensterbreite vom Objekt entfernt (an Objektecken sieht das Fenster viel Papier)
     k_bg = _odd((GRID_WIN_MM + GRID_SMOOTH_MM) * sc.k * sc.work)
