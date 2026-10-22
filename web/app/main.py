@@ -1040,7 +1040,7 @@ def _analyze_store(phid: int, img, fmt: str | None, view: str, hints: dict | Non
         rect = vision.rectify_mat(img, a["homography"], a["format"])
         (d / "rect.jpg").write_bytes(vision.encode_jpg(rect, 90))
         gw, gh = vision.spec(a["format"])["grid_mm"]
-        a["rect"] = {"pxmm": vision.PX_PER_MM, "w_mm": gw, "h_mm": gh, "w": rect.shape[1], "h": rect.shape[0]}
+        a["rect"] = {"pxmm": matgen.PROFILES[a["format"]]["pxmm"], "w_mm": gw, "h_mm": gh, "w": rect.shape[1], "h": rect.shape[0]}
     if a.get("gauge") and len(a["gauge"]["ids"]) >= 2:
         g, (x0, x1, y0, y1) = vision.rectify_gauge(img, a["gauge"])
         (d / "gauge.jpg").write_bytes(vision.encode_jpg(g, 90))

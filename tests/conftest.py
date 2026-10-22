@@ -96,6 +96,29 @@ def _render_page(fmt: str, page: int, px_per_mm: float = 6.0):
     return cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
 
 
+def _render_k60(fmt: str, px: float):
+    """Kleinteile-Blatt ausschnittweise rendern (Feld plus 30 mm Rand, statt der ganzen A4-Seite).
+    Rueckgabe (BGR-Bild, Feldursprung im Bild in mm von unten links)."""
+    import cv2
+    import numpy as np
+    import pypdfium2 as pdfium
+
+    from core import matgen
+    buf = io.BytesIO()
+    matgen.build(buf, "K60")
+    sp = matgen.layout(fmt)
+    (gx, gy), (fw, fh) = sp["grid_origin_on_page_mm"], sp["grid_mm"]
+    pw, ph = 210.0, 297.0
+    m, pt = 30.0, 72 / 25.4
+    crop = ((gx - m) * pt, (gy - m) * pt, (pw - gx - fw - m) * pt, (ph - gy - fh - m) * pt)  # links, unten, rechts, oben
+    pdf = pdfium.PdfDocument(buf.getvalue())
+    try:
+        img = pdf[0 if fmt == "K60H" else 1].render(scale=px / pt, crop=crop).to_pil().convert("RGB")
+    finally:
+        pdf.close()
+    return cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR), (m, m)
+
+
 def synthetic_photo(fmt: str = "A4", page: int = 0, tilt: float = 0.06, blur: bool = True,
                     objects: list[dict] | None = None, shadow: dict | None = None) -> bytes:
     """Gerendertes Blatt perspektivisch verzerrt auf grauem Grund – wie ein leicht schraeges Handyfoto.
@@ -109,13 +132,19 @@ def synthetic_photo(fmt: str = "A4", page: int = 0, tilt: float = 0.06, blur: bo
     import numpy as np
 
     from core import matgen
-    px = 6.0
-    sheet = _render_page(fmt, page, px)
+    k60 = fmt in ("K60H", "K60D")
+    px = 30.0 if k60 else 6.0
+    if k60:
+        sheet, (ox, oy) = _render_k60(fmt, px)
+        objects = objects or []
+    else:
+        sheet = _render_page(fmt, page, px)
     h, w = sheet.shape[:2]
-    if page == 0 and objects is None:  # ein dunkles "Bauteil" mittig auflegen
+    if not k60 and page == 0 and objects is None:  # ein dunkles "Bauteil" mittig auflegen
         cv2.rectangle(sheet, (int(w * 0.35), int(h * 0.42)), (int(w * 0.65), int(h * 0.56)), (40, 42, 45), -1)
-    elif page == 0:
-        ox, oy = matgen.layout(fmt)["grid_origin_on_page_mm"]
+    elif k60 or page == 0:
+        if not k60:
+            ox, oy = matgen.layout(fmt)["grid_origin_on_page_mm"]
         page_h = h / px
 
         def P(x, y):
@@ -165,6 +194,7 @@ def synthetic_photo(fmt: str = "A4", page: int = 0, tilt: float = 0.06, blur: bo
         photo = cv2.GaussianBlur(photo, (3, 3), 0.8)
     ok, data = cv2.imencode(".jpg", photo, [cv2.IMWRITE_JPEG_QUALITY, 92])
     assert ok
+    assert not k60 or len(data) < 8 * 1024 * 1024, "K60-Testfoto über dem Upload-Limit der Tests"
     return data.tobytes()
 
 

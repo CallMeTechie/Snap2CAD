@@ -1,0 +1,81 @@
+"""Kleinteile-Unterlage K60 (Spec 2026-10-21-kleinteile): Erkennung, Kanten, Teile, API."""
+import numpy as np
+import pytest
+
+from conftest import _render_k60, _render_page, synthetic_photo
+from core import matgen, vision
+
+# ------------------------------------------------------------------ Erkennung und Entzerrung (§2)
+
+
+@pytest.mark.parametrize("f", ["K60H", "K60D"])
+def test_k60_formaterkennung_auto(f):
+    img = vision.load_image(synthetic_photo(f))
+    a = vision.analyze(img)
+    assert a["format"] == f and a["format_auto"] is True and "format_note" not in a
+    assert a["mat_ids"] == list(matgen.PROFILES[f]["ids"]) and a["missing_ids"] == []
+    assert a["status"] == "gut" and a["max_err_mm"] <= 0.125
+    assert a["gauge"] is None
+    rect = vision.rectify_mat(img, a["homography"], f)
+    assert rect.shape[:2] == (2400, 1800)  # 30 px/mm, genau das Feld
+    med = float(np.median(rect))
+    assert (med > 200) if f == "K60H" else (med < 70)
+
+
+def test_k60_auf_a4_unterlage_gewinnt():
+    sheet = _render_page("A4", 0, 6.0)
+    small, _ = _render_k60("K60H", 6.0)
+    Hs, Ws = sheet.shape[:2]
+    h, w = small.shape[:2]
+    y0, x0 = (Hs - h) // 2, (Ws - w) // 2
+    sheet[y0:y0 + h, x0:x0 + w] = small
+    a = vision.analyze(sheet)
+    assert len(set(a["found_ids"]) & set(range(8))) >= 4  # A4-Marker sind sichtbar
+    assert a["format"] == "K60H" and a["status"] == "gut"
+
+
+def test_k60_variante_vertauscht_schaltet_um():
+    img = vision.load_image(synthetic_photo("K60D"))
+    a = vision.analyze(img, "K60H")
+    assert a["format"] == "K60D" and a["format_note"] == "Format auf Kleinteile dunkel geändert"
+    assert a["format_auto"] is False and a["status"] == "gut"
+
+
+def test_k60_explizit_ohne_passende_marker():
+    a = vision.analyze(vision.load_image(synthetic_photo("A4", 0)), "K60H")
+    assert a["format"] == "K60H" and a["status"] == "nicht_auswertbar" and a["homography"] is None
+    assert a["mat_ids"] == [] and a["missing_ids"] == list(range(20, 28)) and "format_note" not in a
+
+
+def test_k60_drei_marker_nicht_auswertbar():
+    import cv2
+    sheet, (ox, oy) = _render_k60("K60H", 12.0)
+    h = sheet.shape[0]
+    for k, (x, y) in matgen.layout("K60H")["centers_mm"].items():
+        if int(k) >= 23:  # nur 20, 21, 22 bleiben
+            cx, cy = int((x + ox) * 12), int(h - (y + oy) * 12)
+            cv2.rectangle(sheet, (cx - 72, cy - 72), (cx + 72, cy + 72), (255, 255, 255), -1)
+    a = vision.analyze(sheet)
+    assert a["status"] == "nicht_auswertbar" and a["homography"] is None and a["format"] is None
+    # R2: Familie mit den meisten Markern
+    assert a["mat_ids"] == [20, 21, 22] and a["missing_ids"] == [23, 24, 25, 26, 27]
+
+
+def test_rect_pxmm_und_verdict():
+    assert vision.rect_pxmm({"rect": {"pxmm": 30.0}}) == 30.0
+    assert vision.rect_pxmm({"rect": {"w_mm": 60}}) == 10.0
+    assert vision.rect_pxmm(None) == 10.0 and vision.rect_pxmm({}) == 10.0
+    q = (0.125, 0.25)
+    assert [vision.verdict(8, e, q) for e in (0.12, 0.2, 0.3)] == ["gut", "brauchbar", "unsicher"]
+    assert [vision.verdict(8, e) for e in (0.5, 1.0, 1.01)] == ["gut", "brauchbar", "unsicher"]
+    assert vision.verdict(3, 0.01, q) == "nicht_auswertbar"
+
+
+def test_bottom_warp_k60_massstab_und_rand():
+    a = {"format": "K60D", "rect": {"pxmm": 30.0, "w_mm": 60, "h_mm": 80, "w": 1800, "h": 2400}}
+    out = vision.bottom_warp(np.zeros((10, 10, 3), np.uint8), a, a)
+    assert out.shape == (2400, 1800, 3)
+    # ausserhalb des kleinen Bildes: Feldfarbe dunkel
+    assert tuple(int(v) for v in out[1200, 900]) == (34, 34, 34)
+    M = vision.bottom_warp_matrix(a, a)
+    assert M[2, 2] == pytest.approx(1.0) and abs(M[0, 0]) == pytest.approx(1.0)  # gleiche pxmm: keine Skalierung

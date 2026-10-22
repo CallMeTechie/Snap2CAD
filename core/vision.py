@@ -15,7 +15,7 @@ try:  # HEIC/HEIF von iPhones
 except Exception:  # pragma: no cover
     pass
 
-from .matgen import FORMATS, layout
+from .matgen import FORMATS, PROFILES, SIBLING, layout
 
 PX_PER_MM = 10.0
 Image.init()  # alle Format-Plugins registrieren, damit die Auswahl unten aufgeloest werden kann
@@ -33,9 +33,14 @@ def _detector():
     return cv2.aruco.ArucoDetector(_DICT, p)
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=8)
 def spec(fmt: str) -> dict:
     return layout(fmt)
+
+
+def rect_pxmm(a: dict | None) -> float:
+    """Massstab des Rechteckbilds eines Fotos (px/mm); Rueckfall 10 fuer Fotos ohne gespeichertes pxmm."""
+    return float(((a or {}).get("rect") or {}).get("pxmm") or PX_PER_MM)
 
 
 def load_image(data: bytes) -> np.ndarray:
@@ -98,54 +103,85 @@ def _loo(found, obj, ids) -> dict[int, float]:
     return out
 
 
-def verdict(n_markers: int, max_err: float | None) -> str:
+def verdict(n_markers: int, max_err: float | None, quality: tuple = (0.5, 1.0)) -> str:
     if n_markers < 4 or max_err is None:
         return "nicht_auswertbar"
-    if max_err <= 0.5:
+    if max_err <= quality[0]:
         return "gut"
-    if max_err <= 1.0:
+    if max_err <= quality[1]:
         return "brauchbar"
     return "unsicher"
 
 
+def pick_candidates(found: dict, fmt: str | None) -> tuple[list[str], str | None]:
+    """Kandidaten fuer die Entzerrung und Hinweis (Spec Kleinteile §2 und §7 F4)."""
+    def n(f):
+        return sum(1 for i in PROFILES[f]["ids"] if i in found)
+    if fmt in FORMATS:
+        if n(fmt) < 4 and fmt in SIBLING and n(SIBLING[fmt]) >= 4:
+            sib = SIBLING[fmt]
+            return [sib], f"Format auf {PROFILES[sib]['label']} geändert"
+        return ([fmt] if n(fmt) >= 4 else []), None
+    fams: dict[tuple, list[str]] = {}
+    for f, p in PROFILES.items():
+        fams.setdefault(p["ids"], []).append(f)
+    seen = [fs for fs in fams.values() if n(fs[0]) >= 4]
+    small = [fs for fs in seen if PROFILES[fs[0]]["field"] != "grid"]
+    if small:  # ein Kleinteile-Blatt auf der grossen Unterlage ist Absicht
+        best = max(n(fs[0]) for fs in small)
+        return [f for fs in small if n(fs[0]) == best for f in fs], None
+    return (seen[0] if seen else []), None
+
+
 def analyze(img: np.ndarray, fmt: str | None = None) -> dict:
-    """Komplette Auswertung eines Fotos. fmt=None -> A4/A3 automatisch."""
+    """Komplette Auswertung eines Fotos. fmt=None -> Format an der Marker-Familie erkennen (Spec Kleinteile §2)."""
     found = detect(img)
     h, w = img.shape[:2]
     res: dict = {"width": w, "height": h, "found_ids": sorted(found)}
-    mat_ids = sorted(i for i in found if 0 <= i <= 7)
-    res["mat_ids"] = mat_ids
-    res["missing_ids"] = [i for i in range(8) if i not in found]
-
-    if len(mat_ids) >= 4:
-        cands = [fmt] if fmt in FORMATS else ["A4", "A3"]
+    cands, note = pick_candidates(found, fmt)
+    if cands:
         scored = []
         for f in cands:
+            ids = sorted(i for i in PROFILES[f]["ids"] if i in found)
             obj = mat_object_points(f)
-            H = _fit(found, obj, mat_ids)
-            scored.append((_rms(H, found, obj, mat_ids), f, H, obj))
-        rms, f, H, obj = min(scored, key=lambda t: t[0])
-        loo = _loo(found, obj, mat_ids)
+            H = _fit(found, obj, ids)
+            scored.append((_rms(H, found, obj, ids), f, H, obj, ids))
+        rms, f, H, obj, ids = min(scored, key=lambda t: t[0])
+        res["mat_ids"] = ids
+        res["missing_ids"] = [i for i in PROFILES[f]["ids"] if i not in found]
+        loo = _loo(found, obj, ids)
         max_err = max(loo.values()) if loo else rms
         res.update(format=f, format_auto=fmt not in FORMATS, homography=H.tolist(), rms_mm=round(rms, 3),
                    loo_mm={str(k): round(v, 3) for k, v in loo.items()}, max_err_mm=round(max_err, 3))
+        if note:
+            res["format_note"] = note
     else:
-        res.update(format=fmt if fmt in FORMATS else None, homography=None, rms_mm=None, loo_mm={}, max_err_mm=None)
-    res["status"] = verdict(len(mat_ids), res["max_err_mm"])
+        f0 = fmt if fmt in FORMATS else None
+        if f0:
+            all_ids = PROFILES[f0]["ids"]
+        else:  # R2: Familie mit den meisten sichtbaren Markern, bei Gleichstand 0-7 (A4/A3 wie bisher)
+            fams = {p["ids"] for p in PROFILES.values()}
+            all_ids = max(fams, key=lambda ids: (sum(1 for i in ids if i in found), ids == tuple(range(8))))
+        res["mat_ids"] = sorted(i for i in found if i in all_ids)
+        res["missing_ids"] = [i for i in all_ids if i not in found]
+        res.update(format=f0, homography=None, rms_mm=None, loo_mm={}, max_err_mm=None)
+    quality = PROFILES[res["format"]]["quality_mm"] if res["format"] else (0.5, 1.0)
+    res["status"] = verdict(len(res["mat_ids"]), res["max_err_mm"], quality)
 
-    # Hoehenlehre
+    # Hoehenlehre (nur A4/A3)
     g = None
     f = res["format"] or "A4"
-    for strip, ids in GAUGE_STRIPS.items():
-        have = [i for i in ids if i in found]
-        if have and (g is None or len(have) > len(g["ids"])):
-            g = {"strip": strip, "ids": have}
-    if g:
-        obj = gauge_object_points(f, g["strip"])
-        Hg = _fit(found, obj, g["ids"])
-        g["homography"] = Hg.tolist()
-        g["rms_mm"] = round(_rms(Hg, found, obj, g["ids"]), 3)
-        g["vlen_mm"] = spec(f)["height_gauge"]["vlen_mm"]
+    if PROFILES[f]["gauge"]:
+        for strip, ids in GAUGE_STRIPS.items():
+            have = [i for i in ids if i in found]
+            if have and (g is None or len(have) > len(g["ids"])):
+                g = {"strip": strip, "ids": have}
+        if g:
+            obj = gauge_object_points(f, g["strip"])
+            Hg = _fit(found, obj, g["ids"])
+            g["homography"] = Hg.tolist()
+            g["rms_mm"] = round(_rms(Hg, found, obj, g["ids"]), 3)
+            g["vlen_mm"] = spec(f)["height_gauge"]["vlen_mm"]
     res["gauge"] = g
     return res
 
@@ -155,11 +191,12 @@ def _px_matrix(pxmm: float, h_mm: float) -> np.ndarray:
     return np.array([[pxmm, 0, 0], [0, -pxmm, h_mm * pxmm], [0, 0, 1]], np.float64)
 
 
-def rectify_mat(img: np.ndarray, H, fmt: str, pxmm: float = PX_PER_MM) -> np.ndarray:
+def rectify_mat(img: np.ndarray, H, fmt: str, pxmm: float | None = None) -> np.ndarray:
+    pxmm = pxmm or PROFILES[fmt]["pxmm"]
     gw, gh = spec(fmt)["grid_mm"]
     to_px = _px_matrix(pxmm, gh)
     return cv2.warpPerspective(img, to_px @ np.asarray(H), (int(gw * pxmm), int(gh * pxmm)),
-                               flags=cv2.INTER_CUBIC, borderValue=(235, 236, 236))
+                               flags=cv2.INTER_CUBIC, borderValue=PROFILES[fmt]["border_bgr"])
 
 
 def rectify_gauge(img: np.ndarray, gauge: dict, pxmm: float = PX_PER_MM):
@@ -252,8 +289,10 @@ def align_bottom(top_outline, bottom_outline, bot_w: float, bot_h: float, rot: i
             "iou_next": round(iou_next, 4), "unsure": bool(iou < ALIGN_MIN_IOU or iou - iou_next < ALIGN_MIN_GAP)}
 
 
-def bottom_warp_matrix(analysis_bot: dict, analysis_top: dict | None, pxmm_out: float = PX_PER_MM) -> np.ndarray:
-    """3x3-Pixelabbildung rect.jpg (Unteransicht) -> Draufsicht-Raster: S_top · lage_matrix · S_bot^-1."""
+def bottom_warp_matrix(analysis_bot: dict, analysis_top: dict | None, pxmm_out: float | None = None) -> np.ndarray:
+    """3x3-Pixelabbildung rect.jpg (Unteransicht) -> Draufsicht-Raster: S_top · lage_matrix · S_bot^-1.
+    pxmm_out=None: Massstab der Draufsicht (bzw. der Unteransicht ohne Draufsicht)."""
+    pxmm_out = pxmm_out or rect_pxmm(analysis_top or analysis_bot)
     rb = analysis_bot["rect"]
     al = analysis_bot.get("bottom_align") or {"rot": 0, "dx": 0.0, "dy": 0.0}
     rt = (analysis_top or analysis_bot)["rect"]
@@ -262,11 +301,14 @@ def bottom_warp_matrix(analysis_bot: dict, analysis_top: dict | None, pxmm_out: 
 
 
 def bottom_warp(rect_bot: np.ndarray, analysis_bot: dict, analysis_top: dict | None = None,
-                pxmm_out: float = PX_PER_MM) -> np.ndarray:
-    rt = (analysis_top or analysis_bot)["rect"]
+                pxmm_out: float | None = None) -> np.ndarray:
+    ref = analysis_top or analysis_bot
+    pxmm_out = pxmm_out or rect_pxmm(ref)
+    rt = ref["rect"]
     M = bottom_warp_matrix(analysis_bot, analysis_top, pxmm_out)
+    border = PROFILES.get(ref.get("format"), PROFILES["A4"])["border_bgr"]
     return cv2.warpAffine(rect_bot, M[:2], (int(rt["w_mm"] * pxmm_out), int(rt["h_mm"] * pxmm_out)),
-                          flags=cv2.INTER_LINEAR, borderValue=(235, 236, 236))
+                          flags=cv2.INTER_LINEAR, borderValue=border)
 
 
 def draw_outlines(img: np.ndarray, polys_mm: list, colors: list, pxmm: float, h_mm: float) -> np.ndarray:
