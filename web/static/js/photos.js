@@ -235,7 +235,7 @@ export default async function (main) {
     }));
     const [st, sk] = STATUS[p.status] || [p.status, "off"];
 
-    const gridH = S.project.grid_h || (p.format === "A3" ? 360 : 230), ref = S.project.ctrl_ref || 100;
+    const gridH = S.project.grid_h || 230, ref = S.project.ctrl_ref || 100;
     const L = ctrlLabels(ref, gridH, isSmall(S.project.format));
     const cx = h("input", { inputmode: "decimal", value: S.project.ctrl_x != null ? num(S.project.ctrl_x, 2) : "", placeholder: L.xPlaceholder, "aria-label": L.xAria });
     const cy = h("input", { inputmode: "decimal", value: S.project.ctrl_y != null ? num(S.project.ctrl_y, 2) : "", placeholder: num(gridH, 1, false), "aria-label": L.yAria });

@@ -87,6 +87,7 @@ textarea.input{resize:vertical;line-height:1.45}
 .check input,.radio input{accent-color:var(--accent);width:18px;height:18px;margin:0;flex:none}
 .hint{font-size:13px;color:var(--muted)}
 .grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.grid1{display:grid;grid-template-columns:minmax(0,1fr);gap:10px}
 .grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
 .choice{display:flex;flex-direction:column;gap:2px;padding:14px 16px;border:1px solid var(--line2);border-radius:var(--r2);cursor:pointer;background:var(--surface)}
 .choice:has(input:checked){border:2px solid var(--accent);background:var(--accent-bg2);padding:13px 15px}

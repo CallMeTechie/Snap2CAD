@@ -37,7 +37,7 @@ export function matGenerator(container) {
     h("div", { class: "row" },
       h("section", { class: "card", style: { flex: "1 1 380px", maxWidth: "460px", gap: "22px" }, "aria-labelledby": "opt-h" },
         h("h2", { id: "opt-h" }, "Optionen"),
-        h("fieldset", {}, h("legend", {}, "Format"), h("div", { class: "grid3" }, choice("A4"), choice("A3"), choice("K60"))),
+        h("fieldset", {}, h("legend", {}, "Format"), h("div", { class: "grid1" }, choice("A4"), choice("A3"), choice("K60"))),
         h("fieldset", {}, h("legend", {}, "Seiten im PDF"), pagesBox),
         h("div", { class: "field" }, h("label", { for: "hdr", class: "label" }, "Kopfzeile (optional)"), hdr,
           h("span", { class: "hint" }, "Erscheint oben rechts auf jeder Seite. Messfeld und Marker bleiben unverändert.")),
@@ -80,6 +80,7 @@ export function matGenerator(container) {
         f.img.alt = `Seite ${i + 1}: ${name} (${PRINT[fmt].title})`;
       }
     });
+    clear(facts);
     try {
       ctrl.abort?.abort(); ctrl.abort = new AbortController();
       const sp = await api(`/api/mat/layout?format=${encodeURIComponent(fmt)}`, { signal: ctrl.abort.signal });
