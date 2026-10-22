@@ -79,3 +79,14 @@ def test_bottom_warp_k60_massstab_und_rand():
     assert tuple(int(v) for v in out[1200, 900]) == (34, 34, 34)
     M = vision.bottom_warp_matrix(a, a)
     assert M[2, 2] == pytest.approx(1.0) and abs(M[0, 0]) == pytest.approx(1.0)  # gleiche pxmm: keine Skalierung
+
+
+# ------------------------------------------------------------------ Kantenmassstab (§3)
+
+
+def test_scale_for_profile():
+    from core import edges
+    a4, k = edges.scale_for("A4"), edges.scale_for("K60D")
+    assert (a4.pxmm, a4.work, a4.k, a4.field, a4.hole_max, a4.frame) == (10.0, 4.0, 1.0, "grid", 2000.0, False)
+    assert (k.pxmm, k.work, k.k, k.field, k.frame) == (30.0, 16.0, 0.25, "plain_dark", True)
+    assert k.hole_max == pytest.approx(1256.6, abs=0.1)

@@ -1,18 +1,17 @@
 """Kanten eines Objekts auf der entzerrten Draufsicht finden – ohne KI.
 
-Eingabe: rect.jpg (10 px/mm, genau die Rasterflaeche). Ausgabe in mm der Rasterflaeche
+Eingabe: rect.jpg (Massstab aus dem Profil, genau die Feldflaeche). Ausgabe in mm der Rasterflaeche
 (Ursprung unten links, x nach rechts, y nach oben), siehe Spec 2026-10-14-kanten-und-teile §1.
 """
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
 
-
-
-from .vision import PX_PER_MM, spec
+from .vision import spec
 
 WORK_PXMM = 4.0        # Aufloesung fuer die Objektmaske
 MIN_AREA_MM2 = 25.0
@@ -41,40 +40,59 @@ LIGHT_MIN_DIFF = 12.0      # light: Mindest-Farbabstand statt COLOR_MIN_DIFF
 LIGHT_GRID_FACTOR = 1.3    # light: Rasterkriterium grosszuegiger (schwaches Raster gilt schon als Objekt)
 
 
+@dataclass(frozen=True)
+class Scale:
+    """Massstab eines Messformats (Spec Kleinteile §3): Laengen in mm mal k, Flaechen mal k²."""
+    pxmm: float       # Rechteckbild px/mm
+    work: float       # Arbeitsaufloesung der Maske px/mm (WORK_PXMM / k)
+    k: float          # Kantenmassstab
+    field: str        # grid | plain_light | plain_dark
+    hole_max: float   # groesste Bohrung in mm²
+    frame: bool       # Marker im Rahmen ausserhalb des Feldes
+
+
+def scale_for(fmt: str) -> Scale:
+    sp = spec(fmt)
+    k = float(sp["edge_scale"])
+    return Scale(float(sp["pxmm"]), WORK_PXMM / k, k, sp["field"], float(sp["hole_max_mm2"]), sp["marker_pos"] == "frame")
+
+
 def _odd(n: float) -> int:
     return max(3, int(round(n)) | 1)
 
 
-def _marker_mask(fmt: str, shape, pxmm: float) -> np.ndarray:
+def _marker_mask(fmt: str, shape, sc: Scale) -> np.ndarray:
     """255 = auswertbar, 0 = Markerfeld (alle Marker liegen innerhalb der Rasterflaeche)."""
+    if sc.frame:  # Marker liegen ausserhalb des Feldes
+        return np.full(shape, 255, np.uint8)
     sp = spec(fmt)
     gh = sp["grid_mm"][1]
     valid = np.full(shape, 255, np.uint8)
-    half = sp["marker_size_mm"] / 2 + 2
+    half = sp["marker_size_mm"] / 2 + 2 * sc.k
     for cx, cy in sp["centers_mm"].values():
-        x0, x1 = int((cx - half) * pxmm), int(math.ceil((cx + half) * pxmm))
-        y0, y1 = int((gh - cy - half) * pxmm), int(math.ceil((gh - cy + half) * pxmm))
+        x0, x1 = int((cx - half) * sc.work), int(math.ceil((cx + half) * sc.work))
+        y0, y1 = int((gh - cy - half) * sc.work), int(math.ceil((gh - cy + half) * sc.work))
         valid[max(0, y0):max(0, y1), max(0, x0):max(0, x1)] = 0
     return valid
 
 
-def _drop_small(mask: np.ndarray, pxmm: float) -> np.ndarray:
+def _drop_small(mask: np.ndarray, sc: Scale) -> np.ndarray:
     n, lbl, stats, _ = cv2.connectedComponentsWithStats(mask)
     keep = np.zeros_like(mask)
     for i in range(1, n):
-        if stats[i, cv2.CC_STAT_AREA] / pxmm ** 2 >= MIN_AREA_MM2:
+        if stats[i, cv2.CC_STAT_AREA] / sc.work ** 2 >= MIN_AREA_MM2 * sc.k ** 2:
             keep[lbl == i] = 255
     return keep
 
 
-def _grabcut(mask: np.ndarray, img: np.ndarray, sure_fg: np.ndarray, sure_bg: np.ndarray) -> np.ndarray:
+def _grabcut(mask: np.ndarray, img: np.ndarray, sure_fg: np.ndarray, sure_bg: np.ndarray, sc: Scale) -> np.ndarray:
     """GrabCut nur im Begrenzungsrahmen der Maske plus 10 mm (Spec §1.4). sure_fg/sure_bg: feste Vorgaben
     aus dem Rasterkriterium, damit helle, papierfarbene Flaechen (Blech) nicht als Papier enden."""
     ys, xs = np.nonzero(mask)
     if not len(xs):
         return mask
     h, w = mask.shape
-    m = int(10 * WORK_PXMM)
+    m = int(10 * sc.k * sc.work)
     x0, y0 = max(0, int(xs.min()) - m), max(0, int(ys.min()) - m)
     x1, y1 = min(w, int(xs.max()) + m + 1), min(h, int(ys.max()) + m + 1)
     sub = mask[y0:y1, x0:x1]
@@ -92,52 +110,52 @@ def _grabcut(mask: np.ndarray, img: np.ndarray, sure_fg: np.ndarray, sure_bg: np
     out = mask.copy()
     out[y0:y1, x0:x1] = np.where((gc == cv2.GC_FGD) | (gc == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
     out[sure_bg] = 0
-    out = _drop_small(out, WORK_PXMM)
+    out = _drop_small(out, sc)
     return out if int(out.sum()) >= 0.5 * int(mask.sum()) else mask
 
 
-def _grid_demod(rect: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
+def _grid_demod(rect: np.ndarray, sc: Scale) -> list[tuple[np.ndarray, np.ndarray]]:
     """Gabor-Antwort auf das 1-mm-Raster, mit der Rasterperiode demoduliert: (Real, Imaginaer) je Richtung.
 
-    In der entzerrten Draufsicht liegen die Rasterlinien an festen Positionen (Periode PX_PER_MM px). Beim
+    In der entzerrten Draufsicht liegen die Rasterlinien an festen Positionen (Periode sc.pxmm px). Beim
     Papier bleibt die Phase der demodulierten Antwort konstant, bei Metall-, Holz- oder Kunststofftextur
     wechselt sie und loescht sich beim Mitteln aus (siehe _grid_energy)."""
     g = cv2.cvtColor(rect, cv2.COLOR_BGR2GRAY).astype(np.float32)
     H, W = g.shape
-    n = _odd(4 * PX_PER_MM)
+    n = _odd(4 * sc.pxmm)
     t = np.arange(n, dtype=np.float32) - n // 2
     win = np.hanning(n).astype(np.float32)
-    kc = np.cos(2 * np.pi * t / PX_PER_MM) * win
-    ks = np.sin(2 * np.pi * t / PX_PER_MM) * win
+    kc = np.cos(2 * np.pi * t / sc.pxmm) * win
+    ks = np.sin(2 * np.pi * t / sc.pxmm) * win
     out = []
     for horiz in (True, False):
         c = cv2.filter2D(g, -1, kc[None, :] if horiz else kc[:, None])
         s_ = cv2.filter2D(g, -1, ks[None, :] if horiz else ks[:, None])
         pos = (np.arange(W, dtype=np.float32)[None, :] if horiz else np.arange(H, dtype=np.float32)[:, None])
-        ph = 2 * np.pi * pos / PX_PER_MM
+        ph = 2 * np.pi * pos / sc.pxmm
         out.append((c * np.cos(ph) - s_ * np.sin(ph), c * np.sin(ph) + s_ * np.cos(ph)))
     return out
 
 
-def _grid_energy(rect: np.ndarray, win_mm: float = GRID_WIN_MM, smooth_mm: float = GRID_SMOOTH_MM,
+def _grid_energy(rect: np.ndarray, sc: Scale, win_mm: float = GRID_WIN_MM, smooth_mm: float = GRID_SMOOTH_MM,
                  demod: list | None = None) -> np.ndarray:
-    """Staerke des 1-mm-Rasters je Ort (auf WORK_PXMM), phasenrichtig gemittelt. Papier ~ hoch, Objekt ~ 0.
+    """Staerke des 1-mm-Rasters je Ort (auf sc.work), phasenrichtig gemittelt. Papier ~ hoch, Objekt ~ 0.
 
     Die demodulierte Gabor-Antwort (_grid_demod) wird ueber win_mm flaechig gemittelt und danach ueber
     smooth_mm geglaettet. So bleiben auch helle, papierfarbene Flaechen (Blech) als Objekt erkennbar.
     demod: bereits berechnetes _grid_demod(rect), wenn mehrere Fenster auf dasselbe Bild angewandt werden."""
     H, W = rect.shape[:2]
-    box = _odd(win_mm * PX_PER_MM)
+    box = _odd(win_mm * sc.k * sc.pxmm)
     mags = [cv2.magnitude(cv2.boxFilter(re, -1, (box, box)), cv2.boxFilter(im, -1, (box, box)))
-            for re, im in (demod or _grid_demod(rect))]
+            for re, im in (demod or _grid_demod(rect, sc))]
     e = np.minimum(*mags)  # Papier hat Linien in beiden Richtungen, eine einzelne Kante nur in einer
-    small = cv2.resize(e, (int(round(W * WORK_PXMM / PX_PER_MM)), int(round(H * WORK_PXMM / PX_PER_MM))),
+    small = cv2.resize(e, (int(round(W * sc.work / sc.pxmm)), int(round(H * sc.work / sc.pxmm))),
                        interpolation=cv2.INTER_AREA)
-    k = _odd(smooth_mm * WORK_PXMM)
+    k = _odd(smooth_mm * sc.k * sc.work)
     return cv2.boxFilter(small, -1, (k, k))
 
 
-def _fill_small(mask: np.ndarray, max_mm2: float) -> np.ndarray:
+def _fill_small(mask: np.ndarray, max_mm2: float, sc: Scale) -> np.ndarray:
     """Eingeschlossene Luecken bis max_mm2 fuellen (z. B. glaenzende Schraubenkoepfe im Rasterkriterium)."""
     inv = cv2.bitwise_not(mask)
     n, lbl, stats, _ = cv2.connectedComponentsWithStats(inv)
@@ -145,7 +163,7 @@ def _fill_small(mask: np.ndarray, max_mm2: float) -> np.ndarray:
     out = mask.copy()
     for i in range(1, n):
         x, y, bw, bh, area = stats[i]
-        if area / WORK_PXMM ** 2 <= max_mm2 and x > 0 and y > 0 and x + bw < w and y + bh < h:
+        if area / sc.work ** 2 <= max_mm2 and x > 0 and y > 0 and x + bw < w and y + bh < h:
             out[lbl == i] = 255
     return out
 
@@ -167,8 +185,8 @@ def _paper_fit(lab: np.ndarray, sample: np.ndarray) -> np.ndarray:
     return (design(gx, gy) @ coef).astype(np.float32)
 
 
-def _mask(rect: np.ndarray, fmt: str, hints: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Objektmaske auf WORK_PXMM (255 = Objekt), Spec §1.1–1.4: Farbabstand zum Papier plus Rasterkriterium.
+def _mask(rect: np.ndarray, fmt: str, hints: dict, sc: Scale) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Objektmaske auf sc.work (255 = Objekt), Spec §1.1–1.4: Farbabstand zum Papier plus Rasterkriterium.
     Zweiter Rueckgabewert: reine Farbmaske (fuer Bohrungen; das Rasterkriterium fuellt kleine Loecher auf),
     dritter: Farbabstand zum Papier (uint8, fuer den Kontrastwert).
 
@@ -177,14 +195,14 @@ def _mask(rect: np.ndarray, fmt: str, hints: dict) -> tuple[np.ndarray, np.ndarr
     und dessen Raster im feinen Fenster sichtbar bleibt, ist Schlagschatten und kein Objekt."""
     t = hints.get("transparent", 0)
     light = bool(hints.get("light", False))
-    s = WORK_PXMM / PX_PER_MM
+    s = sc.work / sc.pxmm
     small = cv2.resize(rect, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
     h, w = small.shape[:2]
-    valid = _marker_mask(fmt, (h, w), WORK_PXMM)
-    k = _odd(1.5 * WORK_PXMM)
+    valid = _marker_mask(fmt, (h, w), sc)
+    k = _odd(1.5 * sc.k * sc.work)
     closed = cv2.morphologyEx(small, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
     lab = cv2.cvtColor(closed, cv2.COLOR_BGR2LAB).astype(np.float32)
-    b = int(8 * WORK_PXMM)
+    b = int(8 * sc.k * sc.work)
     band = np.zeros((h, w), bool)
     band[:b] = True
     band[-b:] = True
@@ -192,14 +210,14 @@ def _mask(rect: np.ndarray, fmt: str, hints: dict) -> tuple[np.ndarray, np.ndarr
     band[:, -b:] = True
     band &= valid > 0
     # sicher Papier erst eine Fensterbreite vom Objekt entfernt (an Objektecken sieht das Fenster viel Papier)
-    k_bg = _odd((GRID_WIN_MM + GRID_SMOOTH_MM) * WORK_PXMM)
-    demod = _grid_demod(rect)
-    en_raw = _grid_energy(rect, demod=demod)[:h, :w]
+    k_bg = _odd((GRID_WIN_MM + GRID_SMOOTH_MM) * sc.k * sc.work)
+    demod = _grid_demod(rect, sc)
+    en_raw = _grid_energy(rect, sc, demod=demod)[:h, :w]
     if t == 0:
         # Helligkeitsnormierung: im Schatten ist das Raster dunkler und schwaecher, gemessen wird relativ zur Umgebung
         lloc = cv2.boxFilter(lab[..., 0], -1, (k_bg, k_bg))
         gain = float(np.median(lloc[band])) / np.maximum(lloc, 1)
-        fine = _grid_energy(rect, GRID_FINE_MM, GRID_FINE_MM, demod)[:h, :w] * gain
+        fine = _grid_energy(rect, sc, GRID_FINE_MM, GRID_FINE_MM, demod)[:h, :w] * gain
         ref_f = float(np.median(fine[band])) or 1.0
 
     def attempt(veto: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -215,7 +233,7 @@ def _mask(rect: np.ndarray, fmt: str, hints: dict) -> tuple[np.ndarray, np.ndarr
         th, _ = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
         if t == 2:  # nur Farbabstand: ohne Rasterkriterium, ohne sicheres Papier, ohne Schatten-Veto
             color = diff > max(TRANSP_DIFF_FACTOR * th, TRANSP_MIN_DIFF)
-            return _mask_transparent(color, valid), np.where(color, 255, 0).astype(np.uint8), diff
+            return _mask_transparent(color, valid, sc), np.where(color, 255, 0).astype(np.uint8), diff
         color = diff > (max(LIGHT_DIFF_FACTOR * th, LIGHT_MIN_DIFF) if light else max(th, COLOR_MIN_DIFF))
         if veto:  # Schatten-Veto: nur dunkler (kaum Farbabstand), Raster im feinen Fenster sichtbar -> Papier
             color &= ~((dc < SHADOW_CHROMA) & (fine > GRID_PAPER * ref_f))
@@ -224,27 +242,27 @@ def _mask(rect: np.ndarray, fmt: str, hints: dict) -> tuple[np.ndarray, np.ndarr
         inner = cv2.erode(np.pad(valid, 1), cv2.getStructuringElement(cv2.MORPH_RECT, (k_bg, k_bg)))[1:-1, 1:-1] > 0
         grid_obj = GRID_OBJECT * (PART_TRANSP_GRID_FACTOR if t == 1 else 1.0) * (LIGHT_GRID_FACTOR if light else 1.0)
         nogrid = np.where((en < grid_obj * ref) & inner, 255, 0).astype(np.uint8)
-        nogrid = _fill_small(_drop_small(nogrid, WORK_PXMM), FILL_MM2)
+        nogrid = _fill_small(_drop_small(nogrid, sc), FILL_MM2 * sc.k ** 2, sc)
         mask = np.where((color & ~sure_bg) | (nogrid > 0), 255, 0).astype(np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
         sure_fg = cv2.erode(nogrid, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))) > 0
-        out = _grabcut(_drop_small(mask, WORK_PXMM), closed, sure_fg, sure_bg)
-        return _fill_unround(out, valid), np.where(color, 255, 0).astype(np.uint8), diff
+        out = _grabcut(_drop_small(mask, sc), closed, sure_fg, sure_bg, sc)
+        return _fill_unround(out, valid, sc), np.where(color, 255, 0).astype(np.uint8), diff
 
     res = attempt(t == 0)
-    if t == 0 and not light and not _drop_small(res[0], WORK_PXMM).any():
+    if t == 0 and not light and not _drop_small(res[0], sc).any():
         res = attempt(False)  # Rueckfall ohne Hinweise: Verhalten vor Normierung und Schatten-Veto
     return res
 
 
-def _mask_transparent(color: np.ndarray, valid: np.ndarray) -> np.ndarray:
+def _mask_transparent(color: np.ndarray, valid: np.ndarray, sc: Scale) -> np.ndarray:
     """Maske fuer durchsichtige Teile (transparent = 2): Farbmaske schliessen, Luecken fuellen, groesste
     Komponente. Kein GrabCut, weil das durchscheinende Raster dort Papier vortaeuscht."""
-    k = _odd(TRANSP_CLOSE_MM * WORK_PXMM)
+    k = _odd(TRANSP_CLOSE_MM * sc.k * sc.work)
     m = cv2.morphologyEx(np.where(color, 255, 0).astype(np.uint8), cv2.MORPH_CLOSE,
                          cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
-    m = _fill_unround(m, valid)
+    m = _fill_unround(m, valid, sc)
     n, lbl, stats, _ = cv2.connectedComponentsWithStats(m)
     if n <= 1:
         return m
@@ -252,7 +270,7 @@ def _mask_transparent(color: np.ndarray, valid: np.ndarray) -> np.ndarray:
     return np.where(lbl == i, 255, 0).astype(np.uint8)
 
 
-def _fill_unround(mask: np.ndarray, valid: np.ndarray) -> np.ndarray:
+def _fill_unround(mask: np.ndarray, valid: np.ndarray, sc: Scale) -> np.ndarray:
     """Luecken im Objekt fuellen, die keine runden Bohrungen sind (spiegelndes Blech, Schatten auf der Platte).
     Markerfelder zaehlen dabei als geschlossen, damit ein Objekt neben einem Marker nicht 'ausläuft'."""
     probe = np.where((mask > 0) | (valid == 0), 255, 0).astype(np.uint8)
@@ -263,33 +281,33 @@ def _fill_unround(mask: np.ndarray, valid: np.ndarray) -> np.ndarray:
     for i, c in enumerate(cnts):
         if hier[0][i][3] < 0:
             continue
-        area = cv2.contourArea(c) / WORK_PXMM ** 2
-        per = cv2.arcLength(c, True) / WORK_PXMM
-        round_ = per > 0 and 4 * math.pi * area / per ** 2 >= 0.85 and area <= HOLE_MAX_MM2
+        area = cv2.contourArea(c) / sc.work ** 2
+        per = cv2.arcLength(c, True) / sc.work
+        round_ = per > 0 and 4 * math.pi * area / per ** 2 >= 0.85 and area <= sc.hole_max
         if not round_:
             cv2.drawContours(out, [c], -1, 255, -1)
     out[valid == 0] = 0
     return out
 
 
-def _refine(poly: list, gx: np.ndarray, gy: np.ndarray, gh: float) -> list:
+def _refine(poly: list, gx: np.ndarray, gy: np.ndarray, gh: float, sc: Scale) -> list:
     """Polygonseiten auf dem vollen Bild an den staerksten Gradienten legen (Spec §1.5)."""
-    px = PX_PER_MM
+    px = sc.pxmm
     H, W = gx.shape
     P = [np.array([x * px - 0.5, (gh - y) * px - 0.5]) for x, y in poly]
     n = len(P)
-    offs = np.arange(-SEARCH_MM * px, SEARCH_MM * px + 0.01, 0.5)
+    offs = np.arange(-SEARCH_MM * sc.k * px, SEARCH_MM * sc.k * px + 0.01, 0.5)
     lines = []
     for i in range(n):
         a, b = P[i], P[(i + 1) % n]
         L = float(np.linalg.norm(b - a))
-        if L < 5 * px:
+        if L < 5 * sc.k * px:
             lines.append(None)
             continue
         t = (b - a) / L
         nrm = np.array([-t[1], t[0]])
         pts = []
-        for s in np.arange(2 * px, L - 2 * px, px / 2):
+        for s in np.arange(2 * sc.k * px, L - 2 * sc.k * px, sc.k * px / 2):
             q = a + t * s + nrm[None, :] * offs[:, None]
             xi = np.clip(np.rint(q[:, 0]).astype(int), 0, W - 1)
             yi = np.clip(np.rint(q[:, 1]).astype(int), 0, H - 1)
@@ -317,15 +335,15 @@ def _refine(poly: list, gx: np.ndarray, gy: np.ndarray, gh: float) -> list:
             if abs(den) > math.sin(math.radians(10)):
                 tt = ((p2[0] - p1[0]) * d2[1] - (p2[1] - p1[1]) * d2[0]) / den
                 q = p1 + d1 * tt
-                if np.linalg.norm(q - v) <= MAX_SHIFT_MM * px:
+                if np.linalg.norm(q - v) <= MAX_SHIFT_MM * sc.k * px:
                     v = q
         out.append([round(float((v[0] + 0.5) / px), 3), round(float(gh - (v[1] + 0.5) / px), 3)])
     return out
 
 
-def _refine_hole(c: tuple, d0: float, gray: np.ndarray, gh: float) -> dict | None:
+def _refine_hole(c: tuple, d0: float, gray: np.ndarray, gh: float, sc: Scale) -> dict | None:
     """Bohrung auf dem vollen Bild: Schwelle zwischen Innen- und Ringhelligkeit, Ellipse anpassen (Spec §1.6)."""
-    px = PX_PER_MM
+    px = sc.pxmm
     cx, cy = c[0] * px - 0.5, (gh - c[1]) * px - 0.5
     r = d0 / 2 * px
     R = int(math.ceil(1.8 * r)) + 2
@@ -356,24 +374,24 @@ def _refine_hole(c: tuple, d0: float, gray: np.ndarray, gh: float) -> dict | Non
     return {"c": [round((x0 + ex + 0.5) / px, 3), round(gh - (y0 + ey + 0.5) / px, 3)], "d": round(float(d), 3)}
 
 
-def _holes(cnts, hier, gray: np.ndarray, gh: float) -> list[dict]:
+def _holes(cnts, hier, gray: np.ndarray, gh: float, sc: Scale) -> list[dict]:
     out = []
     for i, c in enumerate(cnts):
         if hier[i][3] < 0:
             continue
-        area = cv2.contourArea(c) / WORK_PXMM ** 2
-        per = cv2.arcLength(c, True) / WORK_PXMM
-        if per <= 0 or area < math.pi or 4 * math.pi * area / per ** 2 < 0.85:  # Ø < 2 mm oder nicht rund
+        area = cv2.contourArea(c) / sc.work ** 2
+        per = cv2.arcLength(c, True) / sc.work
+        if per <= 0 or area < math.pi * sc.k ** 2 or 4 * math.pi * area / per ** 2 < 0.85:  # Ø < 2 mm · k oder nicht rund
             continue
         (cx, cy), _ = cv2.minEnclosingCircle(c)
-        c_mm = ((cx + 0.5) / WORK_PXMM, gh - (cy + 0.5) / WORK_PXMM)
+        c_mm = ((cx + 0.5) / sc.work, gh - (cy + 0.5) / sc.work)
         d0 = 2 * math.sqrt(area / math.pi)
-        out.append(_refine_hole(c_mm, d0, gray, gh) or
+        out.append(_refine_hole(c_mm, d0, gray, gh, sc) or
                    {"c": [round(float(c_mm[0]), 3), round(float(c_mm[1]), 3)], "d": round(float(d0), 3)})
     return out
 
 
-def _try_merge(a: list, b: list) -> list | None:
+def _try_merge(a: list, b: list, sc: Scale) -> list | None:
     """Kollineare Stuecke zusammenfassen: Winkel < 3°, Abstand < 1 mm, Luecke < 2 mm (Spec §1.7)."""
     ax, ay, bx, by = a
     L = math.hypot(bx - ax, by - ay)
@@ -384,24 +402,24 @@ def _try_merge(a: list, b: list) -> list | None:
     if min(d, 180 - d) >= 3:
         return None
     for qx, qy in ((b[0], b[1]), (b[2], b[3])):
-        if abs((qx - ax) * uy - (qy - ay) * ux) >= 1.0:
+        if abs((qx - ax) * uy - (qy - ay) * ux) >= 1.0 * sc.k:
             return None
     t = [0.0, L, (b[0] - ax) * ux + (b[1] - ay) * uy, (b[2] - ax) * ux + (b[3] - ay) * uy]
     lo_b, hi_b = sorted(t[2:])
-    if lo_b > L + 2 or hi_b < -2:
+    if lo_b > L + 2 * sc.k or hi_b < -2 * sc.k:
         return None
     lo, hi = min(t), max(t)
     return [ax + ux * lo, ay + uy * lo, ax + ux * hi, ay + uy * hi]
 
 
-def _merge(segs: list) -> list:
+def _merge(segs: list, sc: Scale) -> list:
     segs = [list(s) for s in segs]
     changed = True
     while changed:
         changed = False
         for i in range(len(segs)):
             for j in range(i + 1, len(segs)):
-                m = _try_merge(segs[i], segs[j])
+                m = _try_merge(segs[i], segs[j], sc)
                 if m:
                     segs[i] = m
                     del segs[j]
@@ -416,10 +434,10 @@ def _seg_len(s) -> float:
     return math.hypot(s[2] - s[0], s[3] - s[1])
 
 
-def _segments(gray: np.ndarray, mask_full: np.ndarray, gh: float) -> list:
+def _segments(gray: np.ndarray, mask_full: np.ndarray, gh: float, sc: Scale) -> list:
     """Gerade Innenkanten mit LSD (ohne Canny) innerhalb der um 1,5 mm erodierten Maske (Spec §1.7)."""
-    px = PX_PER_MM
-    k = _odd(3 * px)
+    px = sc.pxmm
+    k = _odd(3 * sc.k * px)
     inner = cv2.erode(mask_full, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
     found = cv2.createLineSegmentDetector().detect(gray)[0]
     if found is None:
@@ -429,14 +447,14 @@ def _segments(gray: np.ndarray, mask_full: np.ndarray, gh: float) -> list:
     ts = np.linspace(0, 1, 5)
     for row in found.reshape(-1, 4):
         x1, y1, x2, y2 = (float(v) for v in row)
-        if math.hypot(x2 - x1, y2 - y1) < 2 * px:
+        if math.hypot(x2 - x1, y2 - y1) < 2 * sc.k * px:
             continue
         xs = np.clip(np.rint(x1 + (x2 - x1) * ts).astype(int), 0, W - 1)
         ys = np.clip(np.rint(y1 + (y2 - y1) * ts).astype(int), 0, H - 1)
         if int((inner[ys, xs] > 0).sum()) >= 3:
             segs.append([(x1 + 0.5) / px, gh - (y1 + 0.5) / px, (x2 + 0.5) / px, gh - (y2 + 0.5) / px])
     segs = sorted(segs, key=_seg_len, reverse=True)[:300]
-    segs = [s for s in _merge(segs) if _seg_len(s) >= MIN_SEG_MM]
+    segs = [s for s in _merge(segs, sc) if _seg_len(s) >= MIN_SEG_MM * sc.k]
     return sorted(segs, key=_seg_len, reverse=True)[:MAX_SEGMENTS]
 
 
@@ -446,8 +464,11 @@ def detect(rect: np.ndarray, fmt: str, hints: dict | None = None) -> dict:
     hints: {"transparent": 0|1|2, "light": bool} (Materialhinweise des Nutzers, siehe _mask). Zusaetzlich
     zurueck: contrast (mittlerer Farbabstand im Objekt, 0–100; None ohne Umriss) und die verwendeten hints."""
     hints = hints or {}
+    sc = scale_for(fmt)
+    # GrabCut zieht aus cv::theRNG – ohne Seed haengt das Ergebnis von frueheren Aufrufen ab (Ruling R1)
+    cv2.setRNGSeed(12345)
     gh = float(spec(fmt)["grid_mm"][1])
-    mask, color, diff = _mask(rect, fmt, hints)
+    mask, color, diff = _mask(rect, fmt, hints, sc)
     gray = cv2.morphologyEx(cv2.cvtColor(rect, cv2.COLOR_BGR2GRAY), cv2.MORPH_CLOSE,
                             cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7)))
     gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
@@ -459,30 +480,30 @@ def detect(rect: np.ndarray, fmt: str, hints: dict | None = None) -> dict:
         for i, c in enumerate(cnts):
             if hier[i][3] >= 0:
                 continue
-            area = cv2.contourArea(c) / WORK_PXMM ** 2
-            if area < MIN_AREA_MM2:
+            area = cv2.contourArea(c) / sc.work ** 2
+            if area < MIN_AREA_MM2 * sc.k ** 2:
                 continue
-            eps = APPROX_MM * WORK_PXMM
+            eps = APPROX_MM * sc.k * sc.work
             ap = cv2.approxPolyDP(c, eps, True).reshape(-1, 2)
-            while len(ap) > MAX_VERTS and eps < 8 * WORK_PXMM:  # sehr unruhige Umrisse vereinfachen
+            while len(ap) > MAX_VERTS and eps < 8 * sc.k * sc.work:  # sehr unruhige Umrisse vereinfachen
                 eps *= 1.5
                 ap = cv2.approxPolyDP(c, eps, True).reshape(-1, 2)
             if not 3 <= len(ap) <= MAX_VERTS:
                 continue
-            coarse = [[(float(x) + 0.5) / WORK_PXMM, gh - (float(y) + 0.5) / WORK_PXMM] for x, y in ap]
-            outlines.append({"polygon": _refine(coarse, gx, gy, gh), "area": round(float(area), 1)})
+            coarse = [[(float(x) + 0.5) / sc.work, gh - (float(y) + 0.5) / sc.work] for x, y in ap]
+            outlines.append({"polygon": _refine(coarse, gx, gy, gh, sc), "area": round(float(area), 1)})
         hc, hh = cv2.findContours(color, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
         if hc:
-            inside = [h for h in _holes(hc, hh[0], gray, gh)
-                      if mask[min(mask.shape[0] - 1, int((gh - h["c"][1]) * WORK_PXMM)),
-                              min(mask.shape[1] - 1, int(h["c"][0] * WORK_PXMM))] > 0]
+            inside = [h for h in _holes(hc, hh[0], gray, gh, sc)
+                      if mask[min(mask.shape[0] - 1, int((gh - h["c"][1]) * sc.work)),
+                              min(mask.shape[1] - 1, int(h["c"][0] * sc.work))] > 0]
             holes = inside
     outlines.sort(key=lambda o: -o["area"])
     del outlines[MAX_OUTLINES:]
     segs = []
     if outlines:
         full = cv2.resize(mask, (rect.shape[1], rect.shape[0]), interpolation=cv2.INTER_NEAREST)
-        segs = _segments(gray, full, gh)
+        segs = _segments(gray, full, gh, sc)
     segments, n = [], 0
     for o in outlines:
         P = o["polygon"]
@@ -494,8 +515,8 @@ def detect(rect: np.ndarray, fmt: str, hints: dict | None = None) -> dict:
         segments.append({"id": f"K{n}", "a": [round(x1, 3), round(y1, 3)], "b": [round(x2, 3), round(y2, 3)], "kind": "inner"})
     # Kontrast: Farbabstand von uint8 (0–255) auf 0–100 umgerechnet
     contrast = round(float(np.mean(diff[mask > 0])) * 100 / 255, 1) if outlines else None
-    return {"outlines": outlines, "holes": holes if outlines else [], "segments": segments, "px_per_mm": PX_PER_MM,
-            "contrast": contrast, "hints": hints}
+    return {"outlines": outlines, "holes": holes if outlines else [], "segments": segments, "px_per_mm": sc.pxmm,
+            "edge_scale": sc.k, "contrast": contrast, "hints": hints}
 
 
 def draw_candidates(rect: np.ndarray, res: dict) -> np.ndarray:
