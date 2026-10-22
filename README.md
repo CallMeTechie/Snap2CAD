@@ -26,7 +26,7 @@
 | [`docs/marker_layout.json`](docs/marker_layout.json) | Maschinenlesbare Markerpositionen für alle Formate |
 | [`web/`](web/), [`Dockerfile`](Dockerfile), [`docker-compose.yml`](docker-compose.yml) | Web-App: Unterlage erzeugen, Fotos prüfen, im Browser messen, CAD mit Claude ([siehe unten](#web-app-docker)) |
 
-Jedes PDF hat drei Seiten: Messunterlage, Höhenlehre zum Ausschneiden und eine Kurzanleitung.
+A4 und A3 haben drei Seiten (Messunterlage, Höhenlehre zum Ausschneiden, Kurzanleitung), Kleinteile ebenfalls drei (Blatt hell, Blatt dunkel, Anleitung).
 
 ## So funktioniert's
 
@@ -42,6 +42,8 @@ Jedes Konto hat eine private Projektbibliothek; Teams teilen zusätzlich eine ge
 
 ## Schnellstart
 
+Der Schnellstart beschreibt A4/A3; für Kleinteile gelten die Angaben im Absatz „Kleinteile“ (50-mm-Kontrollmaß, 25–30 cm, keine Höhenlehre, 30 px/mm).
+
 1. **Drucken** mit *100 % / Tatsächliche Größe*. Nicht „An Seite anpassen“.
 2. **Kontrollmaß prüfen**: Die 100-mm-Skala unten links mit einem Stahllineal nachmessen und den Wert ins Feld unten rechts schreiben. Steht er mit auf dem Foto, wird eine Abweichung des Druckers herausgerechnet.
 3. **Unterlage plan fixieren** (Klebeband an den Ecken) und das Bauteil mittig auflegen. Alle Marker frei lassen.
@@ -53,7 +55,7 @@ pip install -r requirements.txt
 python tools/check_photo.py foto.jpg            # Format A4/A3 wird erkannt, sonst --size A4
 ```
 
-Das Skript meldet die erkannten Marker und den Restfehler je Marker und speichert `foto_entzerrt.jpg` mit 10 px/mm. Ursprung ist die untere linke Rasterecke. In dieser Draufsicht entspricht jeder Pixelabstand direkt einem Maß in mm. Ist eine Höhenlehre im Bild, entsteht zusätzlich `foto_entzerrt_hoehenlehre.jpg` (x = Mitte des Streifens, y = Höhe über dem Tisch).
+Das Skript meldet die erkannten Marker und den Restfehler je Marker und speichert `foto_entzerrt.jpg` mit dem Maßstab des Formats (A4/A3 10 px/mm, Kleinteile 30 px/mm). Ursprung ist die untere linke Rasterecke. In dieser Draufsicht entspricht jeder Pixelabstand direkt einem Maß in mm. Ist eine Höhenlehre im Bild, entsteht zusätzlich `foto_entzerrt_hoehenlehre.jpg` (x = Mitte des Streifens, y = Höhe über dem Tisch).
 
 ## Genauigkeit
 

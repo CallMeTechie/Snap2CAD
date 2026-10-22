@@ -47,7 +47,7 @@ function fotografieren() {
   return section("fotografieren", card(
     UL([
       [B("Senkrecht von oben:"), " Handy parallel zur Unterlage, Werkstück mittig."],
-      [B("Abstand 50–70 cm mit 2×- oder 3×-Zoom"), " statt nah mit Weitwinkel – das verringert die perspektivische Verzerrung."],
+      [B("Abstand 50–70 cm mit 2×- oder 3×-Zoom"), " statt nah mit Weitwinkel – das verringert die perspektivische Verzerrung. Für Kleinteile gelten eigene Regeln (Abschnitt „Kleinteile“)."],
       [B("Alle acht Marker frei lassen."), " Vier reichen für die Entzerrung, mehr machen sie robuster, falls das Werkstück einen Marker verdeckt."],
       [B("Kein Blitz, kein Glanz, kein Schlagschatten:"), " diffuses Licht, bei hellen oder glänzenden Teilen von der Seite. Dunkle Teile auf heller Unterlage sind ideal."],
       [B("Originaldatei hochladen."), " Messenger komprimieren die Fotos und verschlechtern die Kantenerkennung."],
