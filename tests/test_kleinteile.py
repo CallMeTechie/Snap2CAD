@@ -1,4 +1,6 @@
 """Kleinteile-Unterlage K60 (Spec 2026-10-21-kleinteile): Erkennung, Kanten, Teile, API."""
+import math
+
 import numpy as np
 import pytest
 
@@ -90,3 +92,81 @@ def test_scale_for_profile():
     assert (a4.pxmm, a4.work, a4.k, a4.field, a4.hole_max, a4.frame) == (10.0, 4.0, 1.0, "grid", 2000.0, False)
     assert (k.pxmm, k.work, k.k, k.field, k.frame) == (30.0, 16.0, 0.25, "plain_dark", True)
     assert k.hole_max == pytest.approx(1256.6, abs=0.1)
+
+
+# ------------------------------------------------------------------ Kanten K60 (§3 Weg „Feldfarbe“)
+
+
+def _k60_rect(fmt, objects):
+    img = vision.load_image(synthetic_photo(fmt, objects=objects))
+    a = vision.analyze(img, fmt)
+    assert a["format"] == fmt and a["status"] == "gut"
+    return vision.rectify_mat(img, a["homography"], fmt)
+
+
+def _sides(poly):
+    return sorted(math.dist(poly[i], poly[(i + 1) % len(poly)]) for i in range(len(poly)))
+
+
+def _rect_ok(res, w, h, tol=0.1):
+    assert len(res["outlines"]) == 1, res["outlines"]
+    s = _sides(res["outlines"][0]["polygon"])
+    assert len(s) == 4, res["outlines"][0]["polygon"]
+    want = sorted([w, w, h, h])
+    assert all(abs(a - b) <= tol for a, b in zip(s, want, strict=True)), (s, want)
+
+
+@pytest.mark.parametrize("fmt,gray", [("K60H", 60), ("K60D", 220)])
+def test_k60_kanten_quadrat_3mm(fmt, gray):
+    from core import edges
+    res = edges.detect(_k60_rect(fmt, [{"rect": [28.5, 38.5, 3, 3], "gray": gray}]), fmt)
+    _rect_ok(res, 3, 3)
+    assert res["px_per_mm"] == 30.0 and res["edge_scale"] == 0.25
+
+
+@pytest.mark.parametrize("fmt,plate,hole", [("K60H", 90, 245), ("K60D", 220, 34)])
+def test_k60_kanten_platte_mit_bohrung_1mm(fmt, plate, hole):
+    from core import edges
+    objects = [{"rect": [20, 34, 20, 12], "gray": plate}, {"circle": [30, 40, 1.0], "gray": hole}]
+    res = edges.detect(_k60_rect(fmt, objects), fmt)
+    _rect_ok(res, 20, 12)
+    assert len(res["holes"]) == 1, res["holes"]
+    h = res["holes"][0]
+    assert abs(h["d"] - 1.0) <= 0.1 and math.dist(h["c"], [30, 40]) <= 0.1, h
+
+
+def test_k60_kanten_helles_teil_auf_dunkel():
+    from core import edges
+    _rect_ok(edges.detect(_k60_rect("K60D", [{"rect": [15, 30, 30, 20], "gray": 230}]), "K60D"), 30, 20)
+
+
+def test_k60_kanten_durchscheinend_auf_dunkel():
+    from core import edges
+    rect = _k60_rect("K60D", [{"rect": [15, 30, 30, 20], "gray": 230, "alpha": 0.5}])
+    _rect_ok(edges.detect(rect, "K60D", {"transparent": 2}), 30, 20)
+
+
+def test_k60_kanten_dunkles_teil_auf_hell():
+    from core import edges
+    _rect_ok(edges.detect(_k60_rect("K60H", [{"rect": [15, 30, 30, 20], "gray": 60}]), "K60H"), 30, 20)
+
+
+def test_k60_teil_ueber_feldrand():
+    from core import edges
+    # ragt 10 mm ueber den Rand; y 20–30 haelt Abstand zu Marker 25 (Mitte 73/40, 8 mm), den es sonst verdeckt
+    res = edges.detect(_k60_rect("K60H", [{"rect": [50, 20, 20, 10], "gray": 60}]), "K60H")
+    assert len(res["outlines"]) == 1, res["outlines"]
+    xs, ys = zip(*res["outlines"][0]["polygon"], strict=True)
+    assert abs(min(xs) - 50) <= 0.1 and 59.5 <= max(xs) <= 60.5, xs
+    assert abs(min(ys) - 20) <= 0.1 and abs(max(ys) - 30) <= 0.1, ys
+
+
+def test_k60_teil_dicht_am_rand():
+    from core import edges
+    _rect_ok(edges.detect(_k60_rect("K60D", [{"rect": [1, 30, 20, 10], "gray": 230}]), "K60D"), 20, 10)
+
+
+def test_k60_falsche_variante_wenig_kontrast():
+    from core import edges
+    res = edges.detect(_k60_rect("K60D", [{"rect": [15, 30, 30, 20], "gray": 45}]), "K60D")
+    assert res["outlines"] == [] and res["contrast"] is None, (res["outlines"], res["contrast"])  # dL ≈ 12 < 18

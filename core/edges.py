@@ -185,6 +185,55 @@ def _paper_fit(lab: np.ndarray, sample: np.ndarray) -> np.ndarray:
     return (design(gx, gy) @ coef).astype(np.float32)
 
 
+def _mask_plain(rect: np.ndarray, hints: dict, sc: Scale) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Objektmaske auf einem Feld ohne Raster (Spec Kleinteile §3 „Feldfarbe“): Feldfarbe aus dem Randstreifen,
+    Farbabstand beidseitig (hell auf dunkel und dunkel auf hell). Kein Rasterkriterium, kein Schatten-Veto.
+    Rueckgabe wie _mask."""
+    t = hints.get("transparent", 0)
+    light = bool(hints.get("light", False))
+    s = sc.work / sc.pxmm
+    small = cv2.resize(rect, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+    h, w = small.shape[:2]
+    valid = np.full((h, w), 255, np.uint8)
+    k = _odd(1.5 * sc.k * sc.work)
+    closed = cv2.morphologyEx(small, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
+    lab = cv2.cvtColor(closed, cv2.COLOR_BGR2LAB).astype(np.float32)
+    b = int(8 * sc.k * sc.work)
+    band = np.zeros((h, w), bool)
+    band[:b] = True
+    band[-b:] = True
+    band[:, :b] = True
+    band[:, -b:] = True
+    field = _paper_fit(lab, band)
+    # zweite Anpassung ohne Ausreisser: ein Teil im Randstreifen soll die Feldfarbe nicht verschieben
+    r0 = np.abs(lab[..., 0] - field[..., 0]) + 2 * np.hypot(lab[..., 1] - field[..., 1], lab[..., 2] - field[..., 2])
+    keep = band & (r0 < max(3.0 * float(np.median(r0[band])), COLOR_MIN_DIFF))
+    if keep.sum() >= 0.5 * band.sum():
+        field = _paper_fit(lab, keep)
+    else:
+        keep = band
+    dl = np.abs(field[..., 0] - lab[..., 0])
+    dc = np.hypot(lab[..., 1] - field[..., 1], lab[..., 2] - field[..., 2])
+    diff = np.clip(dl + 2 * dc, 0, 255).astype(np.uint8)
+    th, _ = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    if t == 2:
+        color = diff > max(TRANSP_DIFF_FACTOR * th, TRANSP_MIN_DIFF)
+        return _mask_transparent(color, valid, sc), np.where(color, 255, 0).astype(np.uint8), diff
+    if t == 1:
+        thr = max(TRANSP_DIFF_FACTOR * th, TRANSP_MIN_DIFF)
+    elif light:
+        thr = max(LIGHT_DIFF_FACTOR * th, LIGHT_MIN_DIFF)
+    else:
+        thr = max(th, COLOR_MIN_DIFF)
+    color = diff > thr
+    mask = np.where(color, 255, 0).astype(np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+    sure_fg = cv2.erode(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))) > 0
+    out = _grabcut(_drop_small(mask, sc), closed, sure_fg, keep, sc)   # sicher Feld: Randstreifen ohne Teile
+    return _fill_unround(out, valid, sc), np.where(color, 255, 0).astype(np.uint8), diff
+
+
 def _mask(rect: np.ndarray, fmt: str, hints: dict, sc: Scale) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Objektmaske auf sc.work (255 = Objekt), Spec §1.1–1.4: Farbabstand zum Papier plus Rasterkriterium.
     Zweiter Rueckgabewert: reine Farbmaske (fuer Bohrungen; das Rasterkriterium fuellt kleine Loecher auf),
@@ -193,6 +242,8 @@ def _mask(rect: np.ndarray, fmt: str, hints: dict, sc: Scale) -> tuple[np.ndarra
     hints: {"transparent": 0|1|2, "light": bool}. Ohne Transparenz-Hinweis wird das Rasterkriterium auf die
     oertliche Helligkeit normiert und ein Schatten-Veto angewandt: Papier, das nur dunkler ist (kaum Farbabstand)
     und dessen Raster im feinen Fenster sichtbar bleibt, ist Schlagschatten und kein Objekt."""
+    if sc.field != "grid":
+        return _mask_plain(rect, hints, sc)
     t = hints.get("transparent", 0)
     light = bool(hints.get("light", False))
     s = sc.work / sc.pxmm
@@ -494,9 +545,11 @@ def detect(rect: np.ndarray, fmt: str, hints: dict | None = None) -> dict:
             outlines.append({"polygon": _refine(coarse, gx, gy, gh, sc), "area": round(float(area), 1)})
         hc, hh = cv2.findContours(color, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
         if hc:
+            # Raster-Weg: das Rasterkriterium fuellt Bohrungen in der Maske; ohne Raster bleiben sie offen
+            member = mask if sc.field == "grid" else _fill_small(mask, sc.hole_max, sc)
             inside = [h for h in _holes(hc, hh[0], gray, gh, sc)
-                      if mask[min(mask.shape[0] - 1, int((gh - h["c"][1]) * sc.work)),
-                              min(mask.shape[1] - 1, int(h["c"][0] * sc.work))] > 0]
+                      if member[min(member.shape[0] - 1, int((gh - h["c"][1]) * sc.work)),
+                                min(member.shape[1] - 1, int(h["c"][0] * sc.work))] > 0]
             holes = inside
     outlines.sort(key=lambda o: -o["area"])
     del outlines[MAX_OUTLINES:]
