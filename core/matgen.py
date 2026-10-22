@@ -1,6 +1,7 @@
 """Messunterlage mit mm-Raster, ArUco-Markern, Kontrollmass, Hoehenlehre und Anleitung."""
 import io
 import json
+import math
 import sys
 import threading
 
@@ -20,6 +21,7 @@ C10 = HexColor("#5F7387")  # 10 mm
 INK = HexColor("#1B2733")
 MUTED = HexColor("#5B6875")
 ACCENT = HexColor("#1F6FB2")
+FIELD_DARK = HexColor("#222222")   # tiefes Schwarzgrau des dunklen Kleinteile-Feldes
 
 
 def marker(c, mid, cx, cy, s):
@@ -261,6 +263,125 @@ def strip_page(c, W, H, label):
     return {"vlen_mm": vlen, "centers_above_fold_mm": {**a, **b}}
 
 
+def k60_page(c, W, H, label):
+    """Kleinteile-Blatt (Spec Kleinteile §1): Feld 60 x 80 mm ohne Raster, hell oder dunkel; Skala und 8 Marker im
+    weissen Rahmen ausserhalb des Feldes. label = K60H | K60D. Rueckgabe wie mat_page, Koordinaten ab Feldecke unten links."""
+    p = PROFILES[label]
+    fw, fh = K60_FIELD
+    gx, gy = K60_ORIGIN
+    s, off, t0 = p["marker_mm"], K60_OFF, K60_TICK0
+    dark = p["field"] == "plain_dark"
+    m = 10.0
+
+    if dark:
+        b = K60_BLEED
+        c.setFillColor(FIELD_DARK)
+        c.rect((gx - b) * mm, (gy - b) * mm, (fw + 2 * b) * mm, (fh + 2 * b) * mm, stroke=0, fill=1)
+
+    # Skala auf dem Rahmen, nach aussen gerichtet; keine Linie auf der Feldkante (sie wuerde als Objekt erkannt)
+    c.setStrokeColor(INK)
+    for i in range(0, fw + 1):
+        ln = 3.5 if i % 10 == 0 else (2.5 if i % 5 == 0 else 1.5)
+        c.setLineWidth(0.35 if i % 10 == 0 else 0.2)
+        c.line((gx + i) * mm, (gy - t0) * mm, (gx + i) * mm, (gy - t0 - ln) * mm)
+        c.line((gx + i) * mm, (gy + fh + t0) * mm, (gx + i) * mm, (gy + fh + t0 + ln) * mm)
+    for j in range(0, fh + 1):
+        ln = 3.5 if j % 10 == 0 else (2.5 if j % 5 == 0 else 1.5)
+        c.setLineWidth(0.35 if j % 10 == 0 else 0.2)
+        c.line((gx - t0) * mm, (gy + j) * mm, (gx - t0 - ln) * mm, (gy + j) * mm)
+        c.line((gx + fw + t0) * mm, (gy + j) * mm, (gx + fw + t0 + ln) * mm, (gy + j) * mm)
+    c.setFont("Helvetica", 5)
+    c.setFillColor(MUTED)
+    for i in range(0, fw + 1, 10):   # nicht unter/ueber den Mittelmarkern
+        if i != fw // 2:
+            c.drawCentredString((gx + i) * mm, (gy - t0 - 5.6) * mm, str(i))
+            c.drawCentredString((gx + i) * mm, (gy + fh + t0 + 4.4) * mm, str(i))
+    for j in range(0, fh + 1, 10):   # nicht neben den Mittelmarkern
+        if j != fh // 2:
+            c.drawRightString((gx - t0 - 4.2) * mm, (gy + j - 0.9) * mm, str(j))
+            c.drawString((gx + fw + t0 + 4.2) * mm, (gy + j - 0.9) * mm, str(j))
+
+    # Marker im Rahmen (Reihenfolge wie A4: unten links, unten rechts, oben rechts, oben links, dann Seitenmitten)
+    ids = p["ids"]
+    pos = {ids[0]: (-off, -off), ids[1]: (fw + off, -off), ids[2]: (fw + off, fh + off), ids[3]: (-off, fh + off),
+           ids[4]: (fw / 2, -off), ids[5]: (fw + off, fh / 2), ids[6]: (fw / 2, fh + off), ids[7]: (-off, fh / 2)}
+    for mid, (px, py) in pos.items():
+        white_box(c, gx + px, gy + py, s, 1.5)
+        marker(c, mid, gx + px, gy + py, s)
+        c.setFillColor(MUTED)
+        c.setFont("Helvetica", 4.5)
+        ty = gy + py + s / 2 + 1.6 if py > 0 else gy + py - s / 2 - 3.2   # oberhalb bzw. unterhalb des Markers
+        c.drawCentredString((gx + px) * mm, ty * mm, f"ID {mid}")
+    c.setStrokeColor(C5)
+    c.setLineWidth(0.3)
+    r = off + s / 2 + 3.5
+    c.rect((gx - r) * mm, (gy - r) * mm, (fw + 2 * r) * mm, (fh + 2 * r) * mm, stroke=1, fill=0)
+
+    # Kopfzeile
+    name = "dunkel" if dark else "hell"
+    c.setFillColor(INK)
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(m * mm, (H - m - 6) * mm, _title(f"Messunterlage Kleinteile {name}"))
+    c.setFont("Helvetica", 7.5)
+    c.setFillColor(MUTED)
+    c.drawString(m * mm, (H - m - 10.5) * mm, f"Feld {fw} × {fh} mm ohne Raster  ·  Ursprung 0/0 unten links  ·  Version 1")
+    c.setFillColor(ACCENT)
+    c.setFont("Helvetica-Bold", 8)
+    c.drawRightString((W - m) * mm, (H - m - 6) * mm, "Drucken mit 100 % / Tatsächliche Größe")
+    c.setFont("Helvetica", 7)
+    c.setFillColor(MUTED)
+    hint = ("Tintenstrahl, mattes Papier · nicht „An Seite anpassen“" if dark
+            else "nicht „An Seite anpassen“ · Papier plan auflegen")
+    c.drawRightString((W - m) * mm, (H - m - 10.5) * mm, hint)
+
+    # Kontrollmass 50 mm und Eintragsfeld
+    by, bx = 128.0, gx + 5
+    c.setStrokeColor(INK)
+    c.setLineWidth(0.5)
+    c.line(bx * mm, by * mm, (bx + 50) * mm, by * mm)
+    for i in range(0, 51):
+        ln = 4 if i % 10 == 0 else (2.6 if i % 5 == 0 else 1.6)
+        c.setLineWidth(0.4 if i % 10 == 0 else 0.25)
+        c.line((bx + i) * mm, by * mm, (bx + i) * mm, (by + ln) * mm)
+    c.setFont("Helvetica", 5.5)
+    c.setFillColor(INK)
+    for i in range(0, 51, 10):
+        c.drawCentredString((bx + i) * mm, (by + 4.8) * mm, str(i))
+    c.setFont("Helvetica-Bold", 7)
+    c.drawString(bx * mm, (by - 4) * mm, "Kontrollmaß 50 mm – mit Lineal prüfen")
+    fx, fwid = gx - 15, fw + 30
+    c.setLineWidth(0.6)
+    c.rect(fx * mm, (by - 22) * mm, fwid * mm, 12 * mm, stroke=1, fill=0)
+    c.setFont("Helvetica", 6.5)
+    c.setFillColor(MUTED)
+    c.drawString((fx + 2) * mm, (by - 13.4) * mm, "Gemessen (0–50):")
+    c.drawString((fx + 2) * mm, (by - 20.2) * mm, f"Gemessen Skala 0–{fh} senkrecht:")
+    c.setStrokeColor(MUTED)
+    c.setLineWidth(0.3)
+    c.line((fx + 22) * mm, (by - 13.8) * mm, (fx + fwid - 9) * mm, (by - 13.8) * mm)
+    c.line((fx + 39) * mm, (by - 20.6) * mm, (fx + fwid - 9) * mm, (by - 20.6) * mm)
+    c.drawString((fx + fwid - 7.5) * mm, (by - 13.4) * mm, "mm")
+    c.drawString((fx + fwid - 7.5) * mm, (by - 20.2) * mm, "mm")
+
+    # Kurzhinweise
+    c.setFont("Helvetica", 7)
+    c.setFillColor(INK)
+    for n, t in enumerate(["Teil mittig ins Feld legen, die Marker frei lassen.",
+                           "Helles, blankes oder durchsichtiges Teil → dunkles Blatt; dunkles Teil → helles Blatt.",
+                           "Kamera senkrecht, 2×- oder 3×-Zoom aus 25–30 cm, kein Makro. Diffuses Licht, kein Blitz.",
+                           "Höhe: Teil kippen und erneut fotografieren (keine Höhenlehre)."]):
+        c.drawString(fx * mm, (by - 32 - n * 4.2) * mm, t)
+
+    # Selbstbeschreibende Spezifikation
+    sp = "  ".join(f"ID{i} ({fmt(px)}|{fmt(py)})" for i, (px, py) in pos.items())
+    c.setFont("Helvetica", 4.6)
+    c.setFillColor(MUTED)
+    c.drawString(m * mm, (m - 0.5) * mm,
+                 f"ArUco DICT_4X4_50 · Kante {fmt(s)} mm · Mittelpunkte in mm ab Feldecke unten links: {sp}")
+    return {"grid_mm": [fw, fh], "marker_size_mm": s, "centers_mm": {str(k): v for k, v in pos.items()},
+            "grid_origin_on_page_mm": [gx, gy]}
+
+
 def guide_page(c, W, H, label, spec):
     m = 18 * mm
     st_h = ParagraphStyle("h", fontName="Helvetica-Bold", fontSize=15, leading=19, textColor=INK, spaceAfter=4)
@@ -337,10 +458,108 @@ def guide_page(c, W, H, label, spec):
     Frame(m, m, W * mm - 2 * m, H * mm - 2 * m, showBoundary=0).addFromList(story, c)
 
 
-FORMATS = {"A4": (A4, 20.0), "A3": (A3, 25.0)}
-PAGES = ("mat", "gauge", "guide")
+def k60_guide_page(c, W, H, specs):
+    """Anleitung fuer die Kleinteile-Blaetter (Spec Kleinteile §5); specs = {"K60H": layout, "K60D": layout}."""
+    m = 18 * mm
+    st_h = ParagraphStyle("h", fontName="Helvetica-Bold", fontSize=15, leading=19, textColor=INK, spaceAfter=4)
+    st_s = ParagraphStyle("s", fontName="Helvetica-Bold", fontSize=10.5, leading=14, textColor=ACCENT,
+                          spaceBefore=9, spaceAfter=3)
+    st_p = ParagraphStyle("p", fontName="Helvetica", fontSize=9, leading=12.6, textColor=INK, spaceAfter=3)
+    st_n = ParagraphStyle("n", parent=st_p, leftIndent=12, bulletIndent=0)
+    st_small = ParagraphStyle("sm", parent=st_p, fontSize=7.5, leading=10, textColor=MUTED)
+
+    def b(t):
+        return Paragraph(t, st_n, bulletText="•")
+
+    story = [
+        Paragraph("Anleitung: Kleinteile fotografieren und vermessen lassen", st_h),
+        Paragraph("Für Teile von wenigen Millimetern bis etwa 50 mm. Das Feld ist 60 × 80 mm groß und hat kein Raster; "
+                  "gemessen wird am Unterschied zwischen Teil und Feld.", st_p),
+        Paragraph("1  Variante wählen", st_s),
+        b("<b>Helles Blatt:</b> dunkle oder bunte Teile."),
+        b("<b>Dunkles Blatt:</b> helle, blanke, weiße oder durchsichtige Teile."),
+        Paragraph("2  Drucken und prüfen", st_s),
+        b("Drucken mit <b>100 % / Tatsächliche Größe</b>. Das dunkle Blatt möglichst mit Tintenstrahl auf mattem Papier – "
+          "Laser-Toner glänzt auf großen dunklen Flächen."),
+        b("Kontrollmaß 0–50 mit einem Stahllineal nachmessen und den Wert auf „Fotos prüfen“ eintragen."),
+        b("Blatt plan auf einen festen Untergrund legen, Ecken mit Klebeband fixieren."),
+        Paragraph("3  Fotografieren", st_s),
+        b("Teil mittig ins Feld legen, alle 8 Marker frei lassen. Diffuses Licht, kein Blitz, keine harten Schatten – "
+          "es gibt kein Raster, das einen Schatten von einer Kante unterscheidet."),
+        b("Kamera senkrecht über dem Feld, <b>2×- oder 3×-Zoom aus 25–30 cm</b>, der Rahmen füllt das Bild. "
+          "Kein Makro-Modus: Je näher die Kamera, desto größer die Parallaxe."),
+        b("Höhe: Teil kippen und erneut fotografieren (Ansicht „Gekippt (Höhe)“ oder als weitere Draufsicht). "
+          "Eine Höhenlehre gibt es für Kleinteile nicht."),
+        Paragraph("Genauigkeit – realistisch", st_s),
+        Paragraph("Flache Teile (Höhe bis 2 mm): etwa ±0,2–0,3 mm, mit Messschieber-Nachmessung ±0,1–0,2 mm. Höhere Teile "
+                  "werden oben um Maß × Höhe ÷ Abstand zu groß gemessen (20 × 10 mm aus 25 cm: +0,8 mm; aus 8 cm: "
+                  "+2,5 mm) – an der Auflagekante messen oder die Maße am Modell mit dem Messschieber korrigieren.", st_p),
+        Spacer(1, 6),
+    ]
+    rows = [["Marker", "Blatt", "Mitte X (mm)", "Mitte Y (mm)"]]
+    for f, name in (("K60H", "hell"), ("K60D", "dunkel")):
+        for k, (px, py) in specs[f]["centers_mm"].items():
+            rows.append([f"ID {k}", name, fmt(px), fmt(py)])
+    t = Table(rows, colWidths=[22 * mm, 24 * mm, 28 * mm, 28 * mm], hAlign="LEFT")
+    t.setStyle(TableStyle([
+        ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 7),
+        ("FONT", (0, 1), (-1, -1), "Helvetica", 7),
+        ("TEXTCOLOR", (0, 0), (-1, -1), INK),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.6, INK),
+        ("LINEBELOW", (0, 1), (-1, -1), 0.25, C1),
+        ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
+        ("TOPPADDING", (0, 0), (-1, -1), 1.2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 1.2),
+    ]))
+    story += [Paragraph("Marker-Referenz (ArUco DICT_4X4_50, Kante 8 mm, Ursprung = Feldecke unten links)", st_small), t]
+    Frame(m, m, W * mm - 2 * m, H * mm - 2 * m, showBoundary=0).addFromList(story, c)
+
+
+PROFILES = {
+    "A4": {"page": A4, "marker_mm": 20.0, "ids": tuple(range(8)), "field": "grid", "pxmm": 10.0, "edge_scale": 1.0,
+           "ctrl_mm": 100.0, "hole_max_mm2": 2000.0, "quality_mm": (0.5, 1.0), "gauge": True,
+           "border_bgr": (235, 236, 236), "label": "A4"},
+    "A3": {"page": A3, "marker_mm": 25.0, "ids": tuple(range(8)), "field": "grid", "pxmm": 10.0, "edge_scale": 1.0,
+           "ctrl_mm": 100.0, "hole_max_mm2": 2000.0, "quality_mm": (0.5, 1.0), "gauge": True,
+           "border_bgr": (235, 236, 236), "label": "A3"},
+    "K60H": {"page": A4, "marker_mm": 8.0, "ids": tuple(range(20, 28)), "field": "plain_light", "pxmm": 30.0,
+             "edge_scale": 0.25, "ctrl_mm": 50.0, "hole_max_mm2": round(math.pi * 20 ** 2, 1), "quality_mm": (0.125, 0.25),
+             "gauge": False, "border_bgr": (235, 236, 236), "label": "Kleinteile hell"},
+    "K60D": {"page": A4, "marker_mm": 8.0, "ids": tuple(range(30, 38)), "field": "plain_dark", "pxmm": 30.0,
+             "edge_scale": 0.25, "ctrl_mm": 50.0, "hole_max_mm2": round(math.pi * 20 ** 2, 1), "quality_mm": (0.125, 0.25),
+             "gauge": False, "border_bgr": (34, 34, 34), "label": "Kleinteile dunkel"},
+}
+FORMATS = PROFILES   # Messformate (am Foto gespeichert)
+PRINT_FORMATS = {"A4": ("A4",), "A3": ("A3",), "K60": ("K60H", "K60D")}
+PRINT_PAGES = {"A4": ("mat", "gauge", "guide"), "A3": ("mat", "gauge", "guide"), "K60": ("mat", "dark", "guide")}
+PAGES = PRINT_PAGES["A4"]   # bisheriger Name: Seiten von A4/A3
+SIBLING = {"K60H": "K60D", "K60D": "K60H"}
+K60_FIELD = (60, 80)
+K60_ORIGIN = (75.0, 170.0)   # Feldecke unten links auf dem Blatt (mm)
+K60_OFF = 13.0               # Marker-Mitte ausserhalb der Feldkante (mm)
+K60_BLEED = 2.0              # dunkles Feld ragt so weit ueber das Messfeld: kein heller Saum am Rand der Entzerrung
+K60_TICK0 = 2.5              # Skala beginnt so weit ausserhalb der Feldkante (keine Linie auf der Feldkante)
 _LOCK = threading.Lock()
 _HEADER = ""
+
+
+def edge_scale(fmt: str | None) -> float:
+    return PROFILES[fmt]["edge_scale"] if fmt in PROFILES else 1.0
+
+
+def ctrl_ref(fmt: str | None) -> float:
+    return float(PROFILES[fmt]["ctrl_mm"]) if fmt in PROFILES else 100.0
+
+
+def print_format_of(fmt: str | None) -> str | None:
+    return next((p for p, fs in PRINT_FORMATS.items() if fmt in fs), None)
+
+
+def _profile_fields(fmt: str) -> dict:
+    p = PROFILES[fmt]
+    return {"pxmm": p["pxmm"], "edge_scale": p["edge_scale"], "field": p["field"], "ids": list(p["ids"]),
+            "ctrl_mm": p["ctrl_mm"], "hole_max_mm2": p["hole_max_mm2"], "quality_mm": list(p["quality_mm"]),
+            "marker_pos": "grid" if p["field"] == "grid" else "frame", "label": p["label"]}
 
 
 def _title(base):
@@ -348,40 +567,53 @@ def _title(base):
 
 
 def _spec(fmt):
-    size, s = FORMATS[fmt]
+    p = PROFILES[fmt]
+    size = p["page"]
     W, H = (v / mm for v in size)
     c = canvas.Canvas(io.BytesIO(), pagesize=size)
-    spec = mat_page(c, W, H, fmt, s)
-    c.showPage()
-    spec["height_gauge"] = strip_page(c, W, H, fmt)
+    if p["field"] == "grid":
+        spec = mat_page(c, W, H, fmt, p["marker_mm"])
+        c.showPage()
+        spec["height_gauge"] = strip_page(c, W, H, fmt)
+    else:
+        spec = k60_page(c, W, H, fmt)
+    spec.update(_profile_fields(fmt))
     return spec
 
 
 def layout(fmt):
-    """Markerlayout eines Formats (ohne PDF zu speichern)."""
+    """Markerlayout und Profil eines Messformats (ohne PDF zu speichern)."""
     with _LOCK:
         return _spec(fmt)
 
 
-def build(out, fmt="A4", pages=PAGES, header=""):
-    """PDF erzeugen. out = Pfad oder Datei-Objekt. Gibt das Markerlayout zurueck."""
+def build(out, fmt="A4", pages=None, header=""):
+    """PDF eines Druckformats erzeugen. out = Pfad oder Datei-Objekt. Rueckgabe: Layout (A4/A3) bzw.
+    {"K60H": Layout, "K60D": Layout}. pages: Auswahl aus PRINT_PAGES[fmt]; leer oder ohne Treffer = alle Seiten."""
     global _HEADER
-    if fmt not in FORMATS:
-        raise ValueError("Format muss A4 oder A3 sein")
-    pages = [p for p in PAGES if p in pages] or list(PAGES)
-    size, s = FORMATS[fmt]
+    if fmt not in PRINT_FORMATS:
+        raise ValueError("Format muss A4, A3 oder K60 sein")
+    allowed = PRINT_PAGES[fmt]
+    pages = [p for p in allowed if p in (pages or ())] or list(allowed)
+    size = PROFILES[PRINT_FORMATS[fmt][0]]["page"]
     W, H = (v / mm for v in size)
     with _LOCK:
         _HEADER = (header or "").strip()[:60]
         try:
-            spec = _spec(fmt)
+            spec = {f: _spec(f) for f in PRINT_FORMATS[fmt]} if fmt == "K60" else _spec(fmt)
             c = canvas.Canvas(out, pagesize=size)
-            c.setTitle(f"Messunterlage {fmt}")
+            c.setTitle("Messunterlage Kleinteile" if fmt == "K60" else f"Messunterlage {fmt}")
             for p in pages:
-                if p == "mat":
-                    mat_page(c, W, H, fmt, s)
+                if p == "mat" and fmt == "K60":
+                    k60_page(c, W, H, "K60H")
+                elif p == "mat":
+                    mat_page(c, W, H, fmt, PROFILES[fmt]["marker_mm"])
+                elif p == "dark":
+                    k60_page(c, W, H, "K60D")
                 elif p == "gauge":
                     strip_page(c, W, H, fmt)
+                elif fmt == "K60":
+                    k60_guide_page(c, W, H, spec)
                 else:
                     guide_page(c, W, H, fmt, spec)
                 c.showPage()
@@ -393,5 +625,5 @@ def build(out, fmt="A4", pages=PAGES, header=""):
 
 if __name__ == "__main__":
     out = sys.argv[1]
-    specs = {f: build(f"{out}/Messunterlage_{f}.pdf", f) for f in FORMATS}
+    specs = {f: build(f"{out}/Messunterlage_{f}.pdf", f) for f in PRINT_FORMATS}
     print(json.dumps(specs, indent=1))

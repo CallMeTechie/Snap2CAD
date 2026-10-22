@@ -85,3 +85,92 @@ def test_upload_formats_restricted(fmt, ok):
     else:
         with pytest.raises(Exception):  # noqa: B017
             vision.load_image(buf.getvalue())
+
+
+def _pages(pdf_bytes: bytes) -> int:
+    import pypdfium2 as pdfium
+    pdf = pdfium.PdfDocument(pdf_bytes)
+    n = len(pdf)
+    pdf.close()
+    return n
+
+
+def test_profile_a4_a3_unveraendert():
+    for f in ("A4", "A3"):
+        sp = matgen.layout(f)
+        assert (sp["pxmm"], sp["edge_scale"], sp["field"], sp["ctrl_mm"], sp["marker_pos"]) == (10.0, 1.0, "grid", 100.0, "grid")
+        assert sp["quality_mm"] == [0.5, 1.0] and sp["hole_max_mm2"] == 2000.0 and sp["ids"] == list(range(8))
+        assert "height_gauge" in sp
+
+
+@pytest.mark.parametrize("f,ids,field", [("K60H", list(range(20, 28)), "plain_light"),
+                                         ("K60D", list(range(30, 38)), "plain_dark")])
+def test_profile_k60(f, ids, field):
+    sp = matgen.layout(f)
+    assert sp["grid_mm"] == [60, 80] and sp["marker_size_mm"] == 8.0 and sp["grid_origin_on_page_mm"] == [75.0, 170.0]
+    assert sp["ids"] == ids and sp["field"] == field and sp["marker_pos"] == "frame"
+    assert (sp["pxmm"], sp["edge_scale"], sp["ctrl_mm"]) == (30.0, 0.25, 50.0)
+    assert sp["quality_mm"] == [0.125, 0.25] and sp["hole_max_mm2"] == pytest.approx(1256.6, abs=0.1)
+    assert "height_gauge" not in sp
+    assert sorted(int(k) for k in sp["centers_mm"]) == ids
+    for x, y in sp["centers_mm"].values():  # Marker-Mitte mindestens 8 mm ausserhalb des Feldes
+        assert x <= -8 or x >= 68 or y <= -8 or y >= 88
+
+
+def test_print_formats_und_helfer():
+    assert matgen.PRINT_FORMATS == {"A4": ("A4",), "A3": ("A3",), "K60": ("K60H", "K60D")}
+    assert matgen.PRINT_PAGES["K60"] == ("mat", "dark", "guide") and matgen.PAGES == ("mat", "gauge", "guide")
+    assert matgen.print_format_of("K60D") == "K60" and matgen.print_format_of("A3") == "A3"
+    assert matgen.print_format_of(None) is None and matgen.print_format_of("A5") is None
+    assert matgen.edge_scale("K60H") == 0.25 and matgen.edge_scale("A4") == 1.0 and matgen.edge_scale(None) == 1.0
+    assert matgen.ctrl_ref("K60D") == 50.0 and matgen.ctrl_ref("A3") == 100.0 and matgen.ctrl_ref(None) == 100.0
+    assert matgen.SIBLING == {"K60H": "K60D", "K60D": "K60H"}
+
+
+def test_k60_pdf_drei_seiten_und_marker_erkennbar():
+    from conftest import _render_page
+    buf = io.BytesIO()
+    spec = matgen.build(buf, "K60", header="Werkstatt Test")
+    assert set(spec) == {"K60H", "K60D"}
+    assert _pages(buf.getvalue()) == 3
+    for i, f in enumerate(("K60H", "K60D")):
+        assert sorted(vision.detect(_render_page("K60", i, 12.0))) == spec[f]["ids"]
+
+
+def test_k60_spezifikationszeile_wie_layout():
+    import pypdfium2 as pdfium
+    buf = io.BytesIO()
+    spec = matgen.build(buf, "K60")
+    pdf = pdfium.PdfDocument(buf.getvalue())
+    try:
+        for i, f in enumerate(("K60H", "K60D")):
+            txt = pdf[i].get_textpage().get_text_range()
+            assert f"Kante {matgen.fmt(spec[f]['marker_size_mm'])} mm" in txt
+            for k, (x, y) in spec[f]["centers_mm"].items():
+                assert f"ID{k} ({matgen.fmt(x)}|{matgen.fmt(y)})" in txt, (f, k)
+    finally:
+        pdf.close()
+
+
+def test_k60_feldfarbe_und_ueberstand():
+    from conftest import _render_page
+    px = 12.0
+    for i, (lo, hi) in enumerate(((235, 256), (0, 60))):
+        img = _render_page("K60", i, px)
+        h = img.shape[0]
+        for x_mm, y_mm in ((105, 210), (75.5, 170.5), (134.5, 249.5)):  # Feldmitte und 0,5 mm innerhalb der Feldecken
+            v = int(img[int(h - y_mm * px), int(x_mm * px)].mean())
+            assert lo <= v < hi, (i, x_mm, y_mm, v)
+
+
+def test_k60_seitenwahl():
+    for fmt, pages, n in (("K60", ["dark"], 1), ("K60", ["gauge"], 3), ("A4", ["dark"], 3), ("A4", ["mat"], 1)):
+        buf = io.BytesIO()
+        matgen.build(buf, fmt, pages=pages)
+        assert _pages(buf.getvalue()) == n, (fmt, pages)
+
+
+def test_build_nur_druckformate():
+    for bad in ("A5", "K60H", "K60D"):
+        with pytest.raises(ValueError, match="Format muss A4, A3 oder K60 sein"):
+            matgen.build(io.BytesIO(), bad)

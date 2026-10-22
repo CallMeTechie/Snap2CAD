@@ -118,7 +118,7 @@ def analyze(img: np.ndarray, fmt: str | None = None) -> dict:
     res["missing_ids"] = [i for i in range(8) if i not in found]
 
     if len(mat_ids) >= 4:
-        cands = [fmt] if fmt in FORMATS else list(FORMATS)
+        cands = [fmt] if fmt in FORMATS else ["A4", "A3"]
         scored = []
         for f in cands:
             obj = mat_object_points(f)
