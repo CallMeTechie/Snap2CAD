@@ -408,6 +408,13 @@ def default_unc(photo, view):
     return round((photo["max_err"] or 0.3 * ek) + 0.2 * ek, 2)
 
 
+def project_format(project_id):
+    """Format des ersten auswertbaren Fotos, sonst des ersten mit Format (Bezug fuer Kontrollmass und Rasterhoehe)."""
+    r = db.q1("SELECT format FROM photos WHERE project_id=? AND format IS NOT NULL "
+              "ORDER BY (status = 'nicht_auswertbar'), id LIMIT 1", (project_id,))
+    return r["format"] if r else None
+
+
 def _data(row):
     return db.jload(row["data"], {}) or {}
 

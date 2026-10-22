@@ -15,8 +15,8 @@ from pathlib import Path
 import cv2
 from fastapi import HTTPException
 
-from . import access, ai, auth, config, db, sandbox, settings
-from .parts import cad_text, reference_top, to_top
+from . import access, ai, auth, config, db, geom, sandbox, settings
+from .parts import cad_text, project_format, reference_top, to_top
 
 _pool = ThreadPoolExecutor(max_workers=max(1, config.MAX_CONCURRENT_JOBS), thread_name_prefix="job")
 _cancel: dict[int, threading.Event] = {}
@@ -191,8 +191,8 @@ def _small(pdir: Path) -> Path | None:
     return out
 
 
-def _rect_top(ph: dict, top: dict | None) -> Path | None:
-    """Unteransicht in Draufsicht-Koordinaten, bei jedem Aufbau neu (kein veralteter Zwischenspeicher)."""
+def _rect_top(ph: dict, top: dict | None) -> tuple[Path, float] | None:
+    """Unteransicht in Draufsicht-Koordinaten (Pfad, px/mm), bei jedem Aufbau neu (kein veralteter Zwischenspeicher)."""
     from core import vision  # spaet: main.py setzt sys.path erst nach den App-Importen
     pdir = config.DATA_DIR / "photos" / str(ph["id"])
     img = cv2.imread(str(pdir / "rect.jpg"))
@@ -203,8 +203,9 @@ def _rect_top(ph: dict, top: dict | None) -> Path | None:
     ref = db.q1("SELECT analysis FROM photos WHERE id=?", (tid,)) if tid else None
     at = db.jload(ref["analysis"], {}) if ref else None   # Referenz aus der Ausrichtung; sonst nur gespiegelt
     out = pdir / "rect_top.jpg"
-    _write_atomic(out, vision.encode_jpg(vision.bottom_warp(img, a, at), 90))
-    return out
+    pxmm = vision.rect_pxmm(at or a)
+    _write_atomic(out, vision.encode_jpg(vision.bottom_warp(img, a, at, pxmm), 90))
+    return out, pxmm
 
 
 def pick_images(project_id: int, photo_ids: list[int] | None) -> list[dict]:
@@ -219,14 +220,15 @@ def pick_images(project_id: int, photo_ids: list[int] | None) -> list[dict]:
         a = db.jload(p["analysis"], {}) or {}
         if p["view"] == "top" and (pdir / "rect.jpg").is_file():
             cap = ai.scaled_caption(pdir / "rect.jpg", f"Foto {p['id']} (Draufsicht), entzerrt auf die Unterlage",
-                                    vision.PX_PER_MM)
+                                    vision.rect_pxmm(a))
             groups["top"].append({"photo_id": p["id"], "kind": "top", "path": pdir / "rect.jpg", "caption": cap})
         elif p["view"] == "bottom" and a.get("rect"):
-            path = _rect_top(p, top)
-            if path:
+            got = _rect_top(p, top)
+            if got:
+                path, pxmm = got
                 tag = ("entzerrt und gespiegelt auf Draufsicht-Koordinaten – Bohrungen von unten und oben liegen übereinander"
                        if a.get("bottom_align") else "entzerrt, nicht ausgerichtet, links-rechts gespiegelt")
-                cap = ai.scaled_caption(path, f"Foto {p['id']} (von unten), {tag}", vision.PX_PER_MM)
+                cap = ai.scaled_caption(path, f"Foto {p['id']} (von unten), {tag}", pxmm)
                 groups["bottom"].append({"photo_id": p["id"], "kind": "bottom", "path": path, "caption": cap})
         elif p["view"] in ("tilted", "overview"):
             path = _small(pdir)
@@ -245,7 +247,9 @@ def build_initial_message(project: dict, request_text: str, options: dict) -> li
     chk = bool(options.get("for_check"))
     table, rows = measurement_table(project["id"], options.get("part_id"))
     proc = PROCESSES.get(options.get("process"), options.get("process") or "nicht festgelegt")
-    fx = (project.get("ctrl_x") or 100) / 100
+    from core import matgen  # spaet: main.py setzt sys.path erst nach den App-Importen
+    fmt = project_format(project["id"])
+    fx = geom.factors(project, matgen.ctrl_ref(fmt), None)[0]
     parts = [f"# Auftrag: {options.get('name') or 'Bauteil'}"]
     if not chk:
         parts.append(f"Fertigung: {proc}" + (f", Material: {options['material']}" if options.get("material") else ""))
