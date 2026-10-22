@@ -2,6 +2,7 @@
 import { api, upload, h, clear, icon, num, parseNum, toast, fail, dialog, confirmDlg } from "./lib.js";
 import { S, ensureProject, reloadProject, projectPicker, go, onLeave, readOnlyMode } from "./app.js";
 import { isReadOnly } from "./rights.js";
+import { FORMAT_LABEL, isSmall, barClass, barWidth, qualityLegend, unsureText, lowContrastText, ctrlLabels, mixedText } from "./formats.js";
 
 export const VIEW_LABEL = { top: "Draufsicht", bottom: "Von unten", tilted: "Gekippt (Höhe)", gauge: "Höhenlehre", overview: "Übersicht" };
 export const STATUS = {
@@ -39,7 +40,8 @@ export default async function (main) {
   let selected = null, mode = "both";
   let fmt = "";
   const fmtSel = h("select", { class: "input", style: { minWidth: "200px" }, "aria-label": "Unterlage" },
-    h("option", { value: "" }, "Automatisch erkennen"), h("option", { value: "A4" }, "A4"), h("option", { value: "A3" }, "A3"));
+    h("option", { value: "" }, "Automatisch erkennen"), h("option", { value: "A4" }, "A4"), h("option", { value: "A3" }, "A3"),
+    h("option", { value: "K60H" }, FORMAT_LABEL.K60H), h("option", { value: "K60D" }, FORMAT_LABEL.K60D));
   fmtSel.addEventListener("change", async () => {
     fmt = fmtSel.value;
     const p = cur();
@@ -218,23 +220,25 @@ export default async function (main) {
     const figs = [];
     const fig = (src, alt, cap) => h("figure", {}, h("a", { href: src, target: "_blank", rel: "noopener" }, h("img", { src, alt })), h("figcaption", {}, cap));
     if (mode === "orig" || mode === "both") figs.push(fig(`/api/photos/${p.id}/overlay.jpg`, "Originalfoto mit erkannten Markern",
-      ["Original · ", h("strong", {}, `${(a.mat_ids || []).length} von 8 Markern`), " erkannt"]));
+      ["Original · ", h("strong", {}, `${(a.mat_ids || []).length} von ${p.n_markers || 8} Markern`), " erkannt"]));
     if ((mode === "rect" || mode === "both") && hasRect) figs.push(fig(`/api/photos/${p.id}/rect.jpg`, "Entzerrte Draufsicht",
-      ["Entzerrt · ", h("span", { class: "mono" }, "10 px/mm"), " · Ursprung unten links"]));
+      ["Entzerrt · ", h("span", { class: "mono" }, `${num(p.rect?.pxmm ?? 10, 0)} px/mm`), " · Ursprung unten links"]));
     if (mode === "gauge" && hasGauge) figs.push(fig(`/api/photos/${p.id}/gauge.jpg`, "Entzerrte Höhenlehre",
       [`Höhenlehre ${p.gauge.strip} · `, h("span", { class: "mono" }, `${num(p.gauge.rms_mm, 2)} mm`), " Restfehler · Nullpunkt = Tischebene"]));
 
     const loo = a.loo_mm || {};
+    const q = p.quality_mm || [0.5, 1];
     const bars = h("div", { class: "bars" }, Object.keys(loo).sort((x, y) => x - y).map(id => {
-      const v = loo[id], w = Math.min(100, v * 100);
-      return [h("span", { class: "mono" }, `ID ${id}`), h("span", { class: "bar" }, h("i", { class: v > 1 ? "err" : v > 0.5 ? "warn" : "", style: { width: `${w}%` } }), h("b")),
+      const v = loo[id], w = barWidth(v, q);
+      return [h("span", { class: "mono" }, `ID ${id}`), h("span", { class: "bar" }, h("i", { class: barClass(v, q), style: { width: `${w}%` } }), h("b")),
         h("span", { class: "mono", style: { textAlign: "right" } }, num(v, 2, false))];
     }));
     const [st, sk] = STATUS[p.status] || [p.status, "off"];
 
-    const gridH = S.project.grid_h || (p.format === "A3" ? 360 : 230);
-    const cx = h("input", { inputmode: "decimal", value: S.project.ctrl_x != null ? num(S.project.ctrl_x, 2) : "", placeholder: "100,0", "aria-label": "Kontrollmaß 0–100 gemessen" });
-    const cy = h("input", { inputmode: "decimal", value: S.project.ctrl_y != null ? num(S.project.ctrl_y, 2) : "", placeholder: num(gridH, 1, false), "aria-label": `Raster 0–${gridH} vertikal gemessen` });
+    const gridH = S.project.grid_h || (p.format === "A3" ? 360 : 230), ref = S.project.ctrl_ref || 100;
+    const L = ctrlLabels(ref, gridH, isSmall(S.project.format));
+    const cx = h("input", { inputmode: "decimal", value: S.project.ctrl_x != null ? num(S.project.ctrl_x, 2) : "", placeholder: L.xPlaceholder, "aria-label": L.xAria });
+    const cy = h("input", { inputmode: "decimal", value: S.project.ctrl_y != null ? num(S.project.ctrl_y, 2) : "", placeholder: num(gridH, 1, false), "aria-label": L.yAria });
     const fac = S.project.factors || [1, 1];
     const saveCtrl = async () => {
       const x = parseNum(cx.value), y = parseNum(cy.value);
@@ -251,14 +255,16 @@ export default async function (main) {
     clear(detail,
       h("div", { class: "card-head", style: { alignItems: "flex-start" } },
         h("div", {}, h("h2", { id: "det-h" }, `${p.filename} · ${VIEW_LABEL[p.view] || p.view}`),
-          h("span", { class: "small muted" }, [`${a.width} × ${a.height} px`, p.format ? `${p.format}${a.format_auto ? " (automatisch)" : ""}` : null,
+          h("span", { class: "small muted" }, [`${a.width} × ${a.height} px`, p.format ? `${FORMAT_LABEL[p.format] || p.format}${a.format_auto ? " (automatisch)" : ""}` : null,
             (a.mat_ids || []).length >= 4 ? `Homographie aus ${(a.mat_ids || []).length * 4} Ecken` : null].filter(Boolean).join(" · "))),
         h("div", { class: "seg", role: "group", "aria-label": "Ansicht" }, segBtn("orig", "Original"), hasRect ? segBtn("rect", "Entzerrt") : null,
           hasRect ? segBtn("both", "Beide") : null, hasGauge ? segBtn("gauge", "Höhenlehre") : null)),
       p.status === "nicht_auswertbar" ? h("div", { class: "note err" }, icon("warn"), h("span", {}, `Nur ${(a.mat_ids || []).length} Marker der Unterlage erkannt – mindestens 4 sind nötig. `,
         (a.missing_ids || []).length ? `Fehlend: ID ${a.missing_ids.join(", ")}. ` : "", "Foto mit allen Markern im Bild wiederholen.")) : null,
-      p.status === "unsicher" ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, "Restfehler über 1 mm. Unterlage liegt vermutlich nicht flach oder das Foto ist unscharf – besser wiederholen.")) : null,
-      p.low_contrast ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, "Geringer Kontrast zur Unterlage – Licht seitlich, Schatten vermeiden, bei Glas oder Klarsicht ein Blatt Papier unterlegen.")) : null,
+      p.status === "unsicher" ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, unsureText(q))) : null,
+      p.low_contrast ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, lowContrastText(p.format))) : null,
+      a.format_note ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, a.format_note)) : null,
+      p.view_note ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, p.view_note)) : null,
       p.view === "bottom" ? alignBox(p) : null,
       h("div", { class: `duo ${figs.length === 1 ? "one" : ""}` }, figs),
       h("div", { class: "grid2", style: { gap: "24px", alignItems: "start" } },
@@ -266,14 +272,16 @@ export default async function (main) {
           h("div", { class: "card-head" }, h("h3", {}, "Restfehler je Marker"),
             p.max_err != null ? h("span", { class: `badge ${sk}` }, `Max. ${num(p.max_err, 2)} mm · ${st}`) : h("span", { class: `badge ${sk}` }, st)),
           Object.keys(loo).length ? bars : h("p", { class: "hint" }, "Zu wenige Marker für eine Fehlerabschätzung."),
-          h("span", { class: "xs muted" }, "Skala 0–1 mm · Linie bei 0,5 mm = Grenze „gut“ · über 1 mm Foto wiederholen")),
+          h("span", { class: "xs muted" }, qualityLegend(q))),
         h("div", { style: { display: "flex", flexDirection: "column", gap: "12px" } },
           h("h3", {}, "Kontrollmaß vom Ausdruck"),
+          S.project.ctrl_stale ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, "Das eingetragene Kontrollmaß passt nicht zur Unterlage des ersten Fotos – bitte neu messen und eintragen. Bis dahin gilt Faktor 1.")) : null,
           h("div", { class: "ctrl" },
-            h("label", { class: "field" }, h("span", { class: "small", style: { fontWeight: 600 } }, "0–100 gemessen"), h("span", { class: "unit" }, cx, h("span", {}, "mm"))),
-            h("label", { class: "field" }, h("span", { class: "small", style: { fontWeight: 600 } }, `Raster 0–${gridH} vertikal`), h("span", { class: "unit" }, cy, h("span", {}, "mm")))),
+            h("label", { class: "field" }, h("span", { class: "small", style: { fontWeight: 600 } }, L.x), h("span", { class: "unit" }, cx, h("span", {}, "mm"))),
+            h("label", { class: "field" }, h("span", { class: "small", style: { fontWeight: 600 } }, L.y), h("span", { class: "unit" }, cy, h("span", {}, "mm")))),
           h("div", { class: "chips small" }, h("span", {}, "Faktor X ", h("strong", { class: "mono" }, num(fac[0], 4, false))),
             h("span", {}, "Faktor Y ", h("strong", { class: "mono" }, num(fac[1], 4, false)))),
+          S.project.mixed_formats ? h("div", { class: "note warn" }, icon("warn"), h("span", {}, mixedText(S.project.format))) : null,
           h("span", { class: "xs muted" }, "Gilt für alle Fotos dieses Projekts. Leer lassen = Faktor 1."))),
       h("div", { class: "chips", style: { justifyContent: "space-between" } },
         h("div", { class: "chips" },

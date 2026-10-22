@@ -6,6 +6,7 @@ import { VIEW_LABEL } from "./photos.js";
 import { createPartsLayer, partsPanel, partColor } from "./edges.js";
 import { groupText, r3, segDist } from "./geom.js";
 import { TOOL_KEYS, KEY_OF } from "./help.js";
+import { FORMAT_LABEL } from "./formats.js";
 
 const KIND = { length: "Strecke", height: "Höhe", diameter: "Durchmesser", radius: "Radius", angle: "Winkel", point: "Punkt" };
 const NEED = { length: 2, height: 2, diameter: 3, radius: 3, angle: 3, point: 1 };
@@ -347,7 +348,7 @@ export default async function (main) {
     setText(stFac, `Faktoren X ${num(f[0], 3, false)} · Y ${num(f[1], 3, false)}`);
     setText(stSnap, snapOn ? (cursor?.snapped ? "Kante gefangen" : "Kantenfang aktiv") : "Kantenfang aus");
     stSrc.hidden = !src;
-    if (src) setText(stSrc, `${src.photo.format || ""} · Restfehler ${num(src.photo.max_err, 2)} mm`);
+    if (src) setText(stSrc, `${FORMAT_LABEL[src.photo.format] || src.photo.format || ""} · Restfehler ${num(src.photo.max_err, 2)} mm`);
   }
 
   function evPos(e) { const r = stage.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
