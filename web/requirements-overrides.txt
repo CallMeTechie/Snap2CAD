@@ -1,5 +1,7 @@
 # Wird NACH requirements.txt mit "pip install --no-deps -r" installiert.
 # Grund: build123d 0.13 -> threejs-materials 1.2.4 verlangt pillow<12.3.0, Pillow 12.3.0 behebt aber
 # mehrere HIGH-Luecken (u. a. CVE-2026-59197, CVE-2026-59205). Snap2CAD nutzt die Material-Funktionen
-# von threejs-materials nicht; die Tests laufen mit 12.3.0. Entfernen, sobald threejs-materials die Grenze anhebt.
-pillow==12.3.0
+# von threejs-materials nicht; die Tests laufen mit 13.0.0. Entfernen, sobald threejs-materials die Grenze anhebt.
+# 13.0.0 behebt die Trivy-Befunde vom 22.10.2026 (u. a. CVE-2026-112393, CVE-2026-112404 bis -112406,
+# CVE-2026-112892 bis -112897, CVE-2026-112902).
+pillow==13.0.0

@@ -37,7 +37,7 @@ test("Texte ohne Markennamen", () => {
 
 test("Abschnitte und Kurzhilfe je Seite", () => {
   assert.deepEqual(SECTIONS.map(s => s[0]),
-    ["ablauf", "unterlage", "fotografieren", "fotos", "messen", "kanten", "cad", "bemassung", "teams", "tastatur", "probleme"]);
+    ["ablauf", "unterlage", "fotografieren", "kleinteile", "fotos", "messen", "kanten", "cad", "bemassung", "teams", "tastatur", "probleme"]);
   assert.deepEqual(groupsFor("/messen"), ["messen", "kanten", "ueberall"]);
   assert.deepEqual(groupsFor("/fotos"), ["fotos", "ueberall"]);
   assert.deepEqual(groupsFor("/cad/12"), ["modell", "ueberall"]);

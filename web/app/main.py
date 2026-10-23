@@ -199,17 +199,24 @@ def _photo_public(ph: dict, hints: dict | None = None) -> dict:
     a = db.jload(ph["analysis"], {}) or {}
     d = _photo_dir(ph["id"])
     has_edges = (d / "edges.json").is_file()
+    prof = matgen.PROFILES.get(ph["format"])
     return {"id": ph["id"], "project_id": ph["project_id"], "filename": ph["filename"], "view": ph["view"],
             "format": ph["format"], "status": ph["status"], "max_err": ph["max_err"], "created_at": ph["created_at"],
             "analysis": {k: a.get(k) for k in ("width", "height", "found_ids", "mat_ids", "missing_ids", "format_auto",
-                                               "rms_mm", "loo_mm", "max_err_mm")},
+                                               "rms_mm", "loo_mm", "max_err_mm", "format_note")},
             "gauge": ({k: a["gauge"].get(k) for k in ("strip", "ids", "rms_mm", "vlen_mm")} if a.get("gauge") else None),
             "rect": a.get("rect"), "gauge_rect": a.get("gauge_rect"),
             "files": [n[:-4] for n in ("orig.jpg", "overlay.jpg", "rect.jpg", "gauge.jpg", "thumb.jpg")
                       if (d / n).is_file()],
             "has_edges": has_edges,
             "edges_stale": hints is not None and has_edges and (a.get("edges_hints") or {}) != hints,
-            "contrast": a.get("contrast"), "low_contrast": a.get("contrast") is not None and a["contrast"] < 12,
+            "contrast": a.get("contrast"),
+            "low_contrast": (a.get("contrast") is not None and a["contrast"] < 12) or bool(
+                prof and prof["field"] != "grid" and ph["view"] in PLANAR and a.get("rect") and "outline_mm" in a
+                and a["outline_mm"] is None),
+            "quality_mm": list(prof["quality_mm"]) if prof else [0.5, 1.0],
+            "n_markers": len(prof["ids"]) if prof else 8,
+            "view_note": GAUGE_NOTE_K60 if ph["view"] == "gauge" and prof and not prof["gauge"] else None,
             "bottom_align": a.get("bottom_align") if ph["view"] == "bottom" else None,
             "align_note": a.get("align_note") if ph["view"] == "bottom" else None,
             "bottom_rot_user": a.get("bottom_rot_user")}
@@ -221,14 +228,21 @@ def _grid_h(fmt: str | None) -> float | None:
     return float(vision.spec(fmt)["grid_mm"][1])
 
 
-def _project_format(pid: int) -> str | None:
-    r = db.q1("SELECT format FROM photos WHERE project_id=? AND format IS NOT NULL ORDER BY id LIMIT 1", (pid,))
-    return r["format"] if r else None
+def _mixed_formats(pid: int) -> bool:
+    """Auswertbare Fotos auf verschiedenen Unterlagen (Druckformate; Kleinteile hell und dunkel zaehlen als eine)."""
+    rows = db.q("SELECT DISTINCT format FROM photos WHERE project_id=? AND format IS NOT NULL AND status != 'nicht_auswertbar'",
+                (pid,))
+    return len({matgen.print_format_of(r["format"]) for r in rows} - {None}) > 1
+
+
+GAUGE_NOTE_K60 = "Höhenlehre gibt es bei Kleinteilen nicht – Teil kippen und als ‚Gekippt (Höhe)‘ fotografieren"
+NO_OBJECT_K60 = ("Kein Objekt erkannt – andere Variante probieren (helles Teil auf das dunkle Blatt, dunkles Teil auf das "
+                 "helle Blatt) oder Teil von Hand zeichnen.")
 
 
 def _factors(project: dict) -> tuple[float, float]:
-    fmt = _project_format(project["id"])
-    return geom.factors(project, fmt, _grid_h(fmt))
+    fmt = parts.project_format(project["id"])
+    return geom.factors(project, matgen.ctrl_ref(fmt), _grid_h(fmt))
 
 
 def _meas_public(m: dict) -> dict:
@@ -714,23 +728,23 @@ def _pdf_bytes(fmt: str, pages: list[str], header: str) -> bytes:
     return buf.getvalue()
 
 
-def _pages(pages: str) -> list[str]:
-    p = [x for x in (pages or "").split(",") if x in matgen.PAGES]
-    return p or list(matgen.PAGES)
+def _pages(fmt: str, pages: str) -> list[str]:
+    allowed = matgen.PRINT_PAGES[fmt]
+    return [x for x in allowed if x in (pages or "").split(",")] or list(allowed)
 
 
 @app.get("/api/mat.pdf")
 def mat_pdf(format: str = "A4", pages: str = "", header: str = "", u: dict = Depends(auth.require_user)):
-    if format not in matgen.FORMATS:
-        raise HTTPException(400, "Format muss A4 oder A3 sein")
-    data = _pdf_bytes(format, _pages(pages), header[:60])
+    if format not in matgen.PRINT_FORMATS:
+        raise HTTPException(400, "Format muss A4, A3 oder K60 sein")
+    data = _pdf_bytes(format, _pages(format, pages), header[:60])
     return Response(data, media_type="application/pdf",
                     headers={"Content-Disposition": f'attachment; filename="Messunterlage_{format}.pdf"'})
 
 
 @app.get("/api/mat/preview.png")
 def mat_preview(format: str = "A4", page: int = 0, header: str = "", u: dict = Depends(auth.require_user)):
-    if format not in matgen.FORMATS or page not in (0, 1, 2):
+    if format not in matgen.PRINT_FORMATS or not 0 <= page < len(matgen.PRINT_PAGES[format]):
         raise HTTPException(400, "Ungültige Parameter")
     key = (format, page, header[:60])
     # pdfium ist nicht threadsicher -> Rendern komplett unter der Sperre
@@ -738,26 +752,28 @@ def mat_preview(format: str = "A4", page: int = 0, header: str = "", u: dict = D
         png = _preview_cache.get(key)
         if png is None:
             import pypdfium2 as pdfium
-            pdf = pdfium.PdfDocument(_pdf_bytes(format, list(matgen.PAGES), header[:60]))
+            pdf = pdfium.PdfDocument(_pdf_bytes(format, list(matgen.PRINT_PAGES[format]), header[:60]))
+            fresh = {}
             try:
                 for i in range(len(pdf)):
                     img = pdf[i].render(scale=110 / 72).to_pil()
                     b = io.BytesIO()
                     img.save(b, "PNG", optimize=True)
-                    if len(_preview_cache) > 30:
-                        _preview_cache.clear()
-                    _preview_cache[(format, i, header[:60])] = b.getvalue()
+                    fresh[(format, i, header[:60])] = b.getvalue()
             finally:
                 pdf.close()
-            png = _preview_cache[key]
+            if len(_preview_cache) + len(fresh) > 30:
+                _preview_cache.clear()
+            _preview_cache.update(fresh)
+            png = fresh[key]
     return Response(png, media_type="image/png", headers={"Cache-Control": "private, max-age=3600"})
 
 
 @app.get("/api/mat/layout")
 def mat_layout(format: str = "A4", u: dict = Depends(auth.require_user)):
-    if format not in matgen.FORMATS:
-        raise HTTPException(400, "Format muss A4 oder A3 sein")
-    return vision.spec(format)
+    if format not in matgen.PRINT_FORMATS:
+        raise HTTPException(400, "Format muss A4, A3 oder K60 sein")
+    return {f: vision.spec(f) for f in matgen.PRINT_FORMATS[format]} if format == "K60" else vision.spec(format)
 
 
 
@@ -770,9 +786,12 @@ def _project_public(p: dict, u: dict, detail: bool = False) -> dict:
     out["cad_check"] = check.public_check(p) if detail else None
     out["n_photos"] = db.q1("SELECT COUNT(*) n FROM photos WHERE project_id=?", (p["id"],))["n"]
     out["n_measurements"] = db.q1("SELECT COUNT(*) n FROM measurements WHERE project_id=? AND accepted=1", (p["id"],))["n"]
-    fmt = _project_format(p["id"])
+    fmt = parts.project_format(p["id"])
     out["format"] = fmt
     out["factors"] = _factors(p)
+    out["ctrl_ref"] = matgen.ctrl_ref(fmt)
+    out["mixed_formats"] = _mixed_formats(p["id"])
+    out["ctrl_stale"] = geom.ctrl_stale(p, matgen.ctrl_ref(fmt), _grid_h(fmt))
     if detail:
         hp = _hints(p)
         out["photos"] = [_photo_public(ph, hp) for ph in db.q("SELECT * FROM photos WHERE project_id=? ORDER BY id", (p["id"],))]
@@ -895,7 +914,8 @@ def project_patch(pid: int, body: ProjectPatch, u: dict = Depends(auth.require_u
     p = _own_project(pid, u)
     for k in ("ctrl_x", "ctrl_y"):
         v = getattr(body, k)
-        ref = 100.0 if k == "ctrl_x" else (_grid_h(_project_format(pid)) or 230.0)
+        fmt = parts.project_format(pid)
+        ref = matgen.ctrl_ref(fmt) if k == "ctrl_x" else (_grid_h(fmt) or 230.0)
         if v is not None and not (0.9 * ref <= v <= 1.1 * ref):
             raise HTTPException(400, f"Kontrollwert {v:g} mm ist unplausibel (erwartet um {ref:g} mm).")
     _finite(body.ctrl_x, "Kontrollwert"); _finite(body.ctrl_y, "Kontrollwert")  # noqa: E702
@@ -1040,7 +1060,7 @@ def _analyze_store(phid: int, img, fmt: str | None, view: str, hints: dict | Non
         rect = vision.rectify_mat(img, a["homography"], a["format"])
         (d / "rect.jpg").write_bytes(vision.encode_jpg(rect, 90))
         gw, gh = vision.spec(a["format"])["grid_mm"]
-        a["rect"] = {"pxmm": vision.PX_PER_MM, "w_mm": gw, "h_mm": gh, "w": rect.shape[1], "h": rect.shape[0]}
+        a["rect"] = {"pxmm": matgen.PROFILES[a["format"]]["pxmm"], "w_mm": gw, "h_mm": gh, "w": rect.shape[1], "h": rect.shape[0]}
     if a.get("gauge") and len(a["gauge"]["ids"]) >= 2:
         g, (x0, x1, y0, y1) = vision.rectify_gauge(img, a["gauge"])
         (d / "gauge.jpg").write_bytes(vision.encode_jpg(g, 90))
@@ -1189,6 +1209,14 @@ def photo_patch(phid: int, body: PhotoPatch, u: dict = Depends(auth.require_user
     if "bottom_align" in body.model_fields_set and new_view != "bottom":
         raise HTTPException(400, "Nur für Fotos der Ansicht „Von unten“")   # vor jeder Aenderung pruefen
     realign = False
+    fmt_change = body.format is not None and body.format != ph["format"]
+    if fmt_change:   # R3 vor jeder Aenderung pruefen: Erkennung haengt nicht von der Ansicht ab
+        img = vision.load_image((_photo_dir(phid) / "orig.jpg").read_bytes())
+        old_a = db.jload(ph["analysis"], {}) or {}
+        cands = vision.pick_candidates(vision.detect(img), body.format)[0] if body.format in matgen.FORMATS else None
+        if cands is not None and old_a.get("homography") and not cands:   # R3: entzerrtes Foto bleibt, wie es ist
+            raise HTTPException(400, f"Auf diesem Foto sind keine Marker für {matgen.PROFILES[body.format]['label']} "
+                                     "zu sehen – Format bleibt.")
     if body.view in VIEWS and body.view != ph["view"]:
         with db.atomic():
             db.ex("UPDATE photos SET view=? WHERE id=?", (body.view, phid))
@@ -1204,21 +1232,21 @@ def photo_patch(phid: int, body: PhotoPatch, u: dict = Depends(auth.require_user
             _align_photo(db.q1("SELECT * FROM photos WHERE id=?", (phid,)), None)
         ph = db.q1("SELECT * FROM photos WHERE id=?", (phid,))
         _refresh(p)   # Auto-Masse bekommen die neue Ansicht (_refresh ist selbst atomar)
-    if body.format is not None and body.format != ph["format"]:
-        img = vision.load_image((_photo_dir(phid) / "orig.jpg").read_bytes())
-        a = _analyze_store(phid, img, body.format if body.format in matgen.FORMATS else None, ph["view"],
-                           _hints(p))
-        with db.atomic():
-            old = db.jload(db.q1("SELECT analysis FROM photos WHERE id=?", (phid,))["analysis"], {}) or {}
-            if old.get("bottom_rot_user") is not None:
-                a["bottom_rot_user"] = old["bottom_rot_user"]   # Handwahl ueberlebt den Formatwechsel
-            db.ex("UPDATE photos SET format=?, status=?, max_err=?, analysis=? WHERE id=?",
-                  (a.get("format"), a["status"], a.get("max_err_mm"), db.jdump(a), phid))
-            parts.delete_photo_parts(phid)
-            _refresh(p)
-            for n in ("edges.json", "edges_ki.jpg"):  # in der Transaktion: wie photo_edges beim Schreiben
-                (_photo_dir(phid) / n).unlink(missing_ok=True)
-        realign = realign or ph["view"] in PLANAR
+    if fmt_change:
+        if cands != [ph["format"]]:   # Ergebnis waere dasselbe Format (F4-Schwester): nicht neu auswerten
+            a = _analyze_store(phid, img, body.format if body.format in matgen.FORMATS else None, ph["view"],
+                               _hints(p))
+            with db.atomic():
+                old = db.jload(db.q1("SELECT analysis FROM photos WHERE id=?", (phid,))["analysis"], {}) or {}
+                if old.get("bottom_rot_user") is not None:
+                    a["bottom_rot_user"] = old["bottom_rot_user"]   # Handwahl ueberlebt den Formatwechsel
+                db.ex("UPDATE photos SET format=?, status=?, max_err=?, analysis=? WHERE id=?",
+                      (a.get("format"), a["status"], a.get("max_err_mm"), db.jdump(a), phid))
+                parts.delete_photo_parts(phid)
+                _refresh(p)
+                for n in ("edges.json", "edges_ki.jpg"):  # in der Transaktion: wie photo_edges beim Schreiben
+                    (_photo_dir(phid) / n).unlink(missing_ok=True)
+            realign = realign or ph["view"] in PLANAR
     if "bottom_align" in body.model_fields_set:
         with db.atomic():
             a = db.jload(db.q1("SELECT analysis FROM photos WHERE id=?", (phid,))["analysis"], {}) or {}
@@ -1255,9 +1283,10 @@ def photo_align_jpg(phid: int, u: dict = Depends(auth.require_user)):
     if ph["view"] != "bottom" or img is None or not top:
         raise HTTPException(404, "Keine Ausrichtung vorhanden")
     at = db.jload(top["analysis"], {}) or {}
-    out = vision.bottom_warp(img, a, at, ALIGN_PXMM)
+    pxo = ALIGN_PXMM / matgen.edge_scale(top["format"])
+    out = vision.bottom_warp(img, a, at, pxo)
     own = parts.to_top(ph, a["outline_mm"]) if a.get("outline_mm") else []
-    vision.draw_outlines(out, [at.get("outline_mm"), own], [(12, 65, 194), (178, 60, 20)], ALIGN_PXMM, at["rect"]["h_mm"])
+    vision.draw_outlines(out, [at.get("outline_mm"), own], [(12, 65, 194), (178, 60, 20)], pxo, at["rect"]["h_mm"])
     return Response(vision.encode_jpg(out, 85), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
@@ -1294,10 +1323,13 @@ def photo_edges(phid: int, body: EdgesIn, request: Request, u: dict = Depends(au
     finally:
         _detect_lock.release()
     if not res["outlines"]:
-        raise HTTPException(422, "Kein Objekt erkannt – Teil von Hand zeichnen.")
+        raise HTTPException(422, NO_OBJECT_K60 if matgen.edge_scale(ph["format"]) != 1.0
+                            else "Kein Objekt erkannt – Teil von Hand zeichnen.")
+
+    mg = _margin_mm(ph)
 
     def inside(poly):
-        return all(-10 <= q[0] <= rect["w_mm"] + 10 and -10 <= q[1] <= rect["h_mm"] + 10 for q in poly)
+        return all(-mg <= q[0] <= rect["w_mm"] + mg and -mg <= q[1] <= rect["h_mm"] + mg for q in poly)
     notice, detected = "", []
     if body.use_ai and settings.ai_enabled():
         if u["role"] != "admin" and _ai_uses_today(u) >= AI_DAILY_LIMIT:
@@ -1576,6 +1608,11 @@ class PartPatch(BaseModel):
     reset_scale: bool = False
 
 
+def _margin_mm(photo: dict) -> float:
+    """Spielraum fuer Eckpunkte ausserhalb des Feldes: 10 mm · k (A4/A3 10 mm, Kleinteile 2,5 mm)."""
+    return 10.0 * matgen.edge_scale(photo.get("format"))
+
+
 def _polygon(pts: list, photo: dict) -> list:
     import math
     a = db.jload(photo["analysis"], {}) or {}
@@ -1584,9 +1621,10 @@ def _polygon(pts: list, photo: dict) -> list:
         raise HTTPException(400, "Für dieses Foto gibt es keine entzerrte Draufsicht.")
     if not 3 <= len(pts) <= 64:
         raise HTTPException(400, "Ein Teil braucht 3 bis 64 Eckpunkte.")
+    mg = _margin_mm(photo)
     for q in pts:
         if len(q) != 2 or not all(math.isfinite(v) for v in q) \
-                or not (-10 <= q[0] <= r["w_mm"] + 10 and -10 <= q[1] <= r["h_mm"] + 10):
+                or not (-mg <= q[0] <= r["w_mm"] + mg and -mg <= q[1] <= r["h_mm"] + mg):
             raise HTTPException(400, "Eckpunkt außerhalb der Messfläche")
     return [[float(q[0]), float(q[1])] for q in pts]
 
@@ -1702,7 +1740,8 @@ def meas_suggest(pid: int, body: SuggestIn, request: Request, u: dict = Depends(
         if used_photo is None and ph["view"] == "top" and (d / "rect.jpg").is_file():
             used_photo = ph
             content += ai.image_ref(d / "rect.jpg", ai.scaled_caption(
-                d / "rect.jpg", f"Draufsicht (Foto {ph['id']}), Ansicht \"top\"", vision.PX_PER_MM))
+                d / "rect.jpg", f"Draufsicht (Foto {ph['id']}), Ansicht \"top\"",
+                vision.rect_pxmm(db.jload(ph["analysis"], {}))))
             n_img += 1
         if (d / "gauge.jpg").is_file() and n_img < 3:
             content += ai.image_ref(d / "gauge.jpg", ai.scaled_caption(

@@ -19,13 +19,14 @@
 |---|---|
 | [`pdf/Messunterlage_A4.pdf`](pdf/Messunterlage_A4.pdf) | Messfeld 190 × 230 mm, Höhenlehre bis 220 mm, Anleitung |
 | [`pdf/Messunterlage_A3.pdf`](pdf/Messunterlage_A3.pdf) | Messfeld 270 × 360 mm, Höhenlehre bis 340 mm, Anleitung |
+| [`pdf/Messunterlage_K60.pdf`](pdf/Messunterlage_K60.pdf) | Kleinteile: Feld 60 × 80 mm ohne Raster, Blatt hell und Blatt dunkel, Anleitung |
 | [`PROMPT.md`](PROMPT.md) | Prompt für KI-Sessions: Vermessung → Maßtabelle → CAD → STEP/STL |
 | [`tools/check_photo.py`](tools/check_photo.py) | Prüft ein Foto (Marker, Restfehler) und erzeugt eine maßstäbliche Draufsicht |
 | [`generator/make_mat.py`](generator/make_mat.py) | Erzeugt die PDFs neu, z. B. nach eigenen Anpassungen |
-| [`docs/marker_layout.json`](docs/marker_layout.json) | Maschinenlesbare Markerpositionen für beide Formate |
+| [`docs/marker_layout.json`](docs/marker_layout.json) | Maschinenlesbare Markerpositionen für alle Formate |
 | [`web/`](web/), [`Dockerfile`](Dockerfile), [`docker-compose.yml`](docker-compose.yml) | Web-App: Unterlage erzeugen, Fotos prüfen, im Browser messen, CAD mit Claude ([siehe unten](#web-app-docker)) |
 
-Jedes PDF hat drei Seiten: Messunterlage, Höhenlehre zum Ausschneiden und eine Kurzanleitung.
+A4 und A3 haben drei Seiten (Messunterlage, Höhenlehre zum Ausschneiden, Kurzanleitung), Kleinteile ebenfalls drei (Blatt hell, Blatt dunkel, Anleitung).
 
 ## So funktioniert's
 
@@ -37,7 +38,11 @@ Im 3D-Viewer eines Auftrags stehen die Maße des Modells als Bemaßungslinien, g
 
 Jedes Konto hat eine private Projektbibliothek; Teams teilen zusätzlich eine gemeinsame. Wer ein Team gründet, wird Leiter und lädt andere über ihren Benutzernamen ein (Rollen Leiter, Mitglied, Lesend; die Eingeladenen nehmen unter „Teams“ an). Projekte kommen durch Anlegen im Team, Verschieben oder Kopieren hinein; eine Kopie nimmt Fotos, Maße, Teile, gemerkte Werte und von jedem CAD-Auftrag die aktuelle gültige Version mit. CAD-Läufe zählen beim Benutzer, der sie auslöst. Der Administrator verwaltet Teams im Reiter „Teams“ der Benutzerverwaltung, sieht deren Inhalte aber nur als Mitglied.
 
+**Kleinteile:** Für Teile von wenigen Millimetern bis etwa 50 mm gibt es die Unterlage „Kleinteile“ (Feld 60 × 80 mm, Blatt hell und Blatt dunkel, Marker-IDs 20–27 bzw. 30–37). Snap2CAD erkennt das Blatt an den Markern, entzerrt mit 30 px/mm und skaliert die Kantenerkennung entsprechend; Kontrollmaß 50 mm. Fotografieren mit 2×/3×-Zoom aus 25–30 cm, kein Makro.
+
 ## Schnellstart
+
+Der Schnellstart beschreibt A4/A3; für Kleinteile gelten die Angaben im Absatz „Kleinteile“ (50-mm-Kontrollmaß, 25–30 cm, keine Höhenlehre, 30 px/mm).
 
 1. **Drucken** mit *100 % / Tatsächliche Größe*. Nicht „An Seite anpassen“.
 2. **Kontrollmaß prüfen**: Die 100-mm-Skala unten links mit einem Stahllineal nachmessen und den Wert ins Feld unten rechts schreiben. Steht er mit auf dem Foto, wird eine Abweichung des Druckers herausgerechnet.
@@ -50,7 +55,7 @@ pip install -r requirements.txt
 python tools/check_photo.py foto.jpg            # Format A4/A3 wird erkannt, sonst --size A4
 ```
 
-Das Skript meldet die erkannten Marker und den Restfehler je Marker und speichert `foto_entzerrt.jpg` mit 10 px/mm. Ursprung ist die untere linke Rasterecke. In dieser Draufsicht entspricht jeder Pixelabstand direkt einem Maß in mm. Ist eine Höhenlehre im Bild, entsteht zusätzlich `foto_entzerrt_hoehenlehre.jpg` (x = Mitte des Streifens, y = Höhe über dem Tisch).
+Das Skript meldet die erkannten Marker und den Restfehler je Marker und speichert `foto_entzerrt.jpg` mit dem Maßstab des Formats (A4/A3 10 px/mm, Kleinteile 30 px/mm). Ursprung ist die untere linke Rasterecke. In dieser Draufsicht entspricht jeder Pixelabstand direkt einem Maß in mm. Ist eine Höhenlehre im Bild, entsteht zusätzlich `foto_entzerrt_hoehenlehre.jpg` (x = Mitte des Streifens, y = Höhe über dem Tisch).
 
 ## Genauigkeit
 

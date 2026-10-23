@@ -39,11 +39,26 @@ def compute(kind: str, points: list, fx: float = 1.0, fy: float = 1.0) -> float 
     return None
 
 
-def factors(project: dict, fmt: str | None, grid_h: float | None) -> tuple[float, float]:
-    fx = (project.get("ctrl_x") or 100.0) / 100.0
+def factors(project: dict, ctrl_ref: float | None, grid_h: float | None) -> tuple[float, float]:
+    """Korrekturfaktoren aus dem Kontrollmass: ctrl_ref = waagerechter Bezug des Profils (A4/A3 100, Kleinteile 50).
+    Gespeicherte Werte ausserhalb ±10 % des aktuellen Bezugs (Unterlage gewechselt) gelten nicht: Faktor 1 (Spec §7 F5)."""
+    ref = ctrl_ref or 100.0
+    cx, cy = project.get("ctrl_x"), project.get("ctrl_y")
+    if cx and not 0.9 * ref <= cx <= 1.1 * ref:
+        cx = None
+    if cy and grid_h and not 0.9 * grid_h <= cy <= 1.1 * grid_h:
+        cy = None
+    fx = (cx or ref) / ref
     fy = 1.0
-    if project.get("ctrl_y") and grid_h:
-        fy = project["ctrl_y"] / grid_h
-    elif project.get("ctrl_x"):
+    if cy and grid_h:
+        fy = cy / grid_h
+    elif cx:
         fy = fx
     return fx, fy
+
+
+def ctrl_stale(project: dict, ctrl_ref: float | None, grid_h: float | None) -> bool:
+    """Ein gespeichertes Kontrollmass passt nicht zum aktuellen Bezug (wird von factors ignoriert)."""
+    ref = ctrl_ref or 100.0
+    cx, cy = project.get("ctrl_x"), project.get("ctrl_y")
+    return bool((cx and not 0.9 * ref <= cx <= 1.1 * ref) or (cy and grid_h and not 0.9 * grid_h <= cy <= 1.1 * grid_h))

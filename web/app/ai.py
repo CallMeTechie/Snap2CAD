@@ -27,7 +27,7 @@ Eingaben
   Teil (T1, T2 …), Passung und Kennzeichnung „kritisch“. Ein Messschieber-Wert hat immer Vorrang vor dem Fotowert;
   das Nennmaß ist nur ein Vorschlag, Regel 2 gilt weiter.
 - Entzerrte Fotos der Messunterlage (Draufsicht) und ggf. der Höhenlehre (Seitenansicht). Der Maßstab steht
-  jeweils dabei. Ursprung der Draufsicht: linke untere Ecke des Rasters, x nach rechts, y nach oben.
+  jeweils dabei. Ursprung der Draufsicht: linke untere Ecke des Rasters bzw. Messfelds, x nach rechts, y nach oben.
 - Ggf. eine Unteransicht (entzerrt, gespiegelt auf Draufsicht-Koordinaten: Bohrungen von unten und oben liegen
   übereinander) und Schrägansichten ohne Maßstab (nur für Form, Seitenflächen und Höhenverhältnis).
 - Eine Zeile „Fotografiertes Original“ (Farbe, Material, Transparenz, Oberfläche des Teils – nicht das

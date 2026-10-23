@@ -97,7 +97,7 @@ def auto_label(part_label, key):
     return f"{part_label} {auto_name(key)}"[:80]
 
 
-def auto_dims(data, fx=1.0, fy=1.0):
+def auto_dims(data, fx=1.0, fy=1.0, edge_k=1.0):
     """Auto-Masse eines Teils (Spec §3). raw = Fotowert ohne Teil-Massstab, mit Kontrollmass-Faktoren."""
     poly, ids, hidden = data["polygon"], data["edge_ids"], set(data.get("hidden") or [])
     E = edges_of(poly)
@@ -112,7 +112,7 @@ def auto_dims(data, fx=1.0, fy=1.0):
             picks.append(use)
             if not vis:
                 warns.append("verdeckt, geschätzt")
-            elif len(vis) == 2 and abs(lens[i] - lens[j]) > EDGE_DIFF_MM:
+            elif len(vis) == 2 and abs(lens[i] - lens[j]) > EDGE_DIFF_MM * edge_k:
                 warns.append("gegenüberliegende Kanten ungleich – Kante prüfen")
             else:
                 warns.append(None)
@@ -139,7 +139,7 @@ def _same(p, q, tol=1e-3):
     return abs(p[0] - q[0]) <= tol and abs(p[1] - q[1]) <= tol
 
 
-def update_edge_ids(old_poly, old_ids, new_poly, next_id):
+def update_edge_ids(old_poly, old_ids, new_poly, next_id, edge_k=1.0):
     """Kanten-Kennungen nach einer Aenderung durch den Nutzer (Spec §3). Rueckgabe (ids, next_id)."""
     n, m = len(old_poly), len(new_poly)
     if m == n:
@@ -173,11 +173,11 @@ def update_edge_ids(old_poly, old_ids, new_poly, next_id):
                     else:
                         ids.append(old_ids[j if j < k else j + 1])
                 return ids, next_id
-    return transfer_ids(old_poly, old_ids, new_poly, next_id)
+    return transfer_ids(old_poly, old_ids, new_poly, next_id, edge_k)
 
 
-def transfer_ids(old_poly, old_ids, new_poly, next_id):
-    """Neue Kanten uebernehmen die Kennung der naechsten alten Kante (Winkel < 6°, Mitte < 3 mm)."""
+def transfer_ids(old_poly, old_ids, new_poly, next_id, edge_k=1.0):
+    """Neue Kanten uebernehmen die Kennung der naechsten alten Kante (Winkel < 6°, Mitte < 3 mm · edge_k)."""
     old = [(_angle(a, b), _mid((a, b)), eid) for (a, b), eid in zip(edges_of(old_poly), old_ids, strict=True)]
     used, ids = set(), []
     for a, b in edges_of(new_poly):
@@ -187,7 +187,7 @@ def transfer_ids(old_poly, old_ids, new_poly, next_id):
             if eid in used or _angle_diff(ang, oa) >= 6:
                 continue
             d = math.hypot(mid[0] - om[0], mid[1] - om[1])
-            if d < 3 and (best is None or d < best[0]):
+            if d < 3 * edge_k and (best is None or d < best[0]):
                 best = (d, eid)
         if best:
             used.add(best[1])
@@ -198,8 +198,8 @@ def transfer_ids(old_poly, old_ids, new_poly, next_id):
     return ids, next_id
 
 
-def transfer_holes(old_holes, new_holes, next_id):
-    """Bohrungen behalten ihre Kennung bei Mittelpunktabstand <= 2 mm."""
+def transfer_holes(old_holes, new_holes, next_id, edge_k=1.0):
+    """Bohrungen behalten ihre Kennung bei Mittelpunktabstand <= 2 mm · edge_k."""
     used, out = set(), []
     for h in new_holes:
         best = None
@@ -207,7 +207,7 @@ def transfer_holes(old_holes, new_holes, next_id):
             if o["id"] in used:
                 continue
             d = math.hypot(h["c"][0] - o["c"][0], h["c"][1] - o["c"][1])
-            if d <= 2 and (best is None or d < best[0]):
+            if d <= 2 * edge_k and (best is None or d < best[0]):
                 best = (d, o["id"])
         if best:
             used.add(best[1])
@@ -248,7 +248,7 @@ def _intersect(l1, l2):
     return (p1[0] + d1[0] * t, p1[1] + d1[1] * t)
 
 
-def snap_polygon(poly, segments, preferred=()):
+def snap_polygon(poly, segments, preferred=(), edge_k=1.0):
     """KI-Polygon auf OpenCV-Kandidaten einrasten (Spec §2). Rueckgabe (polygon, hidden-Kennzeichen je Kante)."""
     pref = set(preferred)
     groups = ([s for s in segments if s["id"] in pref], [s for s in segments if s["id"] not in pref])
@@ -265,7 +265,7 @@ def snap_polygon(poly, segments, preferred=()):
                 if _seg_len(*seg) < 1e-6 or _angle_diff(_angle(*seg), ang) >= 6:
                     continue
                 dist = (_dist_to_line(seg[0], a, b) + _dist_to_line(seg[1], a, b)) / 2
-                if dist >= 3 or _overlap(seg, a, b) < 0.3:
+                if dist >= 3 * edge_k or _overlap(seg, a, b) < 0.3:
                     continue
                 if best is None or dist < best[0]:
                     best = (dist, seg)
@@ -276,13 +276,13 @@ def snap_polygon(poly, segments, preferred=()):
     out = []
     for i, v in enumerate(poly):
         q = _intersect(lines[i - 1], lines[i]) if lines[i - 1] and lines[i] else None
-        if q is None or math.hypot(q[0] - v[0], q[1] - v[1]) > 8:
+        if q is None or math.hypot(q[0] - v[0], q[1] - v[1]) > 8 * edge_k:
             q = v
         out.append([round(float(q[0]), 3), round(float(q[1]), 3)])
     return out, hidden
 
 
-def assign(points, parts):
+def assign(points, parts, edge_k=1.0):
     """Teil fuer eine Messung: alle Punkte in oder an dem Teil, meiste Randpunkte, dann kleinste Flaeche."""
     best = None
     pts = [Point(p) for p in points]
@@ -290,10 +290,10 @@ def assign(points, parts):
         P = _valid(poly)
         if P.is_empty or P.area <= 0:
             continue
-        zone = P.buffer(ON_EDGE_MM)
+        zone = P.buffer(ON_EDGE_MM * edge_k)
         if not all(zone.covers(q) for q in pts):
             continue
-        near = sum(1 for q in pts if P.boundary.distance(q) <= ON_EDGE_MM)
+        near = sum(1 for q in pts if P.boundary.distance(q) <= ON_EDGE_MM * edge_k)
         key = (-near, P.area)
         if best is None or key < best[0]:
             best = (key, pid)
@@ -391,14 +391,28 @@ def link_bottom(project_id):
             db.ex("UPDATE parts SET data=? WHERE id=?", (db.jdump(d), r["id"]))
 
 
+def edge_scale(fmt):
+    """Kantenmassstab k des Messformats (Spec Kleinteile §3a); 1.0 ohne bekanntes Format."""
+    from core import matgen  # spaet: main.py setzt sys.path erst nach den App-Importen
+    return matgen.edge_scale(fmt)
+
+
 def default_unc(photo, view):
-    """Standard-Unsicherheit einer Fotomessung (vorher main._default_unc)."""
+    """Standard-Unsicherheit einer Fotomessung (vorher main._default_unc); Zuschlaege mit k des Fotoformats."""
     if not photo:
         return 0.5
     a = db.jload(photo["analysis"], {}) or {}
     if view == "gauge" and a.get("gauge"):
         return round((a["gauge"].get("rms_mm") or 0.3) * 2 + 0.3, 2)
-    return round((photo["max_err"] or 0.3) + 0.2, 2)
+    ek = edge_scale(photo["format"])
+    return round((photo["max_err"] or 0.3 * ek) + 0.2 * ek, 2)
+
+
+def project_format(project_id):
+    """Format des ersten auswertbaren Fotos, sonst des ersten mit Format (Bezug fuer Kontrollmass und Rasterhoehe)."""
+    r = db.q1("SELECT format FROM photos WHERE project_id=? AND format IS NOT NULL "
+              "ORDER BY (status = 'nicht_auswertbar'), id LIMIT 1", (project_id,))
+    return r["format"] if r else None
 
 
 def _data(row):
@@ -425,20 +439,21 @@ def create_part(project_id, photo_id, label, role, polygon, *, hidden_flags=None
 def set_polygon(part, polygon, *, hidden_flags=None, holes=None, redetect=False):
     """Neues Polygon fuer ein Teil. redetect=True: aus einer neuen Erkennung (Kennungen uebertragen)."""
     d = _data(part)
+    ek = edge_scale((db.q1("SELECT format FROM photos WHERE id=?", (part["photo_id"],)) or {}).get("format"))
     if redetect:
         poly, flags = _ccw(polygon, hidden_flags)
-        ids, nxt = transfer_ids(d["polygon"], d["edge_ids"], poly, d["next_edge_id"])
+        ids, nxt = transfer_ids(d["polygon"], d["edge_ids"], poly, d["next_edge_id"], ek)
         d["hidden"] = [e for e, f in zip(ids, flags or [False] * len(ids), strict=True) if f]
     else:
         poly = [[round(float(x), 3), round(float(y), 3)] for x, y in polygon]
-        ids, nxt = update_edge_ids(d["polygon"], d["edge_ids"], poly, d["next_edge_id"])
+        ids, nxt = update_edge_ids(d["polygon"], d["edge_ids"], poly, d["next_edge_id"], ek)
         old = {eid: e for e, eid in zip(edges_of(d["polygon"]), d["edge_ids"], strict=True)}
         moved = {eid for e, eid in zip(edges_of(poly), ids, strict=True)
                  if eid in old and not (_same(e[0], old[eid][0]) and _same(e[1], old[eid][1]))}
         d["hidden"] = [e for e in d.get("hidden") or [] if e in ids and e not in moved]  # vom Nutzer gesetzt = sichtbar
     d.update(polygon=poly, edge_ids=ids, next_edge_id=nxt)
     if holes is not None:
-        d["holes"], d["next_hole_id"] = transfer_holes(d.get("holes") or [], holes, d.get("next_hole_id", 1))
+        d["holes"], d["next_hole_id"] = transfer_holes(d.get("holes") or [], holes, d.get("next_hole_id", 1), ek)
     db.ex("UPDATE parts SET data=? WHERE id=?", (db.jdump(d), part["id"]))
 
 
@@ -504,7 +519,8 @@ def _sync_auto(part, photo, fx, fy):
     """Auto-Masse eines Teils an sein Polygon anpassen (Spec §3)."""
     d = _data(part)
     view = "bottom" if photo and photo["view"] == "bottom" else "top"
-    want = {x["key"]: x for x in auto_dims(d, fx, fy) if x["key"] not in (d.get("dropped") or [])}
+    ek = edge_scale(photo["format"]) if photo else 1.0
+    want = {x["key"]: x for x in auto_dims(d, fx, fy, ek) if x["key"] not in (d.get("dropped") or [])}
     have = {}
     for m in db.q("SELECT * FROM measurements WHERE part_id=? AND source='auto' ORDER BY id", (part["id"],)):
         k = _data(m).get("auto_key")
@@ -560,7 +576,8 @@ def refresh(project, fx, fy):
         new = None
         if m["source"] != "manual" and d.get("view", "top") in ("top", "bottom") and m["kind"] != "height" and d.get("points") \
                 and m["photo_id"] in by_photo:
-            new = assign(d["points"], by_photo[m["photo_id"]])
+            new = assign(d["points"], by_photo[m["photo_id"]],
+                         edge_scale(photos[m["photo_id"]]["format"]) if m["photo_id"] in photos else 1.0)
         if new != m["part_id"]:
             db.ex("UPDATE measurements SET part_id=? WHERE id=?", (new, m["id"]))
             m["part_id"] = new
@@ -695,9 +712,10 @@ def ai_parts(photo_dir, res, material_text=""):
         if material_text else "")})
     text, _ = ai.call(ai.PARTS_SYSTEM, [{"role": "user", "content": content}], max_tokens=4000)
     out = []
+    ek = res.get("edge_scale", 1.0)
     for it in ai.parse_parts(text):
-        poly, hidden = snap_polygon(it["polygon"], res["segments"], it["edges"])
-        if not plausible(poly, res["outlines"]):
+        poly, hidden = snap_polygon(it["polygon"], res["segments"], it["edges"], ek)
+        if not plausible(poly, res["outlines"], min_area=25.0 * ek ** 2):
             continue
         out.append({"label": it["label"], "role": it["role"], "polygon": poly, "hidden": hidden, "note": it["note"],
                     "source": "ki"})

@@ -30,6 +30,11 @@ def test_not_enough_points():
 
 
 def test_factors():
-    assert geom.factors({"ctrl_x": 99.5}, "A4", 230) == (0.995, 0.995)
-    fx, fy = geom.factors({"ctrl_x": 100.2, "ctrl_y": 229.0}, "A4", 230)
+    assert geom.factors({"ctrl_x": 99.5}, 100.0, 230) == (0.995, 0.995)
+    fx, fy = geom.factors({"ctrl_x": 100.2, "ctrl_y": 229.0}, 100.0, 230)
     assert fx == pytest.approx(1.002) and fy == pytest.approx(229 / 230)
+    assert geom.factors({"ctrl_x": 49.8}, 50.0, 80) == (pytest.approx(0.996), pytest.approx(0.996))
+    assert geom.factors({"ctrl_x": 99.8}, 50.0, 80) == (1.0, 1.0)
+    assert geom.factors({"ctrl_x": 49.9, "ctrl_y": 229.0}, 50.0, 80) == (pytest.approx(0.998), pytest.approx(0.998))
+    assert geom.ctrl_stale({"ctrl_x": 99.8}, 50.0, 80) and not geom.ctrl_stale({"ctrl_x": 49.8}, 50.0, 80) \
+        and not geom.ctrl_stale({}, 100.0, 230)
